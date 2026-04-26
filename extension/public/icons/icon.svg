@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <rect width="128" height="128" fill="#ffffff"/>
+
+  <!-- five horizontal lines, evenly spaced, suggest a list/timeline -->
+  <g stroke="#000000" stroke-width="6" stroke-linecap="round">
+    <line x1="14" y1="22" x2="114" y2="22"/>
+    <line x1="14" y1="43" x2="114" y2="43"/>
+    <line x1="14" y1="64" x2="114" y2="64"/>
+    <line x1="14" y1="85" x2="114" y2="85"/>
+    <line x1="14" y1="106" x2="114" y2="106"/>
+  </g>
+
+  <!-- play triangle: solid black, with a thin white outline so it reads
+       cleanly against the lines behind it -->
+  <polygon points="46,28 46,100 102,64"
+           fill="#000000"
+           stroke="#ffffff"
+           stroke-width="4"
+           stroke-linejoin="round"/>
+</svg>
