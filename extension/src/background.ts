@@ -1,6 +1,7 @@
 import { classifyUrl } from "./lib/detector";
 import { addOrUpdateVideo, clearTab, getDetectedVideos } from "./lib/storage-session";
 import { VIDEO_REQUEST_TYPES } from "./lib/constants";
+import { inferFilename } from "./lib/filename";
 import type { DetectedVideo, VideoKind } from "./types";
 
 type TabInfo = { pageUrl?: string; pageTitle?: string };
@@ -159,4 +160,105 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === "loading" && changeInfo.url) {
     void clearTab(tabId).then(() => updateBadge(tabId));
   }
+});
+
+type DownloadStatus = "in_progress" | "complete" | "interrupted";
+
+type DownloadJob = {
+  videoId: string;
+  tabId: number;
+  downloadId: number;
+  kind: VideoKind;
+  startedAt: number;
+  status: DownloadStatus;
+  errorMessage?: string;
+};
+
+const DOWNLOAD_JOBS_KEY = "download-jobs";
+
+const DIRECT_DOWNLOAD_FAILURE_MESSAGE =
+  "The file URL was detected, but Chrome could not download it. The link may have expired, or the server requires headers, cookies, or a referrer that this extension does not store.";
+
+async function getDownloadJobs(): Promise<Record<string, DownloadJob>> {
+  const result = await chrome.storage.session.get(DOWNLOAD_JOBS_KEY);
+  const jobs = result[DOWNLOAD_JOBS_KEY];
+  return jobs && typeof jobs === "object" ? (jobs as Record<string, DownloadJob>) : {};
+}
+
+async function setDownloadJob(job: DownloadJob): Promise<void> {
+  const jobs = await getDownloadJobs();
+  jobs[String(job.downloadId)] = job;
+  await chrome.storage.session.set({ [DOWNLOAD_JOBS_KEY]: jobs });
+}
+
+async function findVideo(tabId: number, videoId: string): Promise<DetectedVideo | undefined> {
+  const list = await getDetectedVideos(tabId);
+  return list.find((v) => v.id === videoId);
+}
+
+type DownloadRequest = { type: "download"; tabId: number; videoId: string };
+type DownloadResponse =
+  | { ok: true; downloadId: number }
+  | { ok: false; error: string };
+
+async function handleDownloadRequest(req: DownloadRequest): Promise<DownloadResponse> {
+  const video = await findVideo(req.tabId, req.videoId);
+  if (!video) return { ok: false, error: "Video not found in this tab." };
+
+  if (video.kind === "hls" || video.kind === "dash") {
+    return { ok: false, error: `${video.kind.toUpperCase()} download is not implemented in v0.1.` };
+  }
+
+  try {
+    const downloadId = await chrome.downloads.download({
+      url: video.url,
+      filename: inferFilename(video),
+      conflictAction: "uniquify",
+      saveAs: false,
+    });
+    if (downloadId === undefined) {
+      return { ok: false, error: DIRECT_DOWNLOAD_FAILURE_MESSAGE };
+    }
+    await setDownloadJob({
+      videoId: video.id,
+      tabId: req.tabId,
+      downloadId,
+      kind: video.kind,
+      startedAt: Date.now(),
+      status: "in_progress",
+    });
+    return { ok: true, downloadId };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error && err.message ? err.message : DIRECT_DOWNLOAD_FAILURE_MESSAGE,
+    };
+  }
+}
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (!message || typeof message !== "object" || message.type !== "download") return false;
+  void handleDownloadRequest(message as DownloadRequest).then(sendResponse);
+  return true;
+});
+
+async function handleDownloadChange(delta: chrome.downloads.DownloadDelta): Promise<void> {
+  if (!delta.state) return;
+  const jobs = await getDownloadJobs();
+  const job = jobs[String(delta.id)];
+  if (!job) return;
+
+  if (delta.state.current === "complete") {
+    job.status = "complete";
+    delete job.errorMessage;
+    await setDownloadJob(job);
+  } else if (delta.state.current === "interrupted") {
+    job.status = "interrupted";
+    job.errorMessage = DIRECT_DOWNLOAD_FAILURE_MESSAGE;
+    await setDownloadJob(job);
+  }
+}
+
+chrome.downloads.onChanged.addListener((delta) => {
+  void handleDownloadChange(delta);
 });
