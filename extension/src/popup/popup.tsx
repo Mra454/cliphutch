@@ -3,19 +3,36 @@ import { createRoot } from "react-dom/client";
 import type { DetectedVideo } from "../types";
 import { getDetectedVideos } from "../lib/storage-session";
 
-const DOWNLOAD_JOBS_KEY = "download-jobs";
+const DIRECT_JOBS_KEY = "download-jobs";
+const HLS_JOBS_KEY = "hls-download-jobs";
 
-type DownloadStatus = "in_progress" | "complete" | "interrupted";
-
-type DownloadJob = {
+type DirectJob = {
   videoId: string;
   tabId: number;
   downloadId: number;
   kind: DetectedVideo["kind"];
   startedAt: number;
-  status: DownloadStatus;
+  status: "in_progress" | "complete" | "interrupted";
   errorMessage?: string;
 };
+
+type HlsJob = {
+  jobId: string;
+  videoId: string;
+  tabId: number;
+  url: string;
+  kind: "hls";
+  startedAt: number;
+  status: "running" | "saving" | "complete" | "error" | "cancelled";
+  progress: { done: number; total: number; bytes: number };
+  downloadId?: number;
+  errorCode?: string;
+  errorMessage?: string;
+};
+
+type AnyJob =
+  | ({ source: "direct" } & DirectJob)
+  | ({ source: "hls" } & HlsJob);
 
 function basename(rawUrl: string): string {
   try {
@@ -101,6 +118,16 @@ const errorBoxStyle: React.CSSProperties = {
   marginTop: 6,
 };
 
+const noteBoxStyle: React.CSSProperties = {
+  background: "#eef5fb",
+  color: "#234a6b",
+  border: "1px solid #b9d4ea",
+  borderRadius: 3,
+  padding: "4px 6px",
+  fontSize: 11,
+  marginTop: 6,
+};
+
 const buttonStyle: React.CSSProperties = {
   fontSize: 11,
   padding: "3px 8px",
@@ -109,19 +136,25 @@ const buttonStyle: React.CSSProperties = {
 
 function VideoCard({ v, tabId }: { v: DetectedVideo; tabId: number }) {
   const [showFull, setShowFull] = useState(false);
-  const [job, setJob] = useState<DownloadJob | null>(null);
-  const [progress, setProgress] = useState<{ received: number; total?: number } | null>(null);
+  const [job, setJob] = useState<AnyJob | null>(null);
+  const [directProgress, setDirectProgress] = useState<{ received: number; total?: number } | null>(null);
   const [immediateError, setImmediateError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
 
     const refresh = async () => {
-      const result = await chrome.storage.session.get(DOWNLOAD_JOBS_KEY);
-      const jobs = (result[DOWNLOAD_JOBS_KEY] as Record<string, DownloadJob>) ?? {};
-      const matches = Object.values(jobs)
-        .filter((j) => j.videoId === v.id && j.tabId === tabId)
-        .sort((a, b) => b.startedAt - a.startedAt);
+      const result = await chrome.storage.session.get([DIRECT_JOBS_KEY, HLS_JOBS_KEY]);
+      const directs = (result[DIRECT_JOBS_KEY] as Record<string, DirectJob>) ?? {};
+      const hlses = (result[HLS_JOBS_KEY] as Record<string, HlsJob>) ?? {};
+      const matches: AnyJob[] = [];
+      for (const j of Object.values(directs)) {
+        if (j.videoId === v.id && j.tabId === tabId) matches.push({ source: "direct", ...j });
+      }
+      for (const j of Object.values(hlses)) {
+        if (j.videoId === v.id && j.tabId === tabId) matches.push({ source: "hls", ...j });
+      }
+      matches.sort((a, b) => b.startedAt - a.startedAt);
       if (!cancelled) setJob(matches[0] ?? null);
     };
 
@@ -131,7 +164,8 @@ function VideoCard({ v, tabId }: { v: DetectedVideo; tabId: number }) {
       changes: { [key: string]: chrome.storage.StorageChange },
       area: string,
     ) => {
-      if (area === "session" && changes[DOWNLOAD_JOBS_KEY]) void refresh();
+      if (area !== "session") return;
+      if (changes[DIRECT_JOBS_KEY] || changes[HLS_JOBS_KEY]) void refresh();
     };
     chrome.storage.onChanged.addListener(listener);
     return () => {
@@ -141,8 +175,8 @@ function VideoCard({ v, tabId }: { v: DetectedVideo; tabId: number }) {
   }, [v.id, tabId]);
 
   useEffect(() => {
-    if (!job || job.status !== "in_progress") {
-      setProgress(null);
+    if (!job || job.source !== "direct" || job.status !== "in_progress") {
+      setDirectProgress(null);
       return;
     }
     let cancelled = false;
@@ -154,14 +188,14 @@ function VideoCard({ v, tabId }: { v: DetectedVideo; tabId: number }) {
         if (cancelled) return;
         const item = items[0];
         if (item && item.state === "in_progress") {
-          setProgress({
+          setDirectProgress({
             received: item.bytesReceived,
             total: item.totalBytes > 0 ? item.totalBytes : undefined,
           });
           timer = setTimeout(tick, 750);
         }
       } catch {
-        // ignore polling errors
+        // ignore
       }
     };
     void tick();
@@ -170,7 +204,7 @@ function VideoCard({ v, tabId }: { v: DetectedVideo; tabId: number }) {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [job?.status, job?.downloadId]);
+  }, [job?.source === "direct" ? job.status : null, job?.source === "direct" ? job.downloadId : null]);
 
   const onDownload = async () => {
     setImmediateError(null);
@@ -178,12 +212,22 @@ function VideoCard({ v, tabId }: { v: DetectedVideo; tabId: number }) {
       type: "download",
       tabId,
       videoId: v.id,
-    })) as { ok: true; downloadId: number } | { ok: false; error: string };
+    })) as { ok: true; downloadId?: number; jobId?: string } | { ok: false; error: string };
     if (res && !res.ok) setImmediateError(res.error);
   };
 
   const onShowInFolder = () => {
-    if (job) chrome.downloads.show(job.downloadId);
+    if (!job) return;
+    const id =
+      job.source === "direct"
+        ? job.downloadId
+        : job.downloadId;
+    if (id !== undefined) chrome.downloads.show(id);
+  };
+
+  const onCancelHls = () => {
+    if (job?.source !== "hls") return;
+    void chrome.runtime.sendMessage({ type: "hls-download-cancel", jobId: job.jobId }).catch(() => {});
   };
 
   function renderAction() {
@@ -211,52 +255,112 @@ function VideoCard({ v, tabId }: { v: DetectedVideo; tabId: number }) {
     }
 
     if (!job) {
-      const isUnsupportedHls = v.kind === "hls";
       return (
-        <button
-          onClick={onDownload}
-          style={{ ...buttonStyle, marginTop: 6 }}
-          title={isUnsupportedHls ? "HLS download arrives in Session 5" : undefined}
-        >
+        <button onClick={onDownload} style={{ ...buttonStyle, marginTop: 6 }}>
           Download
         </button>
       );
     }
 
-    if (job.status === "in_progress") {
-      const total = progress?.total;
-      const received = progress?.received ?? 0;
-      const pct = total ? Math.round((received / total) * 100) : null;
-      return (
-        <div style={{ marginTop: 6 }}>
-          <div style={{ fontSize: 11, color: "#444" }}>
-            {pct !== null
-              ? `Downloading ${pct}% — ${fmtBytes(received)} / ${fmtBytes(total)}`
-              : received > 0
-                ? `Downloading… ${fmtBytes(received)}`
-                : "Starting…"}
+    if (job.source === "direct") {
+      if (job.status === "in_progress") {
+        const total = directProgress?.total;
+        const received = directProgress?.received ?? 0;
+        const pct = total ? Math.round((received / total) * 100) : null;
+        return (
+          <div style={{ marginTop: 6 }}>
+            <div style={{ fontSize: 11, color: "#444" }}>
+              {pct !== null
+                ? `Downloading ${pct}% — ${fmtBytes(received)} / ${fmtBytes(total)}`
+                : received > 0
+                  ? `Downloading… ${fmtBytes(received)}`
+                  : "Starting…"}
+            </div>
+            {total ? (
+              <progress value={received} max={total} style={{ width: "100%", marginTop: 3 }} />
+            ) : null}
           </div>
-          {total ? (
-            <progress value={received} max={total} style={{ width: "100%", marginTop: 3 }} />
-          ) : null}
-        </div>
+        );
+      }
+      if (job.status === "complete") {
+        return (
+          <div style={{ marginTop: 6, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
+            <span style={{ color: "#2c5e2c", fontSize: 11 }}>Saved</span>
+            <button onClick={onShowInFolder} style={buttonStyle}>
+              Show in folder
+            </button>
+          </div>
+        );
+      }
+      return (
+        <>
+          <div style={errorBoxStyle}>{job.errorMessage ?? "Download interrupted."}</div>
+          <button onClick={onDownload} style={{ ...buttonStyle, marginTop: 6 }}>
+            Retry
+          </button>
+        </>
       );
     }
 
-    if (job.status === "complete") {
+    // HLS branch
+    if (job.status === "running") {
+      const { done, total, bytes } = job.progress;
+      const text =
+        total > 0
+          ? `Downloading ${done} of ${total} segments… (${fmtBytes(bytes) ?? "0 B"})`
+          : "Starting HLS download…";
+      const pct = total > 0 ? done / total : null;
       return (
-        <div style={{ marginTop: 6, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
-          <span style={{ color: "#2c5e2c", fontSize: 11 }}>Saved</span>
-          <button onClick={onShowInFolder} style={buttonStyle}>
-            Show in folder
+        <div style={{ marginTop: 6 }}>
+          <div style={{ fontSize: 11, color: "#444" }}>{text}</div>
+          {pct !== null ? (
+            <progress value={done} max={total} style={{ width: "100%", marginTop: 3 }} />
+          ) : null}
+          <button onClick={onCancelHls} style={{ ...buttonStyle, marginTop: 4 }}>
+            Cancel
           </button>
         </div>
       );
     }
-
+    if (job.status === "saving") {
+      return (
+        <div style={{ marginTop: 6, fontSize: 11, color: "#444" }}>
+          Saving file…
+        </div>
+      );
+    }
+    if (job.status === "complete") {
+      return (
+        <div style={{ marginTop: 6 }}>
+          <div style={noteBoxStyle}>
+            Saved as .ts file. Plays in VLC. MP4 conversion may come in a future version.
+          </div>
+          <div style={{ marginTop: 6, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ color: "#2c5e2c", fontSize: 11 }}>Saved</span>
+            <button onClick={onShowInFolder} style={buttonStyle}>
+              Show in folder
+            </button>
+          </div>
+        </div>
+      );
+    }
+    if (job.status === "cancelled") {
+      return (
+        <>
+          <div style={noteBoxStyle}>Download cancelled.</div>
+          <button onClick={onDownload} style={{ ...buttonStyle, marginTop: 6 }}>
+            Try again
+          </button>
+        </>
+      );
+    }
+    // error
     return (
       <>
-        <div style={errorBoxStyle}>{job.errorMessage ?? "Download interrupted."}</div>
+        <div style={errorBoxStyle}>
+          {job.errorMessage ?? "Download failed."}
+          {job.errorCode ? <span style={{ opacity: 0.6 }}> [{job.errorCode}]</span> : null}
+        </div>
         <button onClick={onDownload} style={{ ...buttonStyle, marginTop: 6 }}>
           Retry
         </button>

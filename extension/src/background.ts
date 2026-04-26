@@ -2,6 +2,7 @@ import { classifyUrl } from "./lib/detector";
 import { addOrUpdateVideo, clearTab, getDetectedVideos } from "./lib/storage-session";
 import { VIDEO_REQUEST_TYPES } from "./lib/constants";
 import { inferFilename } from "./lib/filename";
+import { getSettings } from "./lib/storage-local";
 import type { DetectedVideo, VideoKind } from "./types";
 
 type TabInfo = { pageUrl?: string; pageTitle?: string };
@@ -198,15 +199,19 @@ async function findVideo(tabId: number, videoId: string): Promise<DetectedVideo 
 
 type DownloadRequest = { type: "download"; tabId: number; videoId: string };
 type DownloadResponse =
-  | { ok: true; downloadId: number }
+  | { ok: true; downloadId?: number; jobId?: string }
   | { ok: false; error: string };
 
 async function handleDownloadRequest(req: DownloadRequest): Promise<DownloadResponse> {
   const video = await findVideo(req.tabId, req.videoId);
   if (!video) return { ok: false, error: "Video not found in this tab." };
 
-  if (video.kind === "hls" || video.kind === "dash") {
-    return { ok: false, error: `${video.kind.toUpperCase()} download is not implemented in v0.1.` };
+  if (video.kind === "dash") {
+    return { ok: false, error: "DASH download is not implemented in v0.1." };
+  }
+
+  if (video.kind === "hls") {
+    return await startHlsDownload(req, video);
   }
 
   try {
@@ -246,19 +251,199 @@ async function handleDownloadChange(delta: chrome.downloads.DownloadDelta): Prom
   if (!delta.state) return;
   const jobs = await getDownloadJobs();
   const job = jobs[String(delta.id)];
-  if (!job) return;
+  if (job) {
+    if (delta.state.current === "complete") {
+      job.status = "complete";
+      delete job.errorMessage;
+      await setDownloadJob(job);
+    } else if (delta.state.current === "interrupted") {
+      job.status = "interrupted";
+      job.errorMessage = DIRECT_DOWNLOAD_FAILURE_MESSAGE;
+      await setDownloadJob(job);
+    }
+    return;
+  }
+
+  const hlsJobs = await getHlsJobs();
+  const hls = Object.values(hlsJobs).find((j) => j.downloadId === delta.id);
+  if (!hls) return;
 
   if (delta.state.current === "complete") {
-    job.status = "complete";
-    delete job.errorMessage;
-    await setDownloadJob(job);
+    hls.status = "complete";
+    await setHlsJob(hls);
+    void chrome.runtime.sendMessage({ type: "hls-download-revoke", jobId: hls.jobId }).catch(() => {});
   } else if (delta.state.current === "interrupted") {
-    job.status = "interrupted";
-    job.errorMessage = DIRECT_DOWNLOAD_FAILURE_MESSAGE;
-    await setDownloadJob(job);
+    hls.status = "error";
+    hls.errorMessage = DIRECT_DOWNLOAD_FAILURE_MESSAGE;
+    hls.errorCode = "SAVE_INTERRUPTED";
+    await setHlsJob(hls);
+    void chrome.runtime.sendMessage({ type: "hls-download-revoke", jobId: hls.jobId }).catch(() => {});
   }
 }
 
 chrome.downloads.onChanged.addListener((delta) => {
   void handleDownloadChange(delta);
+});
+
+type HlsJobStatus = "running" | "saving" | "complete" | "error" | "cancelled";
+
+type HlsJob = {
+  jobId: string;
+  videoId: string;
+  tabId: number;
+  url: string;
+  kind: "hls";
+  startedAt: number;
+  status: HlsJobStatus;
+  progress: { done: number; total: number; bytes: number };
+  downloadId?: number;
+  errorCode?: string;
+  errorMessage?: string;
+};
+
+const HLS_JOBS_KEY = "hls-download-jobs";
+
+async function getHlsJobs(): Promise<Record<string, HlsJob>> {
+  const result = await chrome.storage.session.get(HLS_JOBS_KEY);
+  const jobs = result[HLS_JOBS_KEY];
+  return jobs && typeof jobs === "object" ? (jobs as Record<string, HlsJob>) : {};
+}
+
+async function setHlsJob(job: HlsJob): Promise<void> {
+  const jobs = await getHlsJobs();
+  jobs[job.jobId] = job;
+  await chrome.storage.session.set({ [HLS_JOBS_KEY]: jobs });
+}
+
+async function ensureOffscreenDocument(): Promise<void> {
+  const contexts = (await chrome.runtime.getContexts({
+    contextTypes: ["OFFSCREEN_DOCUMENT" as chrome.runtime.ContextType],
+  })) as chrome.runtime.ExtensionContext[] | undefined;
+  if (contexts && contexts.length > 0) return;
+  await chrome.offscreen.createDocument({
+    url: "offscreen.html",
+    reasons: [chrome.offscreen.Reason.BLOBS],
+    justification: "Assemble HLS segments into a downloadable blob",
+  });
+}
+
+async function startHlsDownload(
+  req: DownloadRequest,
+  video: DetectedVideo,
+): Promise<DownloadResponse> {
+  const settings = await getSettings();
+  const jobId = `hls-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+  await setHlsJob({
+    jobId,
+    videoId: video.id,
+    tabId: req.tabId,
+    url: video.url,
+    kind: "hls",
+    startedAt: Date.now(),
+    status: "running",
+    progress: { done: 0, total: 0, bytes: 0 },
+  });
+
+  try {
+    await ensureOffscreenDocument();
+  } catch (err) {
+    const job = (await getHlsJobs())[jobId];
+    if (job) {
+      job.status = "error";
+      job.errorCode = "OFFSCREEN_INIT";
+      job.errorMessage = err instanceof Error ? err.message : "Could not start offscreen document.";
+      await setHlsJob(job);
+    }
+    return { ok: false, error: job?.errorMessage ?? "Could not start offscreen document." };
+  }
+
+  void chrome.runtime
+    .sendMessage({
+      type: "hls-download-start",
+      jobId,
+      url: video.url,
+      sizeCapBytes: settings.hlsSizeCapBytes,
+    })
+    .catch(() => {});
+
+  return { ok: true, jobId };
+}
+
+async function handleHlsProgress(msg: {
+  jobId: string;
+  done: number;
+  total: number;
+  bytes: number;
+}): Promise<void> {
+  const jobs = await getHlsJobs();
+  const job = jobs[msg.jobId];
+  if (!job) return;
+  job.progress = { done: msg.done, total: msg.total, bytes: msg.bytes };
+  await setHlsJob(job);
+}
+
+async function handleHlsBlobReady(msg: {
+  jobId: string;
+  blobUrl: string;
+  sizeBytes: number;
+}): Promise<void> {
+  const jobs = await getHlsJobs();
+  const job = jobs[msg.jobId];
+  if (!job) return;
+
+  const video = await findVideo(job.tabId, job.videoId);
+  if (!video) {
+    job.status = "error";
+    job.errorMessage = "Video missing when saving HLS download.";
+    job.errorCode = "VIDEO_MISSING";
+    await setHlsJob(job);
+    void chrome.runtime.sendMessage({ type: "hls-download-revoke", jobId: msg.jobId }).catch(() => {});
+    return;
+  }
+
+  try {
+    const downloadId = await chrome.downloads.download({
+      url: msg.blobUrl,
+      filename: inferFilename(video, { forcedExtension: ".ts" }),
+      conflictAction: "uniquify",
+      saveAs: false,
+    });
+    job.downloadId = downloadId;
+    job.status = "saving";
+    await setHlsJob(job);
+  } catch (err) {
+    job.status = "error";
+    job.errorMessage = err instanceof Error ? err.message : "Could not save HLS file.";
+    job.errorCode = "SAVE_FAILED";
+    await setHlsJob(job);
+    void chrome.runtime.sendMessage({ type: "hls-download-revoke", jobId: msg.jobId }).catch(() => {});
+  }
+}
+
+async function handleHlsError(msg: {
+  jobId: string;
+  code: string;
+  userMessage: string;
+}): Promise<void> {
+  const jobs = await getHlsJobs();
+  const job = jobs[msg.jobId];
+  if (!job) return;
+  job.status = msg.code === "CANCELLED" ? "cancelled" : "error";
+  job.errorCode = msg.code;
+  job.errorMessage = msg.userMessage;
+  await setHlsJob(job);
+}
+
+chrome.runtime.onMessage.addListener((message: unknown) => {
+  if (!message || typeof message !== "object") return false;
+  const m = message as { type?: string };
+  if (m.type === "hls-download-progress") {
+    void handleHlsProgress(message as Parameters<typeof handleHlsProgress>[0]);
+  } else if (m.type === "hls-download-blob-ready") {
+    void handleHlsBlobReady(message as Parameters<typeof handleHlsBlobReady>[0]);
+  } else if (m.type === "hls-download-error") {
+    void handleHlsError(message as Parameters<typeof handleHlsError>[0]);
+  }
+  return false;
 });
