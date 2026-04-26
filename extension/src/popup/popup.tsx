@@ -542,10 +542,11 @@ function Popup() {
       >
         v{version} ·{" "}
         <a
-          href="#TODO_LINK"
-          onClick={(e) => e.preventDefault()}
+          href="https://github.com/mra454/video-archive"
+          target="_blank"
+          rel="noreferrer"
           style={{ color: "#999" }}
-          title="TODO_LINK — set in Session 7"
+          title="Open source repository"
         >
           GitHub
         </a>

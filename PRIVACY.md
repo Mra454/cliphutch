@@ -1,10 +1,10 @@
 # Privacy Policy — Video Archive
 
-> **TODO_COPY** — Replace this block with the user-facing narrative version of the technical structure below. Keep it plain, factual, and one screen long. The technical sections are accurate and may be quoted verbatim if you don't want to rewrite them.
+> Video Archive is a Chrome extension that detects video URLs as web pages load them and lets you download direct files (MP4, WebM) or HLS streams. All processing happens on your device. The extension does not contact any server operated by the developer, run analytics, or read page content. The technical sections below describe exactly what data the extension accesses and where it goes.
 
 ## 1. What this extension does
 
-**TODO_COPY** — One paragraph: detects video URLs that web pages request, lets you download MP4/WebM directly and HLS (.ts) via segment assembly, with all processing on your device.
+Video Archive observes the network requests your browser makes on HTTP and HTTPS pages and identifies the ones that look like video files: direct video formats (`.mp4`, `.webm`, `.mov`, `.m4v`, `.mkv`, `.ogv`), HLS playlists (`.m3u8`), and DASH manifests (`.mpd`). When you click **Download** in the popup, the extension either hands the file to Chrome's download manager (for direct files) or assembles the HLS segments locally into a playable `.ts` file. All processing happens on your device.
 
 ## 2. What data it accesses
 
@@ -42,8 +42,8 @@ When you download an HLS stream, the extension fetches the playlist and segments
 
 ## 6. Open source verification
 
-The full source is available at **TODO_LINK**. The build is reproducible from the published source and the included `package-lock.json`.
+The full source is available at <https://github.com/mra454/video-archive>. The build is reproducible from the published source and the included `package-lock.json`.
 
 ## 7. Contact
 
-For privacy questions, contact **TODO_EMAIL**.
+For privacy questions, contact <mra454@gmail.com>.
