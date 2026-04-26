@@ -3,10 +3,156 @@
   <head>
     <meta charset="utf-8" />
     <title>Welcome to Video Archive</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      body {
+        font-family: -apple-system, system-ui, "Segoe UI", sans-serif;
+        max-width: 760px;
+        margin: 2.5em auto;
+        padding: 0 1.5em 4em;
+        line-height: 1.55;
+        color: #222;
+        background: #fafafa;
+      }
+      h1 { margin: 0 0 0.25em; font-size: 28px; }
+      h2 { margin-top: 1.75em; font-size: 18px; }
+      .lede { color: #555; margin-top: 0; font-size: 15px; }
+      section {
+        background: #fff;
+        border: 1px solid #e0e0e0;
+        border-radius: 8px;
+        padding: 1.25em 1.5em;
+        margin-top: 1.5em;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-top: 0.5em;
+        font-size: 14px;
+      }
+      th, td {
+        text-align: left;
+        vertical-align: top;
+        padding: 0.6em 0.75em;
+        border-bottom: 1px solid #eee;
+      }
+      th {
+        background: #f6f6f6;
+        font-weight: 600;
+        width: 22%;
+      }
+      td code, th code {
+        background: #eef1f4;
+        padding: 1px 5px;
+        border-radius: 3px;
+        font-size: 13px;
+      }
+      ul.no-do {
+        margin: 0.5em 0 0;
+        padding-left: 1.25em;
+      }
+      ul.no-do li { margin-bottom: 0.35em; }
+      .links {
+        display: flex;
+        gap: 1em;
+        flex-wrap: wrap;
+        margin-top: 0.5em;
+      }
+      .links a {
+        color: #1a4ea0;
+        text-decoration: none;
+      }
+      .links a:hover { text-decoration: underline; }
+      .todo {
+        background: #fff7e6;
+        border: 1px dashed #d4a743;
+        padding: 2px 6px;
+        border-radius: 3px;
+        font-size: 12px;
+        color: #6b4d10;
+      }
+    </style>
   </head>
   <body>
-    <h1>Welcome to Video Archive</h1>
-    <p>The extension is installed. Pin it from the toolbar to get started.</p>
+    <h1>Welcome to Video Archive <span class="todo">TODO_COPY</span></h1>
+    <p class="lede">
+      <span class="todo">TODO_COPY</span> — One-paragraph welcome explaining what
+      Video Archive does and why someone would use it. Keep it factual; no
+      marketing language.
+    </p>
+
+    <section>
+      <h2>Permissions</h2>
+      <p style="margin-top: 0.25em; color: #555; font-size: 14px;">
+        Each permission is requested for a specific technical reason. All
+        processing happens on your device.
+      </p>
+      <table>
+        <tr>
+          <th><code>webRequest</code></th>
+          <td>
+            Observes network requests so the extension can detect video URLs as
+            the page loads them. All processing happens on your device.
+          </td>
+        </tr>
+        <tr>
+          <th><code>storage</code></th>
+          <td>
+            Stores detected video URLs in browser session memory and stores
+            user settings in browser local storage.
+          </td>
+        </tr>
+        <tr>
+          <th><code>downloads</code></th>
+          <td>Saves detected videos via Chrome's built-in download manager.</td>
+        </tr>
+        <tr>
+          <th><code>offscreen</code></th>
+          <td>
+            Used briefly to assemble HLS video segments into a downloadable file.
+          </td>
+        </tr>
+        <tr>
+          <th>
+            <code>http://*/*</code><br /><code>https://*/*</code>
+          </th>
+          <td>
+            Required for <code>webRequest</code> to observe network requests
+            across HTTP/HTTPS sites. The extension does not inject content
+            scripts and does not read page DOM content. It does process network
+            request URLs and the active tab's URL/title to associate detected
+            videos with the page.
+          </td>
+        </tr>
+      </table>
+    </section>
+
+    <section>
+      <h2>What this extension does NOT do</h2>
+      <ul class="no-do">
+        <li>
+          Send URLs, page titles, hostnames, filenames, or browsing activity to
+          any server.
+        </li>
+        <li>Track usage or include analytics.</li>
+        <li>Inject content scripts.</li>
+        <li>
+          Bypass logins, paywalls, DRM, encryption, or access controls.
+        </li>
+        <li>Decrypt encrypted media streams.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Learn more</h2>
+      <div class="links">
+        <a href="#TODO_LINK">Open source repository <span class="todo">TODO_LINK</span></a>
+        <a href="#TODO_LINK">Privacy policy <span class="todo">TODO_LINK</span></a>
+      </div>
+    </section>
+
     <script type="module" src="/src/firstrun/firstrun.ts"></script>
   </body>
 </html>

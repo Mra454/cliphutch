@@ -2,6 +2,7 @@ import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { DetectedVideo } from "../types";
 import { getDetectedVideos } from "../lib/storage-session";
+import { DEFAULT_SETTINGS, getSettings, type UserSettings } from "../lib/storage-local";
 
 const DIRECT_JOBS_KEY = "download-jobs";
 const HLS_JOBS_KEY = "hls-download-jobs";
@@ -134,8 +135,16 @@ const buttonStyle: React.CSSProperties = {
   cursor: "pointer",
 };
 
-function VideoCard({ v, tabId }: { v: DetectedVideo; tabId: number }) {
-  const [showFull, setShowFull] = useState(false);
+function VideoCard({
+  v,
+  tabId,
+  settings,
+}: {
+  v: DetectedVideo;
+  tabId: number;
+  settings: UserSettings;
+}) {
+  const [showFull, setShowFull] = useState(settings.showFullUrlsByDefault);
   const [job, setJob] = useState<AnyJob | null>(null);
   const [directProgress, setDirectProgress] = useState<{ received: number; total?: number } | null>(null);
   const [immediateError, setImmediateError] = useState<string | null>(null);
@@ -421,15 +430,24 @@ function VideoCard({ v, tabId }: { v: DetectedVideo; tabId: number }) {
 function Popup() {
   const [tabId, setTabId] = useState<number | null>(null);
   const [videos, setVideos] = useState<DetectedVideo[]>([]);
+  const [settings, setSettingsState] = useState<UserSettings>(DEFAULT_SETTINGS);
+  const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     let active = true;
     (async () => {
-      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      const [tabs, s] = await Promise.all([
+        chrome.tabs.query({ active: true, currentWindow: true }),
+        getSettings(),
+      ]);
+      if (!active) return;
+      setSettingsState(s);
       const id = tabs[0]?.id;
-      if (!active || id === undefined) return;
-      setTabId(id);
-      setVideos(await getDetectedVideos(id));
+      if (id !== undefined) {
+        setTabId(id);
+        setVideos(await getDetectedVideos(id));
+      }
+      setLoaded(true);
     })();
     return () => {
       active = false;
@@ -451,6 +469,27 @@ function Popup() {
     return () => chrome.storage.onChanged.removeListener(listener);
   }, [tabId]);
 
+  const version = chrome.runtime.getManifest().version;
+
+  function renderBody() {
+    if (!loaded) {
+      return (
+        <p style={{ marginTop: 8, color: "#888" }}>Loading detected videos…</p>
+      );
+    }
+    if (tabId === null) {
+      return (
+        <p style={{ marginTop: 8, color: "#888" }}>
+          No active tab. Open this popup from a regular browser tab.
+        </p>
+      );
+    }
+    if (videos.length === 0) return <Empty />;
+    return videos.map((v) => (
+      <VideoCard key={v.id} v={v} tabId={tabId} settings={settings} />
+    ));
+  }
+
   return (
     <div
       style={{
@@ -460,19 +499,38 @@ function Popup() {
         fontFamily: "-apple-system, system-ui, sans-serif",
       }}
     >
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: 8,
+        }}
+      >
         <h2 style={{ margin: 0, fontSize: 14 }}>Video Archive</h2>
-        <span style={{ color: "#999", fontSize: 11 }}>
-          {videos.length > 0 ? `${videos.length} detected` : ""}
-        </span>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ color: "#999", fontSize: 11 }}>
+            {videos.length > 0 ? `${videos.length} detected` : ""}
+          </span>
+          <button
+            onClick={() => chrome.runtime.openOptionsPage()}
+            title="Settings"
+            aria-label="Settings"
+            style={{
+              border: "1px solid #ddd",
+              background: "#fff",
+              borderRadius: 4,
+              padding: "2px 6px",
+              cursor: "pointer",
+              fontSize: 13,
+              lineHeight: 1,
+            }}
+          >
+            ⚙
+          </button>
+        </div>
       </div>
-      <div style={{ marginTop: 10 }}>
-        {videos.length === 0 || tabId === null ? (
-          <Empty />
-        ) : (
-          videos.map((v) => <VideoCard key={v.id} v={v} tabId={tabId} />)
-        )}
-      </div>
+      <div style={{ marginTop: 10 }}>{renderBody()}</div>
       <footer
         style={{
           marginTop: 12,
@@ -482,12 +540,12 @@ function Popup() {
           paddingTop: 6,
         }}
       >
-        v0.1.0 ·{" "}
+        v{version} ·{" "}
         <a
-          href="#"
+          href="#TODO_LINK"
           onClick={(e) => e.preventDefault()}
           style={{ color: "#999" }}
-          title="TODO_LINK — set in a later session"
+          title="TODO_LINK — set in Session 7"
         >
           GitHub
         </a>
