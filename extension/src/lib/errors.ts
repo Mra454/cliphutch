@@ -56,9 +56,19 @@ export class ByteRangeError extends HlsDownloadError {
   constructor() {
     super(
       "BYTERANGE",
-      "This HLS stream uses byte-range segments. v1 does not support byte-range fetching.",
+      "This stream uses byte-range segments. v1 does not support byte-range fetching.",
     );
     this.name = "ByteRangeError";
+  }
+}
+
+export class EmptyManifestError extends HlsDownloadError {
+  constructor() {
+    super(
+      "EMPTY",
+      "The manifest contained no usable video representations.",
+    );
+    this.name = "EmptyManifestError";
   }
 }
 
@@ -66,7 +76,7 @@ export class LiveStreamError extends HlsDownloadError {
   constructor() {
     super(
       "LIVE",
-      "This is a live HLS stream. v1 supports VOD streams only.",
+      "This is a live stream. v1 supports VOD streams only.",
     );
     this.name = "LiveStreamError";
   }

@@ -290,9 +290,6 @@ async function handleDownloadRequest(req: DownloadRequest): Promise<DownloadResp
   const video = await findVideo(req.tabId, req.videoId);
   if (!video) return { ok: false, error: "Video not found in this tab." };
 
-  if (video.kind === "dash") {
-    return { ok: false, error: "DASH download is not implemented in v0.1." };
-  }
 
   if (!(await isLicensed()) && (await isRateLimited())) {
     return {
@@ -304,6 +301,12 @@ async function handleDownloadRequest(req: DownloadRequest): Promise<DownloadResp
 
   if (video.kind === "hls") {
     const result = await startHlsDownload(req, video);
+    if (result.ok) await recordDownload();
+    return result;
+  }
+
+  if (video.kind === "dash") {
+    const result = await startDashDownload(req, video);
     if (result.ok) await recordDownload();
     return result;
   }
@@ -367,20 +370,56 @@ async function handleDownloadChange(delta: chrome.downloads.DownloadDelta): Prom
 
   const hlsJobs = await getHlsJobs();
   const hls = Object.values(hlsJobs).find((j) => j.downloadId === delta.id);
-  if (!hls) return;
+  if (hls) {
+    if (delta.state.current === "complete") {
+      hls.status = "complete";
+      await setHlsJob(hls);
+      await removeHeaderReplayRule(`hls:${hls.jobId}`);
+      void chrome.runtime.sendMessage({ type: "hls-download-revoke", jobId: hls.jobId }).catch(() => {});
+    } else if (delta.state.current === "interrupted") {
+      hls.status = "error";
+      hls.errorMessage = DIRECT_DOWNLOAD_FAILURE_MESSAGE;
+      hls.errorCode = "SAVE_INTERRUPTED";
+      await setHlsJob(hls);
+      await removeHeaderReplayRule(`hls:${hls.jobId}`);
+      void chrome.runtime.sendMessage({ type: "hls-download-revoke", jobId: hls.jobId }).catch(() => {});
+    }
+    return;
+  }
 
-  if (delta.state.current === "complete") {
-    hls.status = "complete";
-    await setHlsJob(hls);
-    await removeHeaderReplayRule(`hls:${hls.jobId}`);
-    void chrome.runtime.sendMessage({ type: "hls-download-revoke", jobId: hls.jobId }).catch(() => {});
-  } else if (delta.state.current === "interrupted") {
-    hls.status = "error";
-    hls.errorMessage = DIRECT_DOWNLOAD_FAILURE_MESSAGE;
-    hls.errorCode = "SAVE_INTERRUPTED";
-    await setHlsJob(hls);
-    await removeHeaderReplayRule(`hls:${hls.jobId}`);
-    void chrome.runtime.sendMessage({ type: "hls-download-revoke", jobId: hls.jobId }).catch(() => {});
+  const dashJobs = await getDashJobs();
+  const dash = Object.values(dashJobs).find(
+    (j) => j.videoDownloadId === delta.id || j.audioDownloadId === delta.id,
+  );
+  if (!dash) return;
+
+  const isVideo = dash.videoDownloadId === delta.id;
+  const newStatus: DashSaveStatus =
+    delta.state.current === "complete" ? "complete" : "interrupted";
+  if (isVideo) dash.videoSaveStatus = newStatus;
+  else dash.audioSaveStatus = newStatus;
+
+  const videoTerminal = dash.videoSaveStatus === "complete" || dash.videoSaveStatus === "interrupted";
+  const audioTerminal =
+    dash.audioDownloadId === undefined ||
+    dash.audioSaveStatus === "complete" ||
+    dash.audioSaveStatus === "interrupted";
+
+  if (videoTerminal && audioTerminal) {
+    const anyInterrupted =
+      dash.videoSaveStatus === "interrupted" || dash.audioSaveStatus === "interrupted";
+    if (anyInterrupted) {
+      dash.status = "error";
+      dash.errorMessage = DIRECT_DOWNLOAD_FAILURE_MESSAGE;
+      dash.errorCode = "SAVE_INTERRUPTED";
+    } else {
+      dash.status = "complete";
+    }
+    await setDashJob(dash);
+    await removeHeaderReplayRule(`dash:${dash.jobId}`);
+    void chrome.runtime.sendMessage({ type: "dash-download-revoke", jobId: dash.jobId }).catch(() => {});
+  } else {
+    await setDashJob(dash);
   }
 }
 
@@ -552,6 +591,187 @@ chrome.runtime.onMessage.addListener((message: unknown) => {
     void handleHlsBlobReady(message as Parameters<typeof handleHlsBlobReady>[0]);
   } else if (m.type === "hls-download-error") {
     void handleHlsError(message as Parameters<typeof handleHlsError>[0]);
+  } else if (m.type === "dash-download-progress") {
+    void handleDashProgress(message as Parameters<typeof handleDashProgress>[0]);
+  } else if (m.type === "dash-download-blobs-ready") {
+    void handleDashBlobsReady(message as Parameters<typeof handleDashBlobsReady>[0]);
+  } else if (m.type === "dash-download-error") {
+    void handleDashError(message as Parameters<typeof handleDashError>[0]);
   }
   return false;
 });
+
+type DashJobStatus = "running" | "saving" | "complete" | "error" | "cancelled";
+
+type DashSaveStatus = "pending" | "complete" | "interrupted";
+
+type DashJob = {
+  jobId: string;
+  videoId: string;
+  tabId: number;
+  url: string;
+  kind: "dash";
+  startedAt: number;
+  status: DashJobStatus;
+  progress: { videoDone: number; videoTotal: number; audioDone: number; audioTotal: number; bytes: number };
+  videoDownloadId?: number;
+  audioDownloadId?: number;
+  videoSaveStatus?: DashSaveStatus;
+  audioSaveStatus?: DashSaveStatus;
+  errorCode?: string;
+  errorMessage?: string;
+};
+
+const DASH_JOBS_KEY = "dash-download-jobs";
+
+async function getDashJobs(): Promise<Record<string, DashJob>> {
+  const result = await chrome.storage.session.get(DASH_JOBS_KEY);
+  const jobs = result[DASH_JOBS_KEY];
+  return jobs && typeof jobs === "object" ? (jobs as Record<string, DashJob>) : {};
+}
+
+async function setDashJob(job: DashJob): Promise<void> {
+  const jobs = await getDashJobs();
+  jobs[job.jobId] = job;
+  await chrome.storage.session.set({ [DASH_JOBS_KEY]: jobs });
+}
+
+async function startDashDownload(
+  req: DownloadRequest,
+  video: DetectedVideo,
+): Promise<DownloadResponse> {
+  const settings = await getSettings();
+  const jobId = `dash-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+  await setDashJob({
+    jobId,
+    videoId: video.id,
+    tabId: req.tabId,
+    url: video.url,
+    kind: "dash",
+    startedAt: Date.now(),
+    status: "running",
+    progress: { videoDone: 0, videoTotal: 0, audioDone: 0, audioTotal: 0, bytes: 0 },
+  });
+
+  try {
+    await ensureOffscreenDocument();
+  } catch (err) {
+    const job = (await getDashJobs())[jobId];
+    if (job) {
+      job.status = "error";
+      job.errorCode = "OFFSCREEN_INIT";
+      job.errorMessage = err instanceof Error ? err.message : "Could not start offscreen document.";
+      await setDashJob(job);
+    }
+    return { ok: false, error: job?.errorMessage ?? "Could not start offscreen document." };
+  }
+
+  await installHeaderReplayRule(`dash:${jobId}`, video.id, video.url, "dash");
+
+  void chrome.runtime
+    .sendMessage({
+      type: "dash-download-start",
+      jobId,
+      url: video.url,
+      sizeCapBytes: settings.hlsSizeCapBytes,
+    })
+    .catch(() => {});
+
+  return { ok: true, jobId };
+}
+
+async function handleDashProgress(msg: {
+  jobId: string;
+  videoDone: number;
+  videoTotal: number;
+  audioDone: number;
+  audioTotal: number;
+  bytes: number;
+}): Promise<void> {
+  const jobs = await getDashJobs();
+  const job = jobs[msg.jobId];
+  if (!job) return;
+  job.progress = {
+    videoDone: msg.videoDone,
+    videoTotal: msg.videoTotal,
+    audioDone: msg.audioDone,
+    audioTotal: msg.audioTotal,
+    bytes: msg.bytes,
+  };
+  await setDashJob(job);
+}
+
+async function handleDashBlobsReady(msg: {
+  jobId: string;
+  videoBlobUrl: string;
+  audioBlobUrl?: string;
+  videoSizeBytes: number;
+  audioSizeBytes?: number;
+  videoMimeType: string;
+  audioMimeType?: string;
+}): Promise<void> {
+  const jobs = await getDashJobs();
+  const job = jobs[msg.jobId];
+  if (!job) return;
+
+  const video = await findVideo(job.tabId, job.videoId);
+  if (!video) {
+    job.status = "error";
+    job.errorMessage = "Video missing when saving DASH download.";
+    job.errorCode = "VIDEO_MISSING";
+    await setDashJob(job);
+    await removeHeaderReplayRule(`dash:${msg.jobId}`);
+    void chrome.runtime.sendMessage({ type: "dash-download-revoke", jobId: msg.jobId }).catch(() => {});
+    return;
+  }
+
+  try {
+    const videoFilename = inferFilename(video, { forcedExtension: ".video.mp4" });
+    const videoDownloadId = await chrome.downloads.download({
+      url: msg.videoBlobUrl,
+      filename: videoFilename,
+      conflictAction: "uniquify",
+      saveAs: false,
+    });
+    job.videoDownloadId = videoDownloadId;
+    job.videoSaveStatus = "pending";
+
+    if (msg.audioBlobUrl) {
+      const audioFilename = inferFilename(video, { forcedExtension: ".audio.m4a" });
+      const audioDownloadId = await chrome.downloads.download({
+        url: msg.audioBlobUrl,
+        filename: audioFilename,
+        conflictAction: "uniquify",
+        saveAs: false,
+      });
+      job.audioDownloadId = audioDownloadId;
+      job.audioSaveStatus = "pending";
+    }
+
+    job.status = "saving";
+    await setDashJob(job);
+  } catch (err) {
+    job.status = "error";
+    job.errorMessage = err instanceof Error ? err.message : "Could not save DASH files.";
+    job.errorCode = "SAVE_FAILED";
+    await setDashJob(job);
+    await removeHeaderReplayRule(`dash:${msg.jobId}`);
+    void chrome.runtime.sendMessage({ type: "dash-download-revoke", jobId: msg.jobId }).catch(() => {});
+  }
+}
+
+async function handleDashError(msg: {
+  jobId: string;
+  code: string;
+  userMessage: string;
+}): Promise<void> {
+  const jobs = await getDashJobs();
+  const job = jobs[msg.jobId];
+  if (!job) return;
+  job.status = msg.code === "CANCELLED" ? "cancelled" : "error";
+  job.errorCode = msg.code;
+  job.errorMessage = msg.userMessage;
+  await setDashJob(job);
+  await removeHeaderReplayRule(`dash:${msg.jobId}`);
+}

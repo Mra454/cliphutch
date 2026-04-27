@@ -9,6 +9,7 @@ import { CHECKOUT_URL, PRICE_USD } from "../lib/constants";
 
 const DIRECT_JOBS_KEY = "download-jobs";
 const HLS_JOBS_KEY = "hls-download-jobs";
+const DASH_JOBS_KEY = "dash-download-jobs";
 
 type DirectJob = {
   videoId: string;
@@ -34,9 +35,25 @@ type HlsJob = {
   errorMessage?: string;
 };
 
+type DashJob = {
+  jobId: string;
+  videoId: string;
+  tabId: number;
+  url: string;
+  kind: "dash";
+  startedAt: number;
+  status: "running" | "saving" | "complete" | "error" | "cancelled";
+  progress: { videoDone: number; videoTotal: number; audioDone: number; audioTotal: number; bytes: number };
+  videoDownloadId?: number;
+  audioDownloadId?: number;
+  errorCode?: string;
+  errorMessage?: string;
+};
+
 type AnyJob =
   | ({ source: "direct" } & DirectJob)
-  | ({ source: "hls" } & HlsJob);
+  | ({ source: "hls" } & HlsJob)
+  | ({ source: "dash" } & DashJob);
 
 function basename(rawUrl: string): string {
   try {
@@ -156,15 +173,19 @@ function VideoCard({
     let cancelled = false;
 
     const refresh = async () => {
-      const result = await chrome.storage.session.get([DIRECT_JOBS_KEY, HLS_JOBS_KEY]);
+      const result = await chrome.storage.session.get([DIRECT_JOBS_KEY, HLS_JOBS_KEY, DASH_JOBS_KEY]);
       const directs = (result[DIRECT_JOBS_KEY] as Record<string, DirectJob>) ?? {};
       const hlses = (result[HLS_JOBS_KEY] as Record<string, HlsJob>) ?? {};
+      const dashes = (result[DASH_JOBS_KEY] as Record<string, DashJob>) ?? {};
       const matches: AnyJob[] = [];
       for (const j of Object.values(directs)) {
         if (j.videoId === v.id && j.tabId === tabId) matches.push({ source: "direct", ...j });
       }
       for (const j of Object.values(hlses)) {
         if (j.videoId === v.id && j.tabId === tabId) matches.push({ source: "hls", ...j });
+      }
+      for (const j of Object.values(dashes)) {
+        if (j.videoId === v.id && j.tabId === tabId) matches.push({ source: "dash", ...j });
       }
       matches.sort((a, b) => b.startedAt - a.startedAt);
       if (!cancelled) setJob(matches[0] ?? null);
@@ -177,7 +198,7 @@ function VideoCard({
       area: string,
     ) => {
       if (area !== "session") return;
-      if (changes[DIRECT_JOBS_KEY] || changes[HLS_JOBS_KEY]) void refresh();
+      if (changes[DIRECT_JOBS_KEY] || changes[HLS_JOBS_KEY] || changes[DASH_JOBS_KEY]) void refresh();
     };
     chrome.storage.onChanged.addListener(listener);
     return () => {
@@ -242,19 +263,12 @@ function VideoCard({
     void chrome.runtime.sendMessage({ type: "hls-download-cancel", jobId: job.jobId }).catch(() => {});
   };
 
-  function renderAction() {
-    if (v.kind === "dash") {
-      return (
-        <button
-          disabled
-          style={{ ...buttonStyle, marginTop: 6, width: "100%" }}
-          title="Detection only — download not supported in v1"
-        >
-          DASH detection only
-        </button>
-      );
-    }
+  const onCancelDash = () => {
+    if (job?.source !== "dash") return;
+    void chrome.runtime.sendMessage({ type: "dash-download-cancel", jobId: job.jobId }).catch(() => {});
+  };
 
+  function renderAction() {
     if (immediateError) {
       return (
         <>
@@ -267,6 +281,18 @@ function VideoCard({
     }
 
     if (!job) {
+      if (v.kind === "dash") {
+        return (
+          <>
+            <div style={noteBoxStyle}>
+              Saves 2 files: video + audio. Mux with ffmpeg or play together in VLC.
+            </div>
+            <button onClick={onDownload} style={{ ...buttonStyle, marginTop: 6 }}>
+              Download
+            </button>
+          </>
+        );
+      }
       return (
         <button onClick={onDownload} style={{ ...buttonStyle, marginTop: 6 }}>
           Download
@@ -314,13 +340,80 @@ function VideoCard({
       );
     }
 
-    // HLS branch
+    if (job.source === "hls") {
+      if (job.status === "running") {
+        const { done, total, bytes } = job.progress;
+        const text =
+          total > 0
+            ? `Downloading ${done} of ${total} segments… (${fmtBytes(bytes) ?? "0 B"})`
+            : "Starting HLS download…";
+        const pct = total > 0 ? done / total : null;
+        return (
+          <div style={{ marginTop: 6 }}>
+            <div style={{ fontSize: 11, color: "#444" }}>{text}</div>
+            {pct !== null ? (
+              <progress value={done} max={total} style={{ width: "100%", marginTop: 3 }} />
+            ) : null}
+            <button onClick={onCancelHls} style={{ ...buttonStyle, marginTop: 4 }}>
+              Cancel
+            </button>
+          </div>
+        );
+      }
+      if (job.status === "saving") {
+        return (
+          <div style={{ marginTop: 6, fontSize: 11, color: "#444" }}>
+            Saving file…
+          </div>
+        );
+      }
+      if (job.status === "complete") {
+        return (
+          <div style={{ marginTop: 6 }}>
+            <div style={noteBoxStyle}>
+              Saved as .ts file. Plays in VLC. MP4 conversion may come in a future version.
+            </div>
+            <div style={{ marginTop: 6, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span style={{ color: "#2c5e2c", fontSize: 11 }}>Saved</span>
+              <button onClick={onShowInFolder} style={buttonStyle}>
+                Show in folder
+              </button>
+            </div>
+          </div>
+        );
+      }
+      if (job.status === "cancelled") {
+        return (
+          <>
+            <div style={noteBoxStyle}>Download cancelled.</div>
+            <button onClick={onDownload} style={{ ...buttonStyle, marginTop: 6 }}>
+              Try again
+            </button>
+          </>
+        );
+      }
+      return (
+        <>
+          <div style={errorBoxStyle}>
+            {job.errorMessage ?? "Download failed."}
+            {job.errorCode ? <span style={{ opacity: 0.6 }}> [{job.errorCode}]</span> : null}
+          </div>
+          <button onClick={onDownload} style={{ ...buttonStyle, marginTop: 6 }}>
+            Retry
+          </button>
+        </>
+      );
+    }
+
+    // DASH branch
     if (job.status === "running") {
-      const { done, total, bytes } = job.progress;
+      const { videoDone, videoTotal, audioDone, audioTotal, bytes } = job.progress;
+      const total = videoTotal + audioTotal;
+      const done = videoDone + audioDone;
       const text =
         total > 0
-          ? `Downloading ${done} of ${total} segments… (${fmtBytes(bytes) ?? "0 B"})`
-          : "Starting HLS download…";
+          ? `Downloading ${done} of ${total} segments (video+audio)… (${fmtBytes(bytes) ?? "0 B"})`
+          : "Starting DASH download…";
       const pct = total > 0 ? done / total : null;
       return (
         <div style={{ marginTop: 6 }}>
@@ -328,7 +421,7 @@ function VideoCard({
           {pct !== null ? (
             <progress value={done} max={total} style={{ width: "100%", marginTop: 3 }} />
           ) : null}
-          <button onClick={onCancelHls} style={{ ...buttonStyle, marginTop: 4 }}>
+          <button onClick={onCancelDash} style={{ ...buttonStyle, marginTop: 4 }}>
             Cancel
           </button>
         </div>
@@ -337,7 +430,7 @@ function VideoCard({
     if (job.status === "saving") {
       return (
         <div style={{ marginTop: 6, fontSize: 11, color: "#444" }}>
-          Saving file…
+          Saving 2 files (video + audio)…
         </div>
       );
     }
@@ -345,11 +438,15 @@ function VideoCard({
       return (
         <div style={{ marginTop: 6 }}>
           <div style={noteBoxStyle}>
-            Saved as .ts file. Plays in VLC. MP4 conversion may come in a future version.
+            Saved 2 files: <code>.video.mp4</code> + <code>.audio.m4a</code>. Mux with{" "}
+            <code>ffmpeg -i in.video.mp4 -i in.audio.m4a -c copy out.mp4</code>, or play together in VLC.
           </div>
           <div style={{ marginTop: 6, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <span style={{ color: "#2c5e2c", fontSize: 11 }}>Saved</span>
-            <button onClick={onShowInFolder} style={buttonStyle}>
+            <button
+              onClick={() => job.videoDownloadId !== undefined && chrome.downloads.show(job.videoDownloadId)}
+              style={buttonStyle}
+            >
               Show in folder
             </button>
           </div>
@@ -366,7 +463,6 @@ function VideoCard({
         </>
       );
     }
-    // error
     return (
       <>
         <div style={errorBoxStyle}>
@@ -520,19 +616,19 @@ function Popup() {
 
   async function downloadAll() {
     if (tabId === null) return;
-    const result = await chrome.storage.session.get([DIRECT_JOBS_KEY, HLS_JOBS_KEY]);
+    const result = await chrome.storage.session.get([DIRECT_JOBS_KEY, HLS_JOBS_KEY, DASH_JOBS_KEY]);
     const directs = (result[DIRECT_JOBS_KEY] as Record<string, DirectJob>) ?? {};
     const hlses = (result[HLS_JOBS_KEY] as Record<string, HlsJob>) ?? {};
+    const dashes = (result[DASH_JOBS_KEY] as Record<string, DashJob>) ?? {};
 
     const isActive = (status: string) =>
       status === "in_progress" || status === "running" || status === "saving";
 
     for (const v of videos) {
-      if (v.kind === "dash") continue;
-
       const matches = [
         ...Object.values(directs).filter((j) => j.videoId === v.id && j.tabId === tabId),
         ...Object.values(hlses).filter((j) => j.videoId === v.id && j.tabId === tabId),
+        ...Object.values(dashes).filter((j) => j.videoId === v.id && j.tabId === tabId),
       ];
       const eligible = !matches.some(
         (j) => isActive(j.status) || j.status === "complete",
@@ -597,10 +693,10 @@ function Popup() {
           <span style={{ color: "#999", fontSize: 11 }}>
             {videos.length > 0 ? `${videos.length} detected` : ""}
           </span>
-          {videos.some((v) => v.kind !== "dash") && (
+          {videos.length > 0 && (
             <button
               onClick={() => void downloadAll()}
-              title="Download all detected videos (skips DASH, in-flight, and already-saved)"
+              title="Download all detected videos (skips in-flight and already-saved)"
               style={{
                 border: "1px solid #2c5e2c",
                 background: "#fff",
