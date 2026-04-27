@@ -62,13 +62,13 @@ async function updateBadge(tabId: number): Promise<void> {
 }
 
 chrome.runtime.onInstalled.addListener((details) => {
-  console.log("[video-archive] background installed:", details.reason);
+  console.log("[cliphutch] background installed:", details.reason);
   if (details.reason === "install") {
     chrome.tabs.create({ url: chrome.runtime.getURL("firstrun.html") });
   }
 });
 
-console.log("[video-archive] service worker booted");
+console.log("[cliphutch] service worker booted");
 
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {

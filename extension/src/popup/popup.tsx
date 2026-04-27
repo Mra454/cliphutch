@@ -573,7 +573,7 @@ function Popup() {
           gap: 8,
         }}
       >
-        <h2 style={{ margin: 0, fontSize: 14 }}>Video Archive</h2>
+        <h2 style={{ margin: 0, fontSize: 14 }}>ClipHutch</h2>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <span
             style={{
@@ -640,10 +640,11 @@ function Popup() {
           }}
         >
           <div style={{ fontSize: 11, color: "#7a1f1a" }}>
-            <strong>Daily limit reached.</strong> You've used all {FREE_DOWNLOAD_LIMIT} free downloads in the last 24 hours.
+            <strong>Daily limit reached.</strong> You've used all {FREE_DOWNLOAD_LIMIT} free downloads in the last 24 hours. Unlock unlimited downloads with a one-time payment of ${PRICE_USD}.
           </div>
           <button
             onClick={onUpgrade}
+            title={`One-time payment of $${PRICE_USD} — no subscription`}
             style={{
               border: "1px solid #2c5e2c",
               background: "#2c5e2c",
@@ -656,7 +657,7 @@ function Popup() {
               whiteSpace: "nowrap",
             }}
           >
-            Upgrade ${PRICE_USD}
+            ${PRICE_USD} one-time
           </button>
         </div>
       )}

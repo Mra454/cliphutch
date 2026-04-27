@@ -17,7 +17,7 @@ import {
   type LicenseState,
 } from "../lib/license";
 
-console.log("[video-archive] options page loaded");
+console.log("[cliphutch] options page loaded");
 
 const MIN_CAP_MB = 50;
 const MAX_CAP_MB = Math.round(HARD_HLS_SIZE_CAP_BYTES / (1024 * 1024));
@@ -165,7 +165,7 @@ function Options() {
   return (
     <div style={{ padding: "1.25em 1.5em", maxWidth: 560 }}>
       <header style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-        <h1 style={{ margin: 0, fontSize: 20 }}>Video Archive — Options</h1>
+        <h1 style={{ margin: 0, fontSize: 20 }}>ClipHutch — Options</h1>
         {showSaved && (
           <span style={{ color: "#2c5e2c", fontSize: 12 }}>Saved.</span>
         )}
@@ -258,7 +258,7 @@ function Options() {
         ) : (
           <div>
             <div style={{ fontSize: 13, marginBottom: 8 }}>
-              <strong>Free tier</strong> — 4 downloads per 24 hours. Upgrade to unlimited for ${PRICE_USD}.
+              <strong>Free tier</strong> — 4 downloads per 24 hours. Unlock unlimited downloads with a one-time payment of ${PRICE_USD} (no subscription).
             </div>
             <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
               <input
@@ -281,6 +281,7 @@ function Options() {
             <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 8 }}>
               <button
                 onClick={openCheckout}
+                title="One-time payment — no subscription"
                 style={{
                   padding: "6px 12px",
                   fontSize: 12,
@@ -292,9 +293,9 @@ function Options() {
                   cursor: "pointer",
                 }}
               >
-                Buy license — ${PRICE_USD}
+                Buy license — ${PRICE_USD} one-time
               </button>
-              <span style={helpStyle}>License is emailed after purchase.</span>
+              <span style={helpStyle}>License is emailed after purchase. No subscription.</span>
             </div>
             {licenseError && (
               <div style={{ color: "#a02a1f", fontSize: 12, marginTop: 6 }}>{licenseError}</div>

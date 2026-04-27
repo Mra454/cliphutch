@@ -2,7 +2,7 @@ import { downloadHls, type HlsProgress } from "../workers/hls-downloader";
 import { HlsDownloadError } from "../lib/errors";
 import { MAX_CONCURRENT_HLS_JOBS } from "../lib/constants";
 
-console.log("[video-archive] offscreen document loaded");
+console.log("[cliphutch] offscreen document loaded");
 
 type ActiveJob = {
   jobId: string;

@@ -67,7 +67,7 @@ if (codeFiles.length === 0) {
   process.exit(2);
 }
 
-console.log(`${bold}Video Archive — pre-submission audit${reset}`);
+console.log(`${bold}ClipHutch — pre-submission audit${reset}`);
 console.log(`${dim}Scanning ${codeFiles.length} files in ${DIST_DIR}${reset}`);
 
 // ---------------------------------------------------------------------------

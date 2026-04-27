@@ -1,4 +1,4 @@
-# Video Archive — fixtures
+# ClipHutch — fixtures
 
 Local test page producing predictable network requests for the extension's detection layer.
 

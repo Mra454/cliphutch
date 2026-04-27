@@ -1,2 +1,2 @@
-console.log("[video-archive] firstrun page loaded");
+console.log("[cliphutch] firstrun page loaded");
 export {};

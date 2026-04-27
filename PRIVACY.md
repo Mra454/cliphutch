@@ -1,10 +1,10 @@
-# Privacy Policy — Video Archive
+# Privacy Policy — ClipHutch
 
-> Video Archive is a Chrome extension that detects video URLs as web pages load them and lets you download direct files (MP4, WebM) or HLS streams. All processing happens on your device. The extension does not contact any server operated by the developer, run analytics, or read page content. The technical sections below describe exactly what data the extension accesses and where it goes.
+> ClipHutch is a Chrome extension that detects video URLs as web pages load them and lets you download direct files (MP4, WebM) or HLS streams. All processing happens on your device. The extension does not contact any server operated by the developer, run analytics, or read page content. The technical sections below describe exactly what data the extension accesses and where it goes.
 
 ## 1. What this extension does
 
-Video Archive observes the network requests your browser makes on HTTP and HTTPS pages and identifies the ones that look like video files: direct video formats (`.mp4`, `.webm`, `.mov`, `.m4v`, `.mkv`, `.ogv`), HLS playlists (`.m3u8`), and DASH manifests (`.mpd`). When you click **Download** in the popup, the extension either hands the file to Chrome's download manager (for direct files) or assembles the HLS segments locally into a playable `.ts` file. All processing happens on your device.
+ClipHutch observes the network requests your browser makes on HTTP and HTTPS pages and identifies the ones that look like video files: direct video formats (`.mp4`, `.webm`, `.mov`, `.m4v`, `.mkv`, `.ogv`), HLS playlists (`.m3u8`), and DASH manifests (`.mpd`). When you click **Download** in the popup, the extension either hands the file to Chrome's download manager (for direct files) or assembles the HLS segments locally into a playable `.ts` file. All processing happens on your device.
 
 ## 2. What data it accesses
 

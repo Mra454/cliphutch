@@ -1,4 +1,4 @@
-# Permissions — Video Archive
+# Permissions — ClipHutch
 
 Each permission requested by the extension is listed below with the technical reason it's required. All processing happens on your device.
 
