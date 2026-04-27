@@ -29,7 +29,7 @@ export const VIDEO_REQUEST_TYPES: chrome.webRequest.ResourceType[] = [
 ];
 
 export const PRICE_USD = 35;
-export const CHECKOUT_URL = "TODO_CHECKOUT_URL";
+export const CHECKOUT_URL = "https://buy.stripe.com/8x29ATcsIdsW3V31wUfw400";
 export const VALIDATE_URL = "https://cliphutch-api.mra454.workers.dev/validate";
 
 // Re-validate the cached license at most once per this interval.

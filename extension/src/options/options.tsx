@@ -77,6 +77,7 @@ function Options() {
   const [licenseInput, setLicenseInput] = useState("");
   const [licenseError, setLicenseError] = useState<string | null>(null);
   const [licenseFlashOk, setLicenseFlashOk] = useState(false);
+  const [deactivateConfirming, setDeactivateConfirming] = useState(false);
 
   useEffect(() => {
     void Promise.all([getSettings(), getLicense()]).then(([s, l]) => {
@@ -145,9 +146,18 @@ function Options() {
   }
 
   async function deactivate() {
-    if (!window.confirm("Deactivate this license? You will return to the free tier.")) return;
+    // Two-stage confirm: first click arms, second click within 3s commits.
+    // window.confirm() is silently blocked in extension Options pages opened
+    // via options_ui with open_in_tab:false, so we render the confirmation
+    // inline instead.
+    if (!deactivateConfirming) {
+      setDeactivateConfirming(true);
+      setTimeout(() => setDeactivateConfirming(false), 3000);
+      return;
+    }
     await deactivateLicense();
     setLicenseState({});
+    setDeactivateConfirming(false);
   }
 
   function openCheckout() {
@@ -250,9 +260,16 @@ function Options() {
             </div>
             <button
               onClick={() => void deactivate()}
-              style={{ padding: "4px 10px", fontSize: 12, cursor: "pointer" }}
+              style={{
+                padding: "4px 10px",
+                fontSize: 12,
+                cursor: "pointer",
+                ...(deactivateConfirming
+                  ? { borderColor: "#c00", color: "#c00", fontWeight: 600 }
+                  : {}),
+              }}
             >
-              Deactivate
+              {deactivateConfirming ? "Click again to confirm" : "Deactivate"}
             </button>
           </div>
         ) : (
