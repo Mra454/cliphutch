@@ -3,6 +3,7 @@ import {
   AccessDeniedError,
   ByteRangeError,
   CancelledError,
+  DrmProtectedError,
   EncryptedStreamError,
   FmpfourError,
   LiveStreamError,
@@ -11,6 +12,7 @@ import {
   SeparateAudioError,
   SizeCapError,
 } from "../lib/errors";
+import { classifyHlsManifestForDrm } from "../lib/drm";
 import { HLS_SEGMENT_FETCH_CONCURRENCY } from "../lib/constants";
 
 export type HlsProgress = {
@@ -187,6 +189,8 @@ export async function downloadHls(
   if (signal.aborted) throw new CancelledError();
 
   const playlistText = await fetchText(playlistUrl, signal, fetchImpl);
+  const masterDrm = classifyHlsManifestForDrm(playlistText);
+  if (masterDrm.protected) throw new DrmProtectedError(masterDrm.scheme);
   let parsed = parseManifest(playlistText);
 
   let bandwidthBps = 0;
@@ -197,6 +201,8 @@ export async function downloadHls(
     bandwidthBps = bandwidth;
     variantUrl = resolveUrl(variant.uri, playlistUrl);
     const variantText = await fetchText(variantUrl, signal, fetchImpl);
+    const variantDrm = classifyHlsManifestForDrm(variantText);
+    if (variantDrm.protected) throw new DrmProtectedError(variantDrm.scheme);
     parsed = parseManifest(variantText);
   }
 

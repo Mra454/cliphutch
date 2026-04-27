@@ -23,9 +23,22 @@ export class EncryptedStreamError extends HlsDownloadError {
   constructor() {
     super(
       "ENCRYPTED",
-      "This HLS stream is encrypted. v1 does not decrypt encrypted streams. This may be DRM or standard HLS encryption.",
+      "This HLS stream is encrypted (AES-128 transport encryption). v1 does not fetch and apply encryption keys.",
     );
     this.name = "EncryptedStreamError";
+  }
+}
+
+export class DrmProtectedError extends HlsDownloadError {
+  scheme?: string;
+  constructor(scheme?: string) {
+    const schemeLabel = scheme && scheme !== "unknown" ? ` (${scheme})` : "";
+    super(
+      "DRM_PROTECTED",
+      `This stream is DRM-protected${schemeLabel} and cannot be downloaded.`,
+    );
+    this.name = "DrmProtectedError";
+    this.scheme = scheme;
   }
 }
 
