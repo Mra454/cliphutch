@@ -1,7 +1,7 @@
 const LICENSE_KEY = "license";
 
-export const LICENSE_KEY_PATTERN = /^VA-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/;
-export const LICENSE_FORMAT_HINT = "VA-XXXX-XXXX-XXXX-XXXX";
+export const LICENSE_KEY_PATTERN = /^CH-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/;
+export const LICENSE_FORMAT_HINT = "CH-XXXX-XXXX-XXXX-XXXX";
 
 export type LicenseState = {
   key?: string;

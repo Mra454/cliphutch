@@ -33,33 +33,33 @@ beforeEach(() => {
 
 describe("normalizeKey", () => {
   it("uppercases and trims", () => {
-    expect(normalizeKey("  va-abcd-efgh-ijkl-mnop ")).toBe("VA-ABCD-EFGH-IJKL-MNOP");
+    expect(normalizeKey("  ch-abcd-efgh-ijkl-mnop ")).toBe("CH-ABCD-EFGH-IJKL-MNOP");
   });
 
   it("strips internal whitespace", () => {
-    expect(normalizeKey("VA-ABCD- EFGH-IJKL-MNOP")).toBe("VA-ABCD-EFGH-IJKL-MNOP");
+    expect(normalizeKey("CH-ABCD- EFGH-IJKL-MNOP")).toBe("CH-ABCD-EFGH-IJKL-MNOP");
   });
 });
 
 describe("isValidKeyFormat", () => {
   it.each([
-    "VA-ABCD-EFGH-IJKL-MNOP",
-    "VA-1234-5678-9ABC-DEFG",
-    "VA-AAAA-BBBB-CCCC-DDDD",
-    "va-abcd-efgh-ijkl-mnop", // case-insensitive via normalize
+    "CH-ABCD-EFGH-IJKL-MNOP",
+    "CH-1234-5678-9ABC-DEFG",
+    "CH-AAAA-BBBB-CCCC-DDDD",
+    "ch-abcd-efgh-ijkl-mnop", // case-insensitive via normalize
   ])("accepts %s", (k) => {
     expect(isValidKeyFormat(k)).toBe(true);
   });
 
   it.each([
     "",
-    "VA-ABCD",
-    "VA-ABCD-EFGH-IJKL",
+    "CH-ABCD",
+    "CH-ABCD-EFGH-IJKL",
     "ABCD-EFGH-IJKL-MNOP",
-    "VA-ABCD-EFGH-IJKL-MNOPX", // too long
-    "VA-ABC-EFGH-IJKL-MNOP", // too short group
-    "VA-ABCD-EFGH-IJKL-MNOP-EXTRA",
-    "VA-ABCD-EFGH-IJKL-MN!P", // invalid char
+    "CH-ABCD-EFGH-IJKL-MNOPX", // too long
+    "CH-ABC-EFGH-IJKL-MNOP", // too short group
+    "CH-ABCD-EFGH-IJKL-MNOP-EXTRA",
+    "CH-ABCD-EFGH-IJKL-MN!P", // invalid char
   ])("rejects %s", (k) => {
     expect(isValidKeyFormat(k)).toBe(false);
   });
@@ -67,11 +67,11 @@ describe("isValidKeyFormat", () => {
 
 describe("activateLicense", () => {
   it("activates a valid key", async () => {
-    const r = await activateLicense("VA-ABCD-EFGH-IJKL-MNOP");
+    const r = await activateLicense("CH-ABCD-EFGH-IJKL-MNOP");
     expect(r.ok).toBe(true);
     expect(await isLicensed()).toBe(true);
     const license = await getLicense();
-    expect(license.key).toBe("VA-ABCD-EFGH-IJKL-MNOP");
+    expect(license.key).toBe("CH-ABCD-EFGH-IJKL-MNOP");
     expect(typeof license.activatedAt).toBe("number");
   });
 
@@ -82,15 +82,15 @@ describe("activateLicense", () => {
   });
 
   it("normalizes lowercase input", async () => {
-    const r = await activateLicense("va-abcd-efgh-ijkl-mnop");
+    const r = await activateLicense("ch-abcd-efgh-ijkl-mnop");
     expect(r.ok).toBe(true);
-    expect((await getLicense()).key).toBe("VA-ABCD-EFGH-IJKL-MNOP");
+    expect((await getLicense()).key).toBe("CH-ABCD-EFGH-IJKL-MNOP");
   });
 });
 
 describe("deactivateLicense", () => {
   it("removes activation", async () => {
-    await activateLicense("VA-ABCD-EFGH-IJKL-MNOP");
+    await activateLicense("CH-ABCD-EFGH-IJKL-MNOP");
     await deactivateLicense();
     expect(await isLicensed()).toBe(false);
     expect(await getLicense()).toEqual({});
