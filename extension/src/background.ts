@@ -11,7 +11,13 @@ import {
   hasReplayableHeaders,
   type CapturedHeaders,
 } from "./lib/header-capture";
-import type { DetectedVideo, VideoKind } from "./types";
+import type {
+  DetectedVideo,
+  DashJob,
+  HlsJob,
+  StreamSaveStatus,
+  VideoKind,
+} from "./types";
 
 type TabInfo = { pageUrl?: string; pageTitle?: string };
 
@@ -311,8 +317,12 @@ async function handleDownloadRequest(req: DownloadRequest): Promise<DownloadResp
     return result;
   }
 
-  const directJobKey = `direct:${video.id}`;
-  await installHeaderReplayRule(directJobKey, video.id, video.url, "direct");
+  // Header replay does NOT apply to chrome.downloads.download — those fetches
+  // are initiated by the browser process, not the extension, so a DNR rule
+  // scoped to initiatorDomains: [chrome.runtime.id] cannot match them. There
+  // is no MV3-supported way to inject Referer / Authorization on a
+  // chrome.downloads.download fetch. Direct files relying on cookies still
+  // work because the browser attaches them automatically.
   try {
     const downloadId = await chrome.downloads.download({
       url: video.url,
@@ -321,7 +331,6 @@ async function handleDownloadRequest(req: DownloadRequest): Promise<DownloadResp
       saveAs: false,
     });
     if (downloadId === undefined) {
-      await removeHeaderReplayRule(directJobKey);
       return { ok: false, error: DIRECT_DOWNLOAD_FAILURE_MESSAGE };
     }
     await setDownloadJob({
@@ -335,7 +344,6 @@ async function handleDownloadRequest(req: DownloadRequest): Promise<DownloadResp
     await recordDownload();
     return { ok: true, downloadId };
   } catch (err) {
-    await removeHeaderReplayRule(directJobKey);
     return {
       ok: false,
       error: err instanceof Error && err.message ? err.message : DIRECT_DOWNLOAD_FAILURE_MESSAGE,
@@ -358,12 +366,10 @@ async function handleDownloadChange(delta: chrome.downloads.DownloadDelta): Prom
       job.status = "complete";
       delete job.errorMessage;
       await setDownloadJob(job);
-      await removeHeaderReplayRule(`direct:${job.videoId}`);
     } else if (delta.state.current === "interrupted") {
       job.status = "interrupted";
       job.errorMessage = DIRECT_DOWNLOAD_FAILURE_MESSAGE;
       await setDownloadJob(job);
-      await removeHeaderReplayRule(`direct:${job.videoId}`);
     }
     return;
   }
@@ -394,14 +400,17 @@ async function handleDownloadChange(delta: chrome.downloads.DownloadDelta): Prom
   if (!dash) return;
 
   const isVideo = dash.videoDownloadId === delta.id;
-  const newStatus: DashSaveStatus =
+  const newStatus: StreamSaveStatus =
     delta.state.current === "complete" ? "complete" : "interrupted";
   if (isVideo) dash.videoSaveStatus = newStatus;
   else dash.audioSaveStatus = newStatus;
 
   const videoTerminal = dash.videoSaveStatus === "complete" || dash.videoSaveStatus === "interrupted";
+  // audioSaveStatus is set to "pending" upfront iff the manifest had an audio
+  // adaptation set (see handleDashBlobsReady). undefined here means "no audio"
+  // — terminal vacuously. "pending" means "queued, not yet settled".
   const audioTerminal =
-    dash.audioDownloadId === undefined ||
+    dash.audioSaveStatus === undefined ||
     dash.audioSaveStatus === "complete" ||
     dash.audioSaveStatus === "interrupted";
 
@@ -426,22 +435,6 @@ async function handleDownloadChange(delta: chrome.downloads.DownloadDelta): Prom
 chrome.downloads.onChanged.addListener((delta) => {
   void handleDownloadChange(delta);
 });
-
-type HlsJobStatus = "running" | "saving" | "complete" | "error" | "cancelled";
-
-type HlsJob = {
-  jobId: string;
-  videoId: string;
-  tabId: number;
-  url: string;
-  kind: "hls";
-  startedAt: number;
-  status: HlsJobStatus;
-  progress: { done: number; total: number; bytes: number };
-  downloadId?: number;
-  errorCode?: string;
-  errorMessage?: string;
-};
 
 const HLS_JOBS_KEY = "hls-download-jobs";
 
@@ -601,27 +594,6 @@ chrome.runtime.onMessage.addListener((message: unknown) => {
   return false;
 });
 
-type DashJobStatus = "running" | "saving" | "complete" | "error" | "cancelled";
-
-type DashSaveStatus = "pending" | "complete" | "interrupted";
-
-type DashJob = {
-  jobId: string;
-  videoId: string;
-  tabId: number;
-  url: string;
-  kind: "dash";
-  startedAt: number;
-  status: DashJobStatus;
-  progress: { videoDone: number; videoTotal: number; audioDone: number; audioTotal: number; bytes: number };
-  videoDownloadId?: number;
-  audioDownloadId?: number;
-  videoSaveStatus?: DashSaveStatus;
-  audioSaveStatus?: DashSaveStatus;
-  errorCode?: string;
-  errorMessage?: string;
-};
-
 const DASH_JOBS_KEY = "dash-download-jobs";
 
 async function getDashJobs(): Promise<Record<string, DashJob>> {
@@ -726,6 +698,15 @@ async function handleDashBlobsReady(msg: {
     return;
   }
 
+  // Pre-initialize save statuses BEFORE queueing any chrome.downloads.download
+  // so that an early onChanged for the video (between the two download() awaits)
+  // can't make audioTerminal vacuously true and prematurely mark the whole
+  // job complete.
+  job.videoSaveStatus = "pending";
+  if (msg.audioBlobUrl) job.audioSaveStatus = "pending";
+  job.status = "saving";
+  await setDashJob(job);
+
   try {
     const videoFilename = inferFilename(video, { forcedExtension: ".video.mp4" });
     const videoDownloadId = await chrome.downloads.download({
@@ -735,7 +716,7 @@ async function handleDashBlobsReady(msg: {
       saveAs: false,
     });
     job.videoDownloadId = videoDownloadId;
-    job.videoSaveStatus = "pending";
+    await setDashJob(job);
 
     if (msg.audioBlobUrl) {
       const audioFilename = inferFilename(video, { forcedExtension: ".audio.m4a" });
@@ -746,11 +727,8 @@ async function handleDashBlobsReady(msg: {
         saveAs: false,
       });
       job.audioDownloadId = audioDownloadId;
-      job.audioSaveStatus = "pending";
+      await setDashJob(job);
     }
-
-    job.status = "saving";
-    await setDashJob(job);
   } catch (err) {
     job.status = "error";
     job.errorMessage = err instanceof Error ? err.message : "Could not save DASH files.";

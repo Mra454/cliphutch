@@ -1,6 +1,6 @@
 import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import type { DetectedVideo } from "../types";
+import type { DashJob, DetectedVideo, DirectJob, HlsJob } from "../types";
 import { getDetectedVideos } from "../lib/storage-session";
 import { DEFAULT_SETTINGS, getSettings, type UserSettings } from "../lib/storage-local";
 import { isLicensed, revalidateIfStale } from "../lib/license";
@@ -10,45 +10,6 @@ import { CHECKOUT_URL, PRICE_USD } from "../lib/constants";
 const DIRECT_JOBS_KEY = "download-jobs";
 const HLS_JOBS_KEY = "hls-download-jobs";
 const DASH_JOBS_KEY = "dash-download-jobs";
-
-type DirectJob = {
-  videoId: string;
-  tabId: number;
-  downloadId: number;
-  kind: DetectedVideo["kind"];
-  startedAt: number;
-  status: "in_progress" | "complete" | "interrupted";
-  errorMessage?: string;
-};
-
-type HlsJob = {
-  jobId: string;
-  videoId: string;
-  tabId: number;
-  url: string;
-  kind: "hls";
-  startedAt: number;
-  status: "running" | "saving" | "complete" | "error" | "cancelled";
-  progress: { done: number; total: number; bytes: number };
-  downloadId?: number;
-  errorCode?: string;
-  errorMessage?: string;
-};
-
-type DashJob = {
-  jobId: string;
-  videoId: string;
-  tabId: number;
-  url: string;
-  kind: "dash";
-  startedAt: number;
-  status: "running" | "saving" | "complete" | "error" | "cancelled";
-  progress: { videoDone: number; videoTotal: number; audioDone: number; audioTotal: number; bytes: number };
-  videoDownloadId?: number;
-  audioDownloadId?: number;
-  errorCode?: string;
-  errorMessage?: string;
-};
 
 type AnyJob =
   | ({ source: "direct" } & DirectJob)
