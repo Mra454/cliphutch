@@ -30,3 +30,7 @@ export const VIDEO_REQUEST_TYPES: chrome.webRequest.ResourceType[] = [
 
 export const PRICE_USD = 35;
 export const CHECKOUT_URL = "TODO_CHECKOUT_URL";
+export const VALIDATE_URL = "https://cliphutch-api.mra454.workers.dev/validate";
+
+// Re-validate the cached license at most once per this interval.
+export const REVALIDATION_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;

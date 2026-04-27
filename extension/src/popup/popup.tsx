@@ -3,7 +3,7 @@ import { createRoot } from "react-dom/client";
 import type { DetectedVideo } from "../types";
 import { getDetectedVideos } from "../lib/storage-session";
 import { DEFAULT_SETTINGS, getSettings, type UserSettings } from "../lib/storage-local";
-import { isLicensed } from "../lib/license";
+import { isLicensed, revalidateIfStale } from "../lib/license";
 import { FREE_DOWNLOAD_LIMIT, getDownloadCount } from "../lib/rate-limit";
 import { CHECKOUT_URL, PRICE_USD } from "../lib/constants";
 
@@ -463,6 +463,14 @@ function Popup() {
         setVideos(await getDetectedVideos(id));
       }
       setLoaded(true);
+
+      // Background re-validation: if the cached license is stale (>7 days
+      // since last server check), call /validate. Definitive negatives
+      // (REFUNDED / REVOKED / NOT_FOUND) deactivate the local license, which
+      // bumps storage.local and triggers refreshUsage via the listener above.
+      if (lic) {
+        void revalidateIfStale().catch(() => undefined);
+      }
     })();
     return () => {
       active = false;

@@ -26,9 +26,18 @@ The extension does not use `localStorage` or `sessionStorage`.
 
 ## 4. What leaves your device
 
-**Nothing.** The extension does not contact any server operated by the developer. There are no analytics, telemetry, or update pings beyond Chrome's own extension-update mechanism.
+**Free tier.** Nothing leaves your device. The extension does not contact any server operated by the developer.
 
-When you download an HLS stream, the extension fetches the playlist and segments **directly from the source server** that originally served the video, using whatever credentials (cookies, referrer) your browser would normally send to that origin. The extension does not mirror, proxy, or relay these requests through any third party.
+**Licensed tier.** Your license key and a randomly generated installation UUID are sent to ClipHutch's validation server (a Cloudflare Worker at `https://cliphutch-api.mra454.workers.dev/validate`) under two conditions:
+
+1. **At activation**, when you paste your license key into the Options page and click Activate.
+2. **Periodically**, at most once every seven days, to confirm the license has not been refunded or revoked.
+
+The validation server stores: your license key, the installation UUID, your email address (provided by Stripe at checkout), and the timestamp of each activation. It does **not** receive your IP address (other than what Cloudflare needs to route the request), browsing activity, page URLs, video URLs, filenames, or any download history.
+
+There are no analytics, telemetry, or update pings beyond Chrome's own extension-update mechanism.
+
+When you download a video — whether direct (MP4 / WebM) or HLS — the extension fetches it **directly from the source server** that originally served the video, using whatever credentials (cookies, referrer) your browser would normally send to that origin. The extension does not mirror, proxy, or relay these downloads through any third party.
 
 ## 5. Permissions explained
 

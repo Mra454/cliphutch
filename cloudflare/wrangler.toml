@@ -8,7 +8,7 @@ compatibility_flags = ["nodejs_compat_v2"]
 [[d1_databases]]
 binding = "DB"
 database_name = "cliphutch-licenses"
-database_id = "REPLACE_AFTER_WRANGLER_D1_CREATE"
+database_id = "dc85e41b-4f1b-487d-b46e-5789e6fd0ca1"
 
 # Public env vars (non-secret). Secrets are set via `wrangler secret put`:
 #   STRIPE_WEBHOOK_SECRET
