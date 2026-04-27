@@ -8,7 +8,8 @@
     "deploy": "wrangler deploy",
     "db:init:remote": "wrangler d1 execute cliphutch-licenses --remote --file=schema.sql",
     "db:init:local": "wrangler d1 execute cliphutch-licenses --local --file=schema.sql",
-    "tail": "wrangler tail"
+    "tail": "wrangler tail",
+    "test:resend": "node scripts/resend-license.mjs mra454@gmail.com CH-TEST-AAAA-BBBB-CCCC"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20240419.0",

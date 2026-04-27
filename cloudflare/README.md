@@ -86,6 +86,7 @@ curl -X POST http://localhost:8787/validate \
 | Revoke a license | `UPDATE licenses SET status = 'revoked' WHERE key = 'CH-...';` |
 | See activations for a key | `SELECT * FROM activations WHERE license_key = 'CH-...';` |
 | Reset device count for a user (e.g., they reinstalled OS) | `DELETE FROM activations WHERE license_key = 'CH-...';` — they can reactivate freely after this. |
+| Re-send a license email (Resend was down during purchase, etc.) | `RESEND_API_KEY=re_... RESEND_FROM_EMAIL='ClipHutch <licenses@cliphutch.com>' node scripts/resend-license.mjs <email> <license-key>` |
 
 ## Phase 3 (next)
 
