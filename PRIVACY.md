@@ -40,10 +40,6 @@ When you download an HLS stream, the extension fetches the playlist and segments
 | `offscreen` | Briefly assemble HLS video segments into a downloadable file. |
 | `http://*/*`, `https://*/*` | Required for `webRequest` to observe network requests across HTTP/HTTPS sites. The extension does not inject content scripts and does not read page DOM content. It does process network request URLs and the active tab's URL/title to associate detected videos with the page. |
 
-## 6. Open source verification
-
-The full source is available at <https://github.com/mra454/video-archive>. The build is reproducible from the published source and the included `package-lock.json`.
-
-## 7. Contact
+## 6. Contact
 
 For privacy questions, contact <mra454@gmail.com>.

@@ -3,6 +3,8 @@ import { addOrUpdateVideo, clearTab, getDetectedVideos } from "./lib/storage-ses
 import { VIDEO_REQUEST_TYPES } from "./lib/constants";
 import { inferFilename } from "./lib/filename";
 import { getSettings } from "./lib/storage-local";
+import { isLicensed } from "./lib/license";
+import { FREE_DOWNLOAD_LIMIT, isRateLimited, recordDownload } from "./lib/rate-limit";
 import type { DetectedVideo, VideoKind } from "./types";
 
 type TabInfo = { pageUrl?: string; pageTitle?: string };
@@ -200,7 +202,7 @@ async function findVideo(tabId: number, videoId: string): Promise<DetectedVideo 
 type DownloadRequest = { type: "download"; tabId: number; videoId: string };
 type DownloadResponse =
   | { ok: true; downloadId?: number; jobId?: string }
-  | { ok: false; error: string };
+  | { ok: false; error: string; code?: string };
 
 async function handleDownloadRequest(req: DownloadRequest): Promise<DownloadResponse> {
   const video = await findVideo(req.tabId, req.videoId);
@@ -210,8 +212,18 @@ async function handleDownloadRequest(req: DownloadRequest): Promise<DownloadResp
     return { ok: false, error: "DASH download is not implemented in v0.1." };
   }
 
+  if (!(await isLicensed()) && (await isRateLimited())) {
+    return {
+      ok: false,
+      code: "RATE_LIMITED",
+      error: `You've used all ${FREE_DOWNLOAD_LIMIT} free downloads in the last 24 hours. Upgrade for unlimited downloads.`,
+    };
+  }
+
   if (video.kind === "hls") {
-    return await startHlsDownload(req, video);
+    const result = await startHlsDownload(req, video);
+    if (result.ok) await recordDownload();
+    return result;
   }
 
   try {
@@ -232,6 +244,7 @@ async function handleDownloadRequest(req: DownloadRequest): Promise<DownloadResp
       startedAt: Date.now(),
       status: "in_progress",
     });
+    await recordDownload();
     return { ok: true, downloadId };
   } catch (err) {
     return {

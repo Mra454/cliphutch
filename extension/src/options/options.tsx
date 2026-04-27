@@ -8,7 +8,14 @@ import {
   type FilenameTemplate,
   type UserSettings,
 } from "../lib/storage-local";
-import { HARD_HLS_SIZE_CAP_BYTES } from "../lib/constants";
+import { CHECKOUT_URL, HARD_HLS_SIZE_CAP_BYTES, PRICE_USD } from "../lib/constants";
+import {
+  activateLicense,
+  deactivateLicense,
+  getLicense,
+  LICENSE_FORMAT_HINT,
+  type LicenseState,
+} from "../lib/license";
 
 console.log("[video-archive] options page loaded");
 
@@ -66,11 +73,16 @@ function Options() {
   const [capInputMB, setCapInputMB] = useState<string>("");
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [capError, setCapError] = useState<string | null>(null);
+  const [license, setLicenseState] = useState<LicenseState>({});
+  const [licenseInput, setLicenseInput] = useState("");
+  const [licenseError, setLicenseError] = useState<string | null>(null);
+  const [licenseFlashOk, setLicenseFlashOk] = useState(false);
 
   useEffect(() => {
-    void getSettings().then((s) => {
+    void Promise.all([getSettings(), getLicense()]).then(([s, l]) => {
       setLocal(s);
       setCapInputMB(String(bytesToMB(s.hlsSizeCapBytes)));
+      setLicenseState(l);
     });
   }, []);
 
@@ -116,6 +128,36 @@ function Options() {
     setCapInputMB(String(bytesToMB(DEFAULT_SETTINGS.hlsSizeCapBytes)));
     setCapError(null);
     flashSaved();
+  }
+
+  async function activate() {
+    setLicenseError(null);
+    setLicenseFlashOk(false);
+    const r = await activateLicense(licenseInput);
+    if (!r.ok) {
+      setLicenseError(r.error);
+      return;
+    }
+    setLicenseState(await getLicense());
+    setLicenseInput("");
+    setLicenseFlashOk(true);
+    setTimeout(() => setLicenseFlashOk(false), 2000);
+  }
+
+  async function deactivate() {
+    if (!window.confirm("Deactivate this license? You will return to the free tier.")) return;
+    await deactivateLicense();
+    setLicenseState({});
+  }
+
+  function openCheckout() {
+    if (CHECKOUT_URL.startsWith("http")) {
+      window.open(CHECKOUT_URL, "_blank");
+    } else {
+      window.alert(
+        "Checkout link not configured yet. Set CHECKOUT_URL in extension/src/lib/constants.ts to your Stripe checkout URL.",
+      );
+    }
   }
 
   const showSaved = savedAt !== null && Date.now() - savedAt < 2000;
@@ -191,6 +233,77 @@ function Options() {
         <div style={helpStyle}>
           When off, the popup hides query strings behind a "show full URL" toggle on each card.
         </div>
+      </section>
+
+      <section style={sectionStyle}>
+        <span style={labelStyle}>License</span>
+        {license.key ? (
+          <div>
+            <div style={{ fontSize: 13, color: "#2c5e2c", marginBottom: 6 }}>
+              <strong>Licensed</strong> — unlimited downloads.
+            </div>
+            <div style={{ fontSize: 12, color: "#666", marginBottom: 8 }}>
+              Key: <code>{license.key}</code>
+              {license.activatedAt && (
+                <span> — activated {new Date(license.activatedAt).toLocaleDateString()}</span>
+              )}
+            </div>
+            <button
+              onClick={() => void deactivate()}
+              style={{ padding: "4px 10px", fontSize: 12, cursor: "pointer" }}
+            >
+              Deactivate
+            </button>
+          </div>
+        ) : (
+          <div>
+            <div style={{ fontSize: 13, marginBottom: 8 }}>
+              <strong>Free tier</strong> — 4 downloads per 24 hours. Upgrade to unlimited for ${PRICE_USD}.
+            </div>
+            <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
+              <input
+                type="text"
+                placeholder={LICENSE_FORMAT_HINT}
+                value={licenseInput}
+                onChange={(e) => setLicenseInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void activate();
+                }}
+                style={{ flex: 1, padding: 5, fontSize: 13, fontFamily: "ui-monospace, Menlo, monospace" }}
+              />
+              <button
+                onClick={() => void activate()}
+                style={{ padding: "5px 10px", fontSize: 12, cursor: "pointer" }}
+              >
+                Activate
+              </button>
+            </div>
+            <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 8 }}>
+              <button
+                onClick={openCheckout}
+                style={{
+                  padding: "6px 12px",
+                  fontSize: 12,
+                  fontWeight: 600,
+                  background: "#2c5e2c",
+                  color: "#fff",
+                  border: "1px solid #2c5e2c",
+                  borderRadius: 4,
+                  cursor: "pointer",
+                }}
+              >
+                Buy license — ${PRICE_USD}
+              </button>
+              <span style={helpStyle}>License is emailed after purchase.</span>
+            </div>
+            {licenseError && (
+              <div style={{ color: "#a02a1f", fontSize: 12, marginTop: 6 }}>{licenseError}</div>
+            )}
+            {licenseFlashOk && (
+              <div style={{ color: "#2c5e2c", fontSize: 12, marginTop: 6 }}>License activated.</div>
+            )}
+          </div>
+        )}
       </section>
 
       <section style={{ ...sectionStyle, background: "#f6f6f0", borderColor: "#dcd6b8" }}>

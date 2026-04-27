@@ -3,6 +3,9 @@ import { createRoot } from "react-dom/client";
 import type { DetectedVideo } from "../types";
 import { getDetectedVideos } from "../lib/storage-session";
 import { DEFAULT_SETTINGS, getSettings, type UserSettings } from "../lib/storage-local";
+import { isLicensed } from "../lib/license";
+import { FREE_DOWNLOAD_LIMIT, getDownloadCount } from "../lib/rate-limit";
+import { CHECKOUT_URL, PRICE_USD } from "../lib/constants";
 
 const DIRECT_JOBS_KEY = "download-jobs";
 const HLS_JOBS_KEY = "hls-download-jobs";
@@ -432,16 +435,28 @@ function Popup() {
   const [videos, setVideos] = useState<DetectedVideo[]>([]);
   const [settings, setSettingsState] = useState<UserSettings>(DEFAULT_SETTINGS);
   const [loaded, setLoaded] = useState(false);
+  const [licensed, setLicensed] = useState(false);
+  const [downloadCount, setDownloadCount] = useState(0);
+
+  async function refreshUsage() {
+    const [lic, count] = await Promise.all([isLicensed(), getDownloadCount()]);
+    setLicensed(lic);
+    setDownloadCount(count);
+  }
 
   useEffect(() => {
     let active = true;
     (async () => {
-      const [tabs, s] = await Promise.all([
+      const [tabs, s, lic, count] = await Promise.all([
         chrome.tabs.query({ active: true, currentWindow: true }),
         getSettings(),
+        isLicensed(),
+        getDownloadCount(),
       ]);
       if (!active) return;
       setSettingsState(s);
+      setLicensed(lic);
+      setDownloadCount(count);
       const id = tabs[0]?.id;
       if (id !== undefined) {
         setTabId(id);
@@ -452,6 +467,18 @@ function Popup() {
     return () => {
       active = false;
     };
+  }, []);
+
+  useEffect(() => {
+    const listener = (
+      changes: { [key: string]: chrome.storage.StorageChange },
+      area: string,
+    ) => {
+      if (area !== "local") return;
+      if (changes["download-history"] || changes["license"]) void refreshUsage();
+    };
+    chrome.storage.onChanged.addListener(listener);
+    return () => chrome.storage.onChanged.removeListener(listener);
   }, []);
 
   useEffect(() => {
@@ -470,6 +497,45 @@ function Popup() {
   }, [tabId]);
 
   const version = chrome.runtime.getManifest().version;
+  const remaining = Math.max(0, FREE_DOWNLOAD_LIMIT - downloadCount);
+  const atLimit = !licensed && remaining === 0;
+
+  function onUpgrade() {
+    if (CHECKOUT_URL.startsWith("http")) {
+      window.open(CHECKOUT_URL, "_blank");
+    } else {
+      window.alert(
+        "Checkout link not configured yet. Set CHECKOUT_URL in extension/src/lib/constants.ts to your Stripe checkout URL.",
+      );
+    }
+  }
+
+  async function downloadAll() {
+    if (tabId === null) return;
+    const result = await chrome.storage.session.get([DIRECT_JOBS_KEY, HLS_JOBS_KEY]);
+    const directs = (result[DIRECT_JOBS_KEY] as Record<string, DirectJob>) ?? {};
+    const hlses = (result[HLS_JOBS_KEY] as Record<string, HlsJob>) ?? {};
+
+    const isActive = (status: string) =>
+      status === "in_progress" || status === "running" || status === "saving";
+
+    for (const v of videos) {
+      if (v.kind === "dash") continue;
+
+      const matches = [
+        ...Object.values(directs).filter((j) => j.videoId === v.id && j.tabId === tabId),
+        ...Object.values(hlses).filter((j) => j.videoId === v.id && j.tabId === tabId),
+      ];
+      const eligible = !matches.some(
+        (j) => isActive(j.status) || j.status === "complete",
+      );
+      if (!eligible) continue;
+
+      void chrome.runtime
+        .sendMessage({ type: "download", tabId, videoId: v.id })
+        .catch(() => {});
+    }
+  }
 
   function renderBody() {
     if (!loaded) {
@@ -508,10 +574,39 @@ function Popup() {
         }}
       >
         <h2 style={{ margin: 0, fontSize: 14 }}>Video Archive</h2>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+          <span
+            style={{
+              color: licensed ? "#2c5e2c" : atLimit ? "#a02a1f" : "#999",
+              fontSize: 11,
+              fontWeight: licensed || atLimit ? 600 : 400,
+            }}
+            title={licensed ? "Unlimited downloads (licensed)" : `Free tier: ${remaining} of ${FREE_DOWNLOAD_LIMIT} downloads left in the next 24h`}
+          >
+            {licensed ? "Licensed" : `${remaining}/${FREE_DOWNLOAD_LIMIT} left`}
+          </span>
+          <span style={{ color: "#ddd", fontSize: 11 }}>·</span>
           <span style={{ color: "#999", fontSize: 11 }}>
             {videos.length > 0 ? `${videos.length} detected` : ""}
           </span>
+          {videos.some((v) => v.kind !== "dash") && (
+            <button
+              onClick={() => void downloadAll()}
+              title="Download all detected videos (skips DASH, in-flight, and already-saved)"
+              style={{
+                border: "1px solid #2c5e2c",
+                background: "#fff",
+                color: "#2c5e2c",
+                borderRadius: 4,
+                padding: "2px 8px",
+                cursor: "pointer",
+                fontSize: 11,
+                fontWeight: 600,
+              }}
+            >
+              Download all
+            </button>
+          )}
           <button
             onClick={() => chrome.runtime.openOptionsPage()}
             title="Settings"
@@ -530,6 +625,41 @@ function Popup() {
           </button>
         </div>
       </div>
+      {atLimit && (
+        <div
+          style={{
+            marginTop: 10,
+            padding: "8px 10px",
+            background: "#fdecea",
+            border: "1px solid #f3b6b0",
+            borderRadius: 4,
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            gap: 8,
+          }}
+        >
+          <div style={{ fontSize: 11, color: "#7a1f1a" }}>
+            <strong>Daily limit reached.</strong> You've used all {FREE_DOWNLOAD_LIMIT} free downloads in the last 24 hours.
+          </div>
+          <button
+            onClick={onUpgrade}
+            style={{
+              border: "1px solid #2c5e2c",
+              background: "#2c5e2c",
+              color: "#fff",
+              borderRadius: 4,
+              padding: "4px 10px",
+              cursor: "pointer",
+              fontSize: 11,
+              fontWeight: 600,
+              whiteSpace: "nowrap",
+            }}
+          >
+            Upgrade ${PRICE_USD}
+          </button>
+        </div>
+      )}
       <div style={{ marginTop: 10 }}>{renderBody()}</div>
       <footer
         style={{
@@ -540,16 +670,7 @@ function Popup() {
           paddingTop: 6,
         }}
       >
-        v{version} ·{" "}
-        <a
-          href="https://github.com/mra454/video-archive"
-          target="_blank"
-          rel="noreferrer"
-          style={{ color: "#999" }}
-          title="Open source repository"
-        >
-          GitHub
-        </a>
+        v{version}
       </footer>
     </div>
   );

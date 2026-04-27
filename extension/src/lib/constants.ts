@@ -27,3 +27,6 @@ export const VIDEO_REQUEST_TYPES: chrome.webRequest.ResourceType[] = [
   "media",
   "other",
 ];
+
+export const PRICE_USD = 35;
+export const CHECKOUT_URL = "TODO_CHECKOUT_URL";
