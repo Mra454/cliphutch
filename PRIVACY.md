@@ -11,6 +11,7 @@ ClipHutch observes the network requests your browser makes on HTTP and HTTPS pag
 While you browse, the extension observes only the following data, and only on HTTP/HTTPS pages:
 
 - **Network request URLs and a small number of response headers** (`content-type`, `content-length`, `content-disposition`) for video-related requests (HTML/sub-frame/XHR/media/other request types). Segment requests for HLS streams are ignored at detection time.
+- **A small set of request headers from the same video requests** — specifically `Referer`, `Origin`, `User-Agent`, `Authorization`, and any `X-*` custom headers the page sent. These are kept in browser memory only, scoped to the originating tab, and cleared when the tab navigates away or closes. They are used to replay the same headers on the extension's own download fetch when you click Download, so that servers requiring those headers serve the file. The extension never logs these headers, sends them anywhere, or writes them to disk.
 - **The active tab's URL and title**, used solely to associate detected videos with the page they came from.
 
 The extension does not inject content scripts and does not read page DOM content.
@@ -43,11 +44,12 @@ When you download a video — whether direct (MP4 / WebM) or HLS — the extensi
 
 | Permission | Why it's required |
 | --- | --- |
-| `webRequest` | Observe network requests so the extension can detect video URLs as the page loads them. All processing happens on your device. |
+| `webRequest` | Observe network requests, including request headers, so the extension can detect video URLs as the page loads them and (when you click Download) replay the request headers the page sent. All processing happens on your device. |
 | `storage` | Store detected video URLs in browser session memory and store user settings in browser local storage. |
 | `downloads` | Save detected videos via Chrome's built-in download manager. |
 | `offscreen` | Briefly assemble HLS video segments into a downloadable file. |
-| `http://*/*`, `https://*/*` | Required for `webRequest` to observe network requests across HTTP/HTTPS sites. The extension does not inject content scripts and does not read page DOM content. It does process network request URLs and the active tab's URL/title to associate detected videos with the page. |
+| `declarativeNetRequestWithHostAccess` | When you click Download on a video that requires headers (such as a Referer or Authorization header) the original page sent, the extension installs a temporary, session-scoped browser rule to attach those captured headers to its own download fetch. The rule applies only to requests initiated by this extension and is removed when the download completes, fails, or the tab closes. |
+| `http://*/*`, `https://*/*` | Required for `webRequest` to observe network requests across HTTP/HTTPS sites. The extension does not inject content scripts and does not read page DOM content. It does process network request URLs, request headers it observed when the page loaded, and the active tab's URL/title to associate detected videos with the page. |
 
 ## 6. Contact
 

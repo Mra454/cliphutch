@@ -165,7 +165,13 @@ if (!existsSync(manifestPath)) {
   if (manifest.minimum_chrome_version === "116") pass(`minimum_chrome_version === "116"`);
   else fail(`minimum_chrome_version is "${manifest.minimum_chrome_version}", expected "116"`);
 
-  const expectedPerms = ["webRequest", "storage", "downloads", "offscreen"];
+  const expectedPerms = [
+    "webRequest",
+    "storage",
+    "downloads",
+    "offscreen",
+    "declarativeNetRequestWithHostAccess",
+  ];
   const perms = manifest.permissions ?? [];
   if (
     perms.length === expectedPerms.length &&

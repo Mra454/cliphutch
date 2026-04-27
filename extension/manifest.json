@@ -4,7 +4,13 @@
   "version": "0.1.0",
   "description": "Your browser's media shelf. Detect and capture videos web pages load as you browse.",
   "minimum_chrome_version": "116",
-  "permissions": ["webRequest", "storage", "downloads", "offscreen"],
+  "permissions": [
+    "webRequest",
+    "storage",
+    "downloads",
+    "offscreen",
+    "declarativeNetRequestWithHostAccess"
+  ],
   "host_permissions": ["http://*/*", "https://*/*"],
   "background": {
     "service_worker": "background.js",

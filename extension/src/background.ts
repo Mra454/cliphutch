@@ -5,6 +5,12 @@ import { inferFilename } from "./lib/filename";
 import { getSettings } from "./lib/storage-local";
 import { isLicensed } from "./lib/license";
 import { FREE_DOWNLOAD_LIMIT, isRateLimited, recordDownload } from "./lib/rate-limit";
+import {
+  buildSessionRule,
+  extractCapturedHeaders,
+  hasReplayableHeaders,
+  type CapturedHeaders,
+} from "./lib/header-capture";
 import type { DetectedVideo, VideoKind } from "./types";
 
 type TabInfo = { pageUrl?: string; pageTitle?: string };
@@ -14,9 +20,17 @@ type Pending = {
   kind: VideoKind;
   tabId: number;
   tabInfo: Promise<TabInfo>;
+  capturedHeaders?: CapturedHeaders;
 };
 
 const pendingByRequestId = new Map<string, Pending>();
+
+// Captured headers from the page's original request, keyed by videoId.
+// Used at download time to install a session DNR rule that replays them on
+// extension-initiated fetches. In-memory only; lost on service-worker
+// eviction (graceful degradation: download proceeds without replay).
+const headersByVideoId = new Map<string, CapturedHeaders>();
+const headersVideoIdsByTabId = new Map<number, Set<string>>();
 
 function makeId(url: string, tabId: number): string {
   const input = `${tabId}:${url}`;
@@ -86,6 +100,16 @@ chrome.webRequest.onBeforeRequest.addListener(
   { urls: ["<all_urls>"], types: VIDEO_REQUEST_TYPES },
 );
 
+chrome.webRequest.onBeforeSendHeaders.addListener(
+  (details) => {
+    const pending = pendingByRequestId.get(details.requestId);
+    if (!pending) return;
+    pending.capturedHeaders = extractCapturedHeaders(details.requestHeaders);
+  },
+  { urls: ["<all_urls>"], types: VIDEO_REQUEST_TYPES },
+  ["requestHeaders", "extraHeaders"],
+);
+
 async function handleHeadersReceived(
   details: chrome.webRequest.WebResponseHeadersDetails,
 ): Promise<void> {
@@ -117,8 +141,25 @@ async function handleHeadersReceived(
     contentDisposition,
   };
 
+  if (pending.capturedHeaders && hasReplayableHeaders(pending.capturedHeaders)) {
+    headersByVideoId.set(video.id, pending.capturedHeaders);
+    let ids = headersVideoIdsByTabId.get(pending.tabId);
+    if (!ids) {
+      ids = new Set();
+      headersVideoIdsByTabId.set(pending.tabId, ids);
+    }
+    ids.add(video.id);
+  }
+
   await addOrUpdateVideo(pending.tabId, video);
   await updateBadge(pending.tabId);
+}
+
+function clearCapturedHeadersForTab(tabId: number): void {
+  const ids = headersVideoIdsByTabId.get(tabId);
+  if (!ids) return;
+  for (const id of ids) headersByVideoId.delete(id);
+  headersVideoIdsByTabId.delete(tabId);
 }
 
 chrome.webRequest.onHeadersReceived.addListener(
@@ -156,11 +197,13 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  clearCapturedHeadersForTab(tabId);
   void clearTab(tabId);
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === "loading" && changeInfo.url) {
+    clearCapturedHeadersForTab(tabId);
     void clearTab(tabId).then(() => updateBadge(tabId));
   }
 });
@@ -176,6 +219,45 @@ type DownloadJob = {
   status: DownloadStatus;
   errorMessage?: string;
 };
+
+let nextRuleId = 1;
+const ruleIdsByJobKey = new Map<string, number>();
+
+async function installHeaderReplayRule(
+  jobKey: string,
+  videoId: string,
+  url: string,
+  kind: "hls" | "dash" | "direct",
+): Promise<void> {
+  const captured = headersByVideoId.get(videoId);
+  if (!captured || !hasReplayableHeaders(captured)) return;
+
+  const ruleId = nextRuleId++;
+  const rule = buildSessionRule({
+    ruleId,
+    url,
+    kind,
+    captured,
+    extensionId: chrome.runtime.id,
+  });
+  try {
+    await chrome.declarativeNetRequest.updateSessionRules({ addRules: [rule] });
+    ruleIdsByJobKey.set(jobKey, ruleId);
+  } catch {
+    // If rule install fails, the download still proceeds without replay.
+  }
+}
+
+async function removeHeaderReplayRule(jobKey: string): Promise<void> {
+  const ruleId = ruleIdsByJobKey.get(jobKey);
+  if (ruleId === undefined) return;
+  ruleIdsByJobKey.delete(jobKey);
+  try {
+    await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [ruleId] });
+  } catch {
+    // Rule may already be gone if the session was cleared.
+  }
+}
 
 const DOWNLOAD_JOBS_KEY = "download-jobs";
 
@@ -226,6 +308,8 @@ async function handleDownloadRequest(req: DownloadRequest): Promise<DownloadResp
     return result;
   }
 
+  const directJobKey = `direct:${video.id}`;
+  await installHeaderReplayRule(directJobKey, video.id, video.url, "direct");
   try {
     const downloadId = await chrome.downloads.download({
       url: video.url,
@@ -234,6 +318,7 @@ async function handleDownloadRequest(req: DownloadRequest): Promise<DownloadResp
       saveAs: false,
     });
     if (downloadId === undefined) {
+      await removeHeaderReplayRule(directJobKey);
       return { ok: false, error: DIRECT_DOWNLOAD_FAILURE_MESSAGE };
     }
     await setDownloadJob({
@@ -247,6 +332,7 @@ async function handleDownloadRequest(req: DownloadRequest): Promise<DownloadResp
     await recordDownload();
     return { ok: true, downloadId };
   } catch (err) {
+    await removeHeaderReplayRule(directJobKey);
     return {
       ok: false,
       error: err instanceof Error && err.message ? err.message : DIRECT_DOWNLOAD_FAILURE_MESSAGE,
@@ -269,10 +355,12 @@ async function handleDownloadChange(delta: chrome.downloads.DownloadDelta): Prom
       job.status = "complete";
       delete job.errorMessage;
       await setDownloadJob(job);
+      await removeHeaderReplayRule(`direct:${job.videoId}`);
     } else if (delta.state.current === "interrupted") {
       job.status = "interrupted";
       job.errorMessage = DIRECT_DOWNLOAD_FAILURE_MESSAGE;
       await setDownloadJob(job);
+      await removeHeaderReplayRule(`direct:${job.videoId}`);
     }
     return;
   }
@@ -284,12 +372,14 @@ async function handleDownloadChange(delta: chrome.downloads.DownloadDelta): Prom
   if (delta.state.current === "complete") {
     hls.status = "complete";
     await setHlsJob(hls);
+    await removeHeaderReplayRule(`hls:${hls.jobId}`);
     void chrome.runtime.sendMessage({ type: "hls-download-revoke", jobId: hls.jobId }).catch(() => {});
   } else if (delta.state.current === "interrupted") {
     hls.status = "error";
     hls.errorMessage = DIRECT_DOWNLOAD_FAILURE_MESSAGE;
     hls.errorCode = "SAVE_INTERRUPTED";
     await setHlsJob(hls);
+    await removeHeaderReplayRule(`hls:${hls.jobId}`);
     void chrome.runtime.sendMessage({ type: "hls-download-revoke", jobId: hls.jobId }).catch(() => {});
   }
 }
@@ -371,6 +461,8 @@ async function startHlsDownload(
     return { ok: false, error: job?.errorMessage ?? "Could not start offscreen document." };
   }
 
+  await installHeaderReplayRule(`hls:${jobId}`, video.id, video.url, "hls");
+
   void chrome.runtime
     .sendMessage({
       type: "hls-download-start",
@@ -411,6 +503,7 @@ async function handleHlsBlobReady(msg: {
     job.errorMessage = "Video missing when saving HLS download.";
     job.errorCode = "VIDEO_MISSING";
     await setHlsJob(job);
+    await removeHeaderReplayRule(`hls:${msg.jobId}`);
     void chrome.runtime.sendMessage({ type: "hls-download-revoke", jobId: msg.jobId }).catch(() => {});
     return;
   }
@@ -430,6 +523,7 @@ async function handleHlsBlobReady(msg: {
     job.errorMessage = err instanceof Error ? err.message : "Could not save HLS file.";
     job.errorCode = "SAVE_FAILED";
     await setHlsJob(job);
+    await removeHeaderReplayRule(`hls:${msg.jobId}`);
     void chrome.runtime.sendMessage({ type: "hls-download-revoke", jobId: msg.jobId }).catch(() => {});
   }
 }
@@ -446,6 +540,7 @@ async function handleHlsError(msg: {
   job.errorCode = msg.code;
   job.errorMessage = msg.userMessage;
   await setHlsJob(job);
+  await removeHeaderReplayRule(`hls:${msg.jobId}`);
 }
 
 chrome.runtime.onMessage.addListener((message: unknown) => {
