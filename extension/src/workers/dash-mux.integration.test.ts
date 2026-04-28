@@ -25,7 +25,13 @@ const AUDIO_PATH = resolve(FIXTURES_DIR, "audio.m4a");
 
 const fixturesPresent = existsSync(VIDEO_PATH) && existsSync(AUDIO_PATH);
 
-type AnyBox = { type?: string; boxes?: AnyBox[]; data?: Uint8Array };
+type AnyBox = {
+  type?: string;
+  boxes?: AnyBox[];
+  data?: Uint8Array;
+  size?: number;
+  hdr_size?: number;
+};
 type ParsedFile = {
   tracks: Array<{ id: number; codec: string; nb_samples: number; type: "video" | "audio" | string }>;
   // mp4box's traks shorthand on moov
@@ -116,14 +122,31 @@ describe("dash-mux integration (real fMP4 fixtures)", () => {
     expect(avcC!.PPS![0].data.byteLength).toBeGreaterThan(0);
 
     // Audio sample entry should have an esds child with a non-empty body
+    // AND the body length should match the FullBox-aware (size - 12)
+    // expectation. mp4box's default round-trip captures (size - 8) bytes
+    // into this.data — including the 4-byte version+flags prefix — and
+    // the writer then emits version+flags TWICE, corrupting the
+    // descriptor by 4 bytes. The d501b08 patch had to be made
+    // unconditional in d-this-commit to actually fix it; this test
+    // catches the off-by-4 if the patch ever regresses.
     const audioTrak = info.moov.traks.find((t) => t.tkhd.track_id === audioTrack!.id);
     expect(audioTrak).toBeDefined();
     const audioEntry = audioTrak!.mdia.minf.stbl.stsd.entries[0];
-    const esds = findChild(audioEntry, "esds");
-    expect(esds, "audio sample entry should carry an esds child").toBeDefined();
-    // After the d501b08 patch, esds carries this.data; a zero-length body
-    // here would mean the round-trip dropped the AAC config.
-    expect(esds!.data?.byteLength ?? 0).toBeGreaterThan(0);
+    const muxedEsds = findChild(audioEntry, "esds");
+    expect(muxedEsds, "audio sample entry should carry an esds child").toBeDefined();
+    expect(muxedEsds!.data?.byteLength ?? 0).toBeGreaterThan(0);
+
+    // Source's esds bytes should round-trip identically into the muxed
+    // output (codec-copy mux preserves the descriptor). If the muxer
+    // injects the 4 spurious version+flags bytes, this comparison fails.
+    const srcAudioParsed = parseToFile(audioBytes);
+    const srcAudioTrak = srcAudioParsed.info.moov.traks[0];
+    const srcEsds = findChild(srcAudioTrak.mdia.minf.stbl.stsd.entries[0], "esds");
+    expect(srcEsds, "source audio should have an esds to compare against").toBeDefined();
+    // Both should have the same body length (size - 12 for FullBox)
+    expect(muxedEsds!.data?.byteLength).toBe(srcEsds!.data?.byteLength);
+    // And byte-for-byte content
+    expect(Array.from(muxedEsds!.data!)).toEqual(Array.from(srcEsds!.data!));
 
     // Sample counts: parseToFile counts every sample emitted via onSamples
     // across all tracks. That should equal video samples + audio samples

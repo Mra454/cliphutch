@@ -66,25 +66,44 @@ type ParsedTrack = {
 
 type Parsed = { iso: AnyIso; track: ParsedTrack; samples: ParsedSample[] };
 
-// `esdsBox.parse` reads the body bytes into a local variable but doesn't
-// store them on `this.data`, and there's no custom `write` (mp4box.all.js
-// :4353-4361). When the default Box.write later serializes the output, it
-// emits only the 12-byte FullBox header — AAC config gone, audio silent.
-// Workaround: re-read the body bytes from the original source buffer and
-// populate `this.data` so the default writer round-trips.
+// FullBox subclasses (esds, btrt, others) round-trip incorrectly through
+// mp4box's default write path. Trace:
+//
+//   1. The box parser scaffold (mp4box.all.js:2718) sets
+//      `box.hdr_size = 8` (the base Box header — version+flags not yet
+//      read), then checks `box.write === Box.prototype.write`. If the
+//      box class doesn't override write (esds doesn't), it calls
+//      `parseDataAndRewind(stream)` BEFORE invoking `box.parse(stream)`.
+//   2. `parseDataAndRewind` reads `(size - 8)` bytes — i.e. the
+//      version+flags 4 bytes AND the actual body — into `this.data`.
+//   3. `box.parse` then runs `parseFullHeader` which advances hdr_size
+//      to 12 but reads version+flags from the rewound stream into
+//      `this.version` / `this.flags`.
+//
+// Net: after parse, `this.data` is `(size - 8)` bytes starting with
+// version+flags, while `this.version` / `this.flags` are also set.
+// Default `Box.write` then emits `[FullBox header 12 bytes which include
+// version+flags][this.data which ALSO starts with version+flags]` —
+// version+flags duplicated, body shifted right by 4, ESD descriptor
+// becomes garbage, AAC decoder fails silently.
+//
+// Fix: overwrite `this.data` with just the body bytes (after the FullBox
+// header, length `size - 12`). Always replace — the existing data set by
+// `parseDataAndRewind` is wrong, not absent.
 function patchUnserializedBoxData(entryBoxes: AnyBox[], sourceBytes: Uint8Array): void {
-  // Box types that mp4box parses without persisting raw bytes on this.data.
-  // esds is the documented case; add others here if more emerge.
+  // Box types whose mp4box default round-trip is broken. esds is the
+  // documented case; add others here if more emerge from field test.
   const NEEDS_PATCH = new Set(["esds"]);
   for (const child of entryBoxes) {
     if (
       child.type !== undefined &&
       NEEDS_PATCH.has(child.type) &&
-      child.data === undefined &&
       typeof child.start === "number" &&
       typeof child.size === "number" &&
       typeof child.hdr_size === "number"
     ) {
+      // Use the post-parse hdr_size (12 for FullBox), not the value that
+      // was current at parseDataAndRewind time (8).
       child.data = sourceBytes.slice(child.start + child.hdr_size, child.start + child.size);
     }
   }
