@@ -23,6 +23,7 @@
   "dependencies": {
     "fast-xml-parser": "^5.7.2",
     "m3u8-parser": "^7.2.0",
+    "mp4box": "^2.3.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   }

@@ -375,18 +375,6 @@ function VideoCard({
     }
 
     if (!job) {
-      if (v.kind === "dash") {
-        return (
-          <>
-            <div style={noteBoxStyle}>
-              Saves 2 files: video + audio. Mux with ffmpeg or play together in VLC.
-            </div>
-            <button onClick={onDownload} style={{ ...buttonStyle, marginTop: 6 }}>
-              Download
-            </button>
-          </>
-        );
-      }
       return (
         <button onClick={onDownload} style={{ ...buttonStyle, marginTop: 6 }}>
           Download
@@ -501,12 +489,10 @@ function VideoCard({
 
     // DASH branch
     if (job.status === "running") {
-      const { videoDone, videoTotal, audioDone, audioTotal, bytes } = job.progress;
-      const total = videoTotal + audioTotal;
-      const done = videoDone + audioDone;
+      const { done, total, bytes } = job.progress;
       const text =
         total > 0
-          ? `Downloading ${done} of ${total} segments (video+audio)… (${fmtBytes(bytes) ?? "0 B"})`
+          ? `Downloading ${done} of ${total} segments… (${fmtBytes(bytes) ?? "0 B"})`
           : "Starting DASH download…";
       const pct = total > 0 ? done / total : null;
       return (
@@ -524,26 +510,20 @@ function VideoCard({
     if (job.status === "saving") {
       return (
         <div style={{ marginTop: 6, fontSize: 11, color: "#444" }}>
-          Saving 2 files (video + audio)…
+          Muxing video + audio into one MP4…
         </div>
       );
     }
     if (job.status === "complete") {
       return (
-        <div style={{ marginTop: 6 }}>
-          <div style={noteBoxStyle}>
-            Saved 2 files: <code>.video.mp4</code> + <code>.audio.m4a</code>. Mux with{" "}
-            <code>ffmpeg -i in.video.mp4 -i in.audio.m4a -c copy out.mp4</code>, or play together in VLC.
-          </div>
-          <div style={{ marginTop: 6, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <span style={{ color: "#2c5e2c", fontSize: 11 }}>Saved</span>
-            <button
-              onClick={() => job.videoDownloadId !== undefined && chrome.downloads.show(job.videoDownloadId)}
-              style={buttonStyle}
-            >
-              Show in folder
-            </button>
-          </div>
+        <div style={{ marginTop: 6, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
+          <span style={{ color: "#2c5e2c", fontSize: 11 }}>Saved</span>
+          <button
+            onClick={() => job.downloadId !== undefined && chrome.downloads.show(job.downloadId)}
+            style={buttonStyle}
+          >
+            Show in folder
+          </button>
         </div>
       );
     }

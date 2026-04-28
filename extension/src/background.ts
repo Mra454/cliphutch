@@ -15,7 +15,6 @@ import type {
   DetectedVideo,
   DashJob,
   HlsJob,
-  StreamSaveStatus,
   VideoKind,
 } from "./types";
 
@@ -468,41 +467,21 @@ async function handleDownloadChange(delta: chrome.downloads.DownloadDelta): Prom
   }
 
   const dashJobs = await getDashJobs();
-  const dash = Object.values(dashJobs).find(
-    (j) => j.videoDownloadId === delta.id || j.audioDownloadId === delta.id,
-  );
+  const dash = Object.values(dashJobs).find((j) => j.downloadId === delta.id);
   if (!dash) return;
 
-  const isVideo = dash.videoDownloadId === delta.id;
-  const newStatus: StreamSaveStatus =
-    delta.state.current === "complete" ? "complete" : "interrupted";
-  if (isVideo) dash.videoSaveStatus = newStatus;
-  else dash.audioSaveStatus = newStatus;
-
-  const videoTerminal = dash.videoSaveStatus === "complete" || dash.videoSaveStatus === "interrupted";
-  // audioSaveStatus is set to "pending" upfront iff the manifest had an audio
-  // adaptation set (see handleDashBlobsReady). undefined here means "no audio"
-  // — terminal vacuously. "pending" means "queued, not yet settled".
-  const audioTerminal =
-    dash.audioSaveStatus === undefined ||
-    dash.audioSaveStatus === "complete" ||
-    dash.audioSaveStatus === "interrupted";
-
-  if (videoTerminal && audioTerminal) {
-    const anyInterrupted =
-      dash.videoSaveStatus === "interrupted" || dash.audioSaveStatus === "interrupted";
-    if (anyInterrupted) {
-      dash.status = "error";
-      dash.errorMessage = DIRECT_DOWNLOAD_FAILURE_MESSAGE;
-      dash.errorCode = "SAVE_INTERRUPTED";
-    } else {
-      dash.status = "complete";
-    }
+  if (delta.state.current === "complete") {
+    dash.status = "complete";
     await setDashJob(dash);
     await removeHeaderReplayRule(`dash:${dash.jobId}`);
     void chrome.runtime.sendMessage({ type: "dash-download-revoke", jobId: dash.jobId }).catch(() => {});
-  } else {
+  } else if (delta.state.current === "interrupted") {
+    dash.status = "error";
+    dash.errorMessage = DIRECT_DOWNLOAD_FAILURE_MESSAGE;
+    dash.errorCode = "SAVE_INTERRUPTED";
     await setDashJob(dash);
+    await removeHeaderReplayRule(`dash:${dash.jobId}`);
+    void chrome.runtime.sendMessage({ type: "dash-download-revoke", jobId: dash.jobId }).catch(() => {});
   }
 }
 
@@ -672,8 +651,8 @@ chrome.runtime.onMessage.addListener((message: unknown) => {
     void handleHlsError(message as Parameters<typeof handleHlsError>[0]);
   } else if (m.type === "dash-download-progress") {
     void handleDashProgress(message as Parameters<typeof handleDashProgress>[0]);
-  } else if (m.type === "dash-download-blobs-ready") {
-    void handleDashBlobsReady(message as Parameters<typeof handleDashBlobsReady>[0]);
+  } else if (m.type === "dash-download-blob-ready") {
+    void handleDashBlobReady(message as Parameters<typeof handleDashBlobReady>[0]);
   } else if (m.type === "dash-download-error") {
     void handleDashError(message as Parameters<typeof handleDashError>[0]);
   }
@@ -711,7 +690,7 @@ async function startDashDownload(
     kind: "dash",
     startedAt: Date.now(),
     status: "running",
-    progress: { videoDone: 0, videoTotal: 0, audioDone: 0, audioTotal: 0, bytes: 0 },
+    progress: { done: 0, total: 0, bytes: 0 },
   });
 
   try {
@@ -748,33 +727,21 @@ async function startDashDownload(
 
 async function handleDashProgress(msg: {
   jobId: string;
-  videoDone: number;
-  videoTotal: number;
-  audioDone: number;
-  audioTotal: number;
+  done: number;
+  total: number;
   bytes: number;
 }): Promise<void> {
   const jobs = await getDashJobs();
   const job = jobs[msg.jobId];
   if (!job) return;
-  job.progress = {
-    videoDone: msg.videoDone,
-    videoTotal: msg.videoTotal,
-    audioDone: msg.audioDone,
-    audioTotal: msg.audioTotal,
-    bytes: msg.bytes,
-  };
+  job.progress = { done: msg.done, total: msg.total, bytes: msg.bytes };
   await setDashJob(job);
 }
 
-async function handleDashBlobsReady(msg: {
+async function handleDashBlobReady(msg: {
   jobId: string;
-  videoBlobUrl: string;
-  audioBlobUrl?: string;
-  videoSizeBytes: number;
-  audioSizeBytes?: number;
-  videoMimeType: string;
-  audioMimeType?: string;
+  blobUrl: string;
+  sizeBytes: number;
 }): Promise<void> {
   const jobs = await getDashJobs();
   const job = jobs[msg.jobId];
@@ -791,40 +758,19 @@ async function handleDashBlobsReady(msg: {
     return;
   }
 
-  // Pre-initialize save statuses BEFORE queueing any chrome.downloads.download
-  // so that an early onChanged for the video (between the two download() awaits)
-  // can't make audioTerminal vacuously true and prematurely mark the whole
-  // job complete.
-  job.videoSaveStatus = "pending";
-  if (msg.audioBlobUrl) job.audioSaveStatus = "pending";
-  job.status = "saving";
-  await setDashJob(job);
-
   try {
-    const videoFilename = inferFilename(video, { forcedExtension: ".video.mp4" });
-    const videoDownloadId = await chrome.downloads.download({
-      url: msg.videoBlobUrl,
-      filename: videoFilename,
+    const downloadId = await chrome.downloads.download({
+      url: msg.blobUrl,
+      filename: inferFilename(video, { forcedExtension: ".mp4" }),
       conflictAction: "uniquify",
       saveAs: false,
     });
-    job.videoDownloadId = videoDownloadId;
+    job.downloadId = downloadId;
+    job.status = "saving";
     await setDashJob(job);
-
-    if (msg.audioBlobUrl) {
-      const audioFilename = inferFilename(video, { forcedExtension: ".audio.m4a" });
-      const audioDownloadId = await chrome.downloads.download({
-        url: msg.audioBlobUrl,
-        filename: audioFilename,
-        conflictAction: "uniquify",
-        saveAs: false,
-      });
-      job.audioDownloadId = audioDownloadId;
-      await setDashJob(job);
-    }
   } catch (err) {
     job.status = "error";
-    job.errorMessage = err instanceof Error ? err.message : "Could not save DASH files.";
+    job.errorMessage = err instanceof Error ? err.message : "Could not save DASH file.";
     job.errorCode = "SAVE_FAILED";
     await setDashJob(job);
     await removeHeaderReplayRule(`dash:${msg.jobId}`);

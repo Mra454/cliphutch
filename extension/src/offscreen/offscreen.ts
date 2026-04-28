@@ -11,8 +11,6 @@ type ActiveJob = {
   jobId: string;
   controller: AbortController;
   blobUrl?: string;
-  videoBlobUrl?: string;
-  audioBlobUrl?: string;
 };
 
 const activeJobs = new Map<string, ActiveJob>();
@@ -167,7 +165,7 @@ async function runDashJob(msg: DashStartMessage): Promise<void> {
   activeJobs.set(msg.jobId, job);
 
   try {
-    const result = await downloadDash(msg.url, {
+    const blob = await downloadDash(msg.url, {
       sizeCapBytes: msg.sizeCapBytes,
       signal: controller.signal,
       videoRepresentationId: msg.videoRepresentationId,
@@ -175,32 +173,21 @@ async function runDashJob(msg: DashStartMessage): Promise<void> {
         send({
           type: "dash-download-progress",
           jobId: msg.jobId,
-          videoDone: p.videoDone,
-          videoTotal: p.videoTotal,
-          audioDone: p.audioDone,
-          audioTotal: p.audioTotal,
+          done: p.videoDone + p.audioDone,
+          total: p.videoTotal + p.audioTotal,
           bytes: p.bytes,
         });
       },
     });
 
-    const videoBlobUrl = URL.createObjectURL(result.video);
-    job.videoBlobUrl = videoBlobUrl;
-    let audioBlobUrl: string | undefined;
-    if (result.audio) {
-      audioBlobUrl = URL.createObjectURL(result.audio);
-      job.audioBlobUrl = audioBlobUrl;
-    }
+    const blobUrl = URL.createObjectURL(blob);
+    job.blobUrl = blobUrl;
 
     send({
-      type: "dash-download-blobs-ready",
+      type: "dash-download-blob-ready",
       jobId: msg.jobId,
-      videoBlobUrl,
-      audioBlobUrl,
-      videoSizeBytes: result.video.size,
-      audioSizeBytes: result.audio?.size,
-      videoMimeType: result.videoMimeType,
-      audioMimeType: result.audioMimeType,
+      blobUrl,
+      sizeBytes: blob.size,
     });
   } catch (err) {
     if (err instanceof HlsDownloadError) {
@@ -224,8 +211,6 @@ async function runDashJob(msg: DashStartMessage): Promise<void> {
 
 function revokeJobBlobs(job: ActiveJob): void {
   if (job.blobUrl) URL.revokeObjectURL(job.blobUrl);
-  if (job.videoBlobUrl) URL.revokeObjectURL(job.videoBlobUrl);
-  if (job.audioBlobUrl) URL.revokeObjectURL(job.audioBlobUrl);
 }
 
 async function listVariants(msg: ListVariantsMessage): Promise<ListVariantsResult> {

@@ -1,5 +1,18 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { downloadDash } from "./dash-downloader";
+
+// Synthetic byte fixtures aren't valid fMP4; stub the muxer with a
+// deterministic concat-and-tag so the tests can assert on the fetch +
+// orchestration logic without depending on mp4box.js.
+vi.mock("./dash-mux", () => ({
+  muxFmp4: async (videoBytes: Uint8Array, audioBytes?: Uint8Array) => {
+    const total = videoBytes.length + (audioBytes?.length ?? 0);
+    const out = new Uint8Array(total);
+    out.set(videoBytes, 0);
+    if (audioBytes) out.set(audioBytes, videoBytes.length);
+    return out;
+  },
+}));
 import {
   AccessDeniedError,
   ByteRangeError,
@@ -102,10 +115,9 @@ describe("downloadDash", () => {
       onProgress: (p) =>
         progress.push({ videoDone: p.videoDone, audioDone: p.audioDone, bytes: p.bytes }),
     });
-    expect(result.video.size).toBe(12);
-    expect(result.audio?.size).toBe(6);
-    expect(result.videoMimeType).toBe("video/mp4");
-    expect(result.audioMimeType).toBe("audio/mp4");
+    // Stubbed muxer concats video then audio: 12 + 6 = 18 bytes
+    expect(result.size).toBe(18);
+    expect(result.type).toBe("video/mp4");
     expect(progress.at(-1)?.videoDone).toBe(2);
     expect(progress.at(-1)?.audioDone).toBe(2);
   });
@@ -122,8 +134,8 @@ describe("downloadDash", () => {
       fetchImpl,
       onProgress: () => {},
     });
-    expect(result.video.size).toBe(2);
-    expect(result.audio).toBeUndefined();
+    expect(result.size).toBe(2);
+    expect(result.type).toBe("video/mp4");
   });
 
   it("throws DrmProtectedError for Widevine-protected manifest", async () => {

@@ -47,11 +47,11 @@ export type DashJob = {
   kind: "dash";
   startedAt: number;
   status: StreamJobStatus;
-  progress: { videoDone: number; videoTotal: number; audioDone: number; audioTotal: number; bytes: number };
-  videoDownloadId?: number;
-  audioDownloadId?: number;
-  videoSaveStatus?: StreamSaveStatus;
-  audioSaveStatus?: StreamSaveStatus;
+  // done/total are combined video + audio segment counts. The downloader
+  // fetches them separately but we mux into one file before saving, so the
+  // popup UI doesn't need the breakdown.
+  progress: { done: number; total: number; bytes: number };
+  downloadId?: number;
   errorCode?: string;
   errorMessage?: string;
 };

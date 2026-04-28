@@ -1,9 +1,9 @@
 // DASH downloader. Counterpart to hls-downloader: takes an MPD URL, parses
-// the manifest, picks the highest-bandwidth video Representation and the
-// first audio Representation (if any), fetches init + media segments
-// concurrently, returns one or two Blobs (video + optional audio). DASH
-// almost always splits video and audio into separate Representations; v1
-// saves them as two separate files rather than muxing into a single MP4.
+// the manifest, picks the highest-bandwidth (or caller-specified) video
+// Representation and the first audio Representation (if any), fetches
+// init + media segments concurrently, muxes the resulting fMP4 video and
+// audio buffers into a single non-fragmented MP4 via mp4box.js, and
+// returns a single Blob ready for chrome.downloads.download.
 
 import {
   AccessDeniedError,
@@ -17,12 +17,8 @@ import {
   SizeCapError,
 } from "../lib/errors";
 import { HLS_SEGMENT_FETCH_CONCURRENCY } from "../lib/constants";
-import {
-  DashParseError,
-  parseMpd,
-  pickHighestBandwidth,
-  type DashRepresentation,
-} from "../lib/dash";
+import { DashParseError, parseMpd, pickHighestBandwidth } from "../lib/dash";
+import { muxFmp4 } from "./dash-mux";
 
 export type DashProgress = {
   videoDone: number;
@@ -30,13 +26,6 @@ export type DashProgress = {
   audioDone: number;
   audioTotal: number;
   bytes: number;
-};
-
-export type DashDownloadResult = {
-  video: Blob;
-  audio?: Blob;
-  videoMimeType: string;
-  audioMimeType?: string;
 };
 
 export type DownloadDashOptions = {
@@ -125,7 +114,7 @@ function concat(buffers: Uint8Array[]): Uint8Array {
 export async function downloadDash(
   manifestUrl: string,
   opts: DownloadDashOptions,
-): Promise<DashDownloadResult> {
+): Promise<Blob> {
   const fetchImpl = opts.fetchImpl ?? fetch;
   const { signal, sizeCapBytes, onProgress } = opts;
 
@@ -219,15 +208,9 @@ export async function downloadDash(
     audioBuffers.push(...audioMedia);
   }
 
-  const videoBlob = new Blob([concat(videoBuffers)], { type: videoRep.mimeType });
-  const audioBlob = audioBuffers
-    ? new Blob([concat(audioBuffers)], { type: audioRep!.mimeType })
-    : undefined;
+  const videoBytes = concat(videoBuffers);
+  const audioBytes = audioBuffers ? concat(audioBuffers) : undefined;
 
-  return {
-    video: videoBlob,
-    audio: audioBlob,
-    videoMimeType: videoRep.mimeType,
-    audioMimeType: audioRep?.mimeType,
-  };
+  const muxed = await muxFmp4(videoBytes, audioBytes);
+  return new Blob([muxed as BlobPart], { type: "video/mp4" });
 }
