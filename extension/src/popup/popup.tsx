@@ -1,6 +1,7 @@
 import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { DashJob, DetectedVideo, DirectJob, HlsJob } from "../types";
+import { filterCoveredByManifests } from "../lib/manifest-coverage";
 
 type VariantOption = {
   id: string;
@@ -688,6 +689,12 @@ function Popup() {
     }
   }
 
+  // Direct video segments that are covered by a detected manifest are
+  // hidden from the popup — see lib/manifest-coverage.ts. The full
+  // detection list stays in storage so badge counts stay accurate; only
+  // the user-facing list is filtered.
+  const visibleVideos = filterCoveredByManifests(videos);
+
   async function downloadAll() {
     if (tabId === null) return;
     const result = await chrome.storage.session.get([DIRECT_JOBS_KEY, HLS_JOBS_KEY, DASH_JOBS_KEY]);
@@ -698,7 +705,7 @@ function Popup() {
     const isActive = (status: string) =>
       status === "in_progress" || status === "running" || status === "saving";
 
-    for (const v of videos) {
+    for (const v of visibleVideos) {
       const matches = [
         ...Object.values(directs).filter((j) => j.videoId === v.id && j.tabId === tabId),
         ...Object.values(hlses).filter((j) => j.videoId === v.id && j.tabId === tabId),
@@ -728,8 +735,8 @@ function Popup() {
         </p>
       );
     }
-    if (videos.length === 0) return <Empty />;
-    return videos.map((v) => (
+    if (visibleVideos.length === 0) return <Empty />;
+    return visibleVideos.map((v) => (
       <VideoCard key={v.id} v={v} tabId={tabId} settings={settings} />
     ));
   }
@@ -765,9 +772,9 @@ function Popup() {
           </span>
           <span style={{ color: "#ddd", fontSize: 11 }}>·</span>
           <span style={{ color: "#999", fontSize: 11 }}>
-            {videos.length > 0 ? `${videos.length} detected` : ""}
+            {visibleVideos.length > 0 ? `${visibleVideos.length} detected` : ""}
           </span>
-          {videos.length > 0 && (
+          {visibleVideos.length > 0 && (
             <button
               onClick={() => void downloadAll()}
               title="Download all detected videos (skips in-flight and already-saved)"
