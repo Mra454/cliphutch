@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "ClipHutch — Web Media Capture",
+  "name": "ClipHutch: Web Media Capture",
   "version": "0.1.0",
   "description": "Your browser's media shelf. Detect and capture videos web pages load as you browse.",
   "minimum_chrome_version": "116",
