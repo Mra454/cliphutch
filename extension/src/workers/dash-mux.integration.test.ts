@@ -39,7 +39,10 @@ type ParsedFile = {
 };
 type AnyTrak = {
   tkhd: { track_id: number };
-  mdia: { minf: { stbl: { stsd: { entries: AnyBox[] } } } };
+  mdia: {
+    hdlr: { handler: string };
+    minf: { stbl: { stsd: { entries: AnyBox[] } } };
+  };
 };
 
 function findChild(parent: AnyBox | undefined, type: string): AnyBox | undefined {
@@ -108,9 +111,18 @@ describe("dash-mux integration (real fMP4 fixtures)", () => {
     expect(videoTrack, "output should contain a video track").toBeDefined();
     expect(audioTrack, "output should contain an audio track").toBeDefined();
 
-    // Video sample entry should have an avcC child with non-empty SPS+PPS
+    // Track type: hdlr.handler must be "vide" / "soun". mp4box defaults to
+    // "vide" for every track unless overridden — without our fix, audio
+    // tracks ship with "vide" handler, ffprobe reads them as
+    // "Video: none (mp4a)", every decoder silently ignores audio.
     const videoTrak = info.moov.traks.find((t) => t.tkhd.track_id === videoTrack!.id);
+    const audioTrak = info.moov.traks.find((t) => t.tkhd.track_id === audioTrack!.id);
     expect(videoTrak).toBeDefined();
+    expect(audioTrak).toBeDefined();
+    expect(videoTrak!.mdia.hdlr.handler).toBe("vide");
+    expect(audioTrak!.mdia.hdlr.handler).toBe("soun");
+
+    // Video sample entry should have an avcC child with non-empty SPS+PPS
     const videoEntry = videoTrak!.mdia.minf.stbl.stsd.entries[0];
     const avcC = findChild(videoEntry, "avcC") as
       | (AnyBox & { SPS?: Array<{ length: number; data: Uint8Array }>; PPS?: Array<{ length: number; data: Uint8Array }> })
@@ -127,10 +139,8 @@ describe("dash-mux integration (real fMP4 fixtures)", () => {
     // into this.data — including the 4-byte version+flags prefix — and
     // the writer then emits version+flags TWICE, corrupting the
     // descriptor by 4 bytes. The d501b08 patch had to be made
-    // unconditional in d-this-commit to actually fix it; this test
-    // catches the off-by-4 if the patch ever regresses.
-    const audioTrak = info.moov.traks.find((t) => t.tkhd.track_id === audioTrack!.id);
-    expect(audioTrak).toBeDefined();
+    // unconditional in ce90562 to actually fix it; this test catches
+    // the off-by-4 if the patch ever regresses.
     const audioEntry = audioTrak!.mdia.minf.stbl.stsd.entries[0];
     const muxedEsds = findChild(audioEntry, "esds");
     expect(muxedEsds, "audio sample entry should carry an esds child").toBeDefined();

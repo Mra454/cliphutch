@@ -160,6 +160,12 @@ function buildTrackOptions(p: Parsed): Record<string, unknown> {
     timescale: t.timescale,
     duration: t.samples_duration,
     description_boxes: childBoxes,
+    // mp4box.all.js:7995 defaults `hdlr.handler` to "vide" for every track
+    // unless explicitly overridden. Without this, audio tracks get a
+    // "vide" handler — ffprobe and every decoder then read the track as
+    // video-with-mp4a-codec ("Video: none (mp4a)") and ignore it. Set
+    // the handler to match the actual media type.
+    hdlr: t.video ? "vide" : "soun",
   };
   if (t.video) {
     opts.width = t.video.width;
