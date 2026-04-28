@@ -38,7 +38,7 @@ type ParsedFile = {
   moov: { traks: Array<AnyTrak> };
 };
 type AnyTrak = {
-  tkhd: { track_id: number };
+  tkhd: { track_id: number; volume: number };
   mdia: {
     hdlr: { handler: string };
     minf: { stbl: { stsd: { entries: AnyBox[] } } };
@@ -121,6 +121,12 @@ describe("dash-mux integration (real fMP4 fixtures)", () => {
     expect(audioTrak).toBeDefined();
     expect(videoTrak!.mdia.hdlr.handler).toBe("vide");
     expect(audioTrak!.mdia.hdlr.handler).toBe("soun");
+
+    // tkhd.volume: ISO 14496-12 §8.3.2 — video = 0 (mute), audio = 1 (full).
+    // mp4box's addTrack hardcodes volume = 1 for everything; we override
+    // for video. Strict decoders (Apple AVFoundation) enforce this.
+    expect(videoTrak!.tkhd.volume).toBe(0);
+    expect(audioTrak!.tkhd.volume).toBe(1);
 
     // Video sample entry should have an avcC child with non-empty SPS+PPS
     const videoEntry = videoTrak!.mdia.minf.stbl.stsd.entries[0];

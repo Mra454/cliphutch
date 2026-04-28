@@ -11,6 +11,7 @@ import {
   hasReplayableHeaders,
   type CapturedHeaders,
 } from "./lib/header-capture";
+import { filterCoveredByManifests } from "./lib/manifest-coverage";
 import type {
   DetectedVideo,
   DashJob,
@@ -69,7 +70,12 @@ async function resolveTabInfo(tabId: number): Promise<TabInfo> {
 
 async function updateBadge(tabId: number): Promise<void> {
   const videos = await getDetectedVideos(tabId);
-  const text = videos.length > 0 ? String(videos.length) : "";
+  // Match the popup's filtering — segments hidden when their parent
+  // manifest is also detected — so the badge count matches what the
+  // user actually sees in the popup. Without this, a 25-segment DASH
+  // page reads "25" on the toolbar but "1 detected" in the popup.
+  const visible = filterCoveredByManifests(videos);
+  const text = visible.length > 0 ? String(visible.length) : "";
   try {
     await chrome.action.setBadgeText({ tabId, text });
     if (text) {

@@ -30,7 +30,7 @@ type AnyBox = {
   data?: Uint8Array;
 };
 type AnyTrak = {
-  tkhd: { track_id: number };
+  tkhd: { track_id: number; volume?: number };
   mdia: { minf: { stbl: { stsd: { entries: AnyBox[] } } } };
 };
 type AnyMoov = { traks: AnyTrak[] };
@@ -201,6 +201,16 @@ function addTrackOrThrow(out: AnyIso, opts: Record<string, unknown>, role: strin
   return id;
 }
 
+// mp4box.all.js:8006 hardcodes `tkhd.volume = 1` for every new track. ISO
+// 14496-12 §8.3.2 requires volume = 0 (mute) for video tracks and 1.0
+// (full) for audio. Strict decoders (Apple AVFoundation, iOS Safari)
+// enforce this; permissive desktop players ignore it. Override on the
+// video track only — audio's default of 1 is already correct.
+function setTrackVolume(out: AnyIso, trackId: number, volume: number): void {
+  const trak = out.moov.traks.find((t) => t.tkhd.track_id === trackId);
+  if (trak) trak.tkhd.volume = volume;
+}
+
 export async function muxFmp4(
   videoBytes: Uint8Array,
   audioBytes?: Uint8Array,
@@ -210,6 +220,7 @@ export async function muxFmp4(
 
   const out = createFile() as unknown as AnyIso;
   const videoTrackId = addTrackOrThrow(out, buildTrackOptions(video), "video");
+  setTrackVolume(out, videoTrackId, 0);
   copySamples(out, videoTrackId, video.samples);
 
   if (audio) {
