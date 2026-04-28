@@ -20,7 +20,15 @@
 
 import { createFile, MP4BoxBuffer, DataStream } from "mp4box";
 
-type AnyBox = { type?: string; boxes?: AnyBox[] };
+type AnyBox = {
+  type?: string;
+  boxes?: AnyBox[];
+  // Populated by parsing scaffolding; available on parsed boxes:
+  start?: number;
+  size?: number;
+  hdr_size?: number;
+  data?: Uint8Array;
+};
 type AnyTrak = {
   tkhd: { track_id: number };
   mdia: { minf: { stbl: { stsd: { entries: AnyBox[] } } } };
@@ -58,6 +66,30 @@ type ParsedTrack = {
 
 type Parsed = { iso: AnyIso; track: ParsedTrack; samples: ParsedSample[] };
 
+// `esdsBox.parse` reads the body bytes into a local variable but doesn't
+// store them on `this.data`, and there's no custom `write` (mp4box.all.js
+// :4353-4361). When the default Box.write later serializes the output, it
+// emits only the 12-byte FullBox header — AAC config gone, audio silent.
+// Workaround: re-read the body bytes from the original source buffer and
+// populate `this.data` so the default writer round-trips.
+function patchUnserializedBoxData(entryBoxes: AnyBox[], sourceBytes: Uint8Array): void {
+  // Box types that mp4box parses without persisting raw bytes on this.data.
+  // esds is the documented case; add others here if more emerge.
+  const NEEDS_PATCH = new Set(["esds"]);
+  for (const child of entryBoxes) {
+    if (
+      child.type !== undefined &&
+      NEEDS_PATCH.has(child.type) &&
+      child.data === undefined &&
+      typeof child.start === "number" &&
+      typeof child.size === "number" &&
+      typeof child.hdr_size === "number"
+    ) {
+      child.data = sourceBytes.slice(child.start + child.hdr_size, child.start + child.size);
+    }
+  }
+}
+
 function parseFmp4(bytes: Uint8Array): Parsed {
   const iso = createFile() as unknown as AnyIso;
   let track: ParsedTrack | null = null;
@@ -88,6 +120,10 @@ function parseFmp4(bytes: Uint8Array): Parsed {
 
   if (!track) throw new Error("No track found in fMP4");
   if (samples.length === 0) throw new Error("No samples extracted from fMP4");
+
+  const srcEntryBoxes = (iso.moov.traks[0]?.mdia.minf.stbl.stsd.entries[0]?.boxes ?? []) as AnyBox[];
+  patchUnserializedBoxData(srcEntryBoxes, bytes);
+
   return { iso, track, samples };
 }
 
