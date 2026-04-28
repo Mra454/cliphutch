@@ -1,29 +1,44 @@
 // Mux a self-contained fMP4 video file (init + media segments concatenated)
 // and an optional audio file into a single non-fragmented MP4 with both
-// tracks. Codec-copy only — no transcoding. avc1+mp4a is the well-trodden
-// path; hvc1 / eac3 are at higher edge-case risk.
+// tracks. Codec-copy only — no transcoding.
 //
-// Two non-obvious things mp4box.js requires of us:
-//   1. addTrack ignores the IsoFileOptions.description field. Codec config
-//      must be passed via avcDecoderConfigRecord / hevcDecoderConfigRecord
-//      (raw record bytes — *not* the avcC box itself; just its body).
-//   2. addTrack's audio path doesn't accept an esds option at all. We have
-//      to splice the source's esds child into the auto-created mp4a sample
-//      entry after addTrack returns. Without esds, AAC won't decode.
+// mp4box's addTrack auto-creates a sample entry from `options.type` (avc1,
+// hvc1, mp4a, etc.) but doesn't carry over codec config (avcC, hvcC, esds,
+// dec3, dOps, …). To preserve config, we pass the source entry's children
+// via `description_boxes: Box[]` — addTrack appends each to the new sample
+// entry (mp4box.all.js:8075). This handles avc1+mp4a, hvc1, ec-3, opus,
+// and any future codec uniformly without per-codec branches.
 //
-// And one footgun:
-//   3. ISOFile.save() (and DataStream.save() under it) triggers a real
-//      <a download="..."> click that writes a file to disk in addition to
-//      returning the Blob. Use ISOFile.getBuffer() instead.
+// Two footguns we work around:
+//   - ISOFile.save() chains into DataStream.save() which triggers a real
+//     <a download="..."> click in addition to returning the Blob. Use
+//     ISOFile.getBuffer() instead.
+//   - addTrack returns `undefined` for any codec string not in
+//     BoxRegistry.sampleEntry (mp4box.all.js:8024). Without a null-check
+//     the next call to addSample crashes with an opaque mp4box-internal
+//     error. We surface it as a clean exception.
 
 import { createFile, MP4BoxBuffer, DataStream } from "mp4box";
-// We rely on shorthand structural access (moov.traks, trak.mdia.minf.stbl.
-// stsd.entries[0], box.boxes for children). The mp4box.d.ts surface for the
-// exact box subclasses isn't worth fighting; narrow with `unknown`-ish casts.
-type AnyBox = { type?: string; boxes?: AnyBox[]; write?: (s: DataStream) => void; addBox?: (b: AnyBox) => AnyBox };
-type AnyTrak = { tkhd: { track_id: number }; mdia: { minf: { stbl: { stsd: { entries: AnyBox[] } } } } };
+
+type AnyBox = { type?: string; boxes?: AnyBox[] };
+type AnyTrak = {
+  tkhd: { track_id: number };
+  mdia: { minf: { stbl: { stsd: { entries: AnyBox[] } } } };
+};
 type AnyMoov = { traks: AnyTrak[] };
-type AnyIso = { moov: AnyMoov; appendBuffer: (b: MP4BoxBuffer) => number; flush: () => void; onReady?: (info: unknown) => void; onSamples?: (id: number, user: unknown, batch: unknown[]) => void; onError?: (msg: string) => void; setExtractionOptions: (id: number, user: unknown, opts: { nbSamples: number }) => void; start: () => void; addTrack: (opts: unknown) => number; addSample: (id: number, data: Uint8Array, opts: unknown) => unknown; getBuffer: () => DataStream };
+type AnyIso = {
+  moov: AnyMoov;
+  appendBuffer: (b: MP4BoxBuffer) => number;
+  flush: () => void;
+  onReady?: (info: unknown) => void;
+  onSamples?: (id: number, user: unknown, batch: unknown[]) => void;
+  onError?: (msg: string) => void;
+  setExtractionOptions: (id: number, user: unknown, opts: { nbSamples: number }) => void;
+  start: () => void;
+  addTrack: (opts: unknown) => number | undefined;
+  addSample: (id: number, data: Uint8Array, opts: unknown) => unknown;
+  getBuffer: () => DataStream;
+};
 
 type ParsedSample = {
   data?: Uint8Array;
@@ -43,36 +58,16 @@ type ParsedTrack = {
 
 type Parsed = { iso: AnyIso; track: ParsedTrack; samples: ParsedSample[] };
 
-function findChildBox(parent: AnyBox | undefined, type: string): AnyBox | undefined {
-  return parent?.boxes?.find((b) => b.type === type);
-}
-
-// Serialize an mp4box Box and strip the 8-byte ISO BMFF header to get just
-// the box body. addTrack's avcDecoderConfigRecord / hevcDecoderConfigRecord
-// expect the configuration record only, not the wrapping avcC/hvcC box.
-function extractBoxBody(box: AnyBox | undefined): ArrayBuffer | undefined {
-  if (!box?.write) return undefined;
-  const stream = new DataStream();
-  box.write(stream);
-  const full = new Uint8Array((stream as unknown as { buffer: ArrayBuffer }).buffer);
-  // First 4 bytes are size, next 4 are type ('avcC' / 'hvcC' / etc.)
-  return full.slice(8).buffer;
-}
-
 function parseFmp4(bytes: Uint8Array): Parsed {
   const iso = createFile() as unknown as AnyIso;
   let track: ParsedTrack | null = null;
   const samples: ParsedSample[] = [];
 
   iso.onReady = (info: unknown) => {
-    const tracks = (info as { tracks: ParsedTrack[] & { id: number }[] }).tracks;
+    const tracks = (info as { tracks: (ParsedTrack & { id: number })[] }).tracks;
     if (!tracks || tracks.length === 0) return;
     track = tracks[0];
-    iso.setExtractionOptions(
-      (tracks[0] as unknown as { id: number }).id,
-      null,
-      { nbSamples: 1_000_000 },
-    );
+    iso.setExtractionOptions(tracks[0].id, null, { nbSamples: 1_000_000 });
     iso.start();
   };
 
@@ -96,52 +91,31 @@ function parseFmp4(bytes: Uint8Array): Parsed {
   return { iso, track, samples };
 }
 
-function buildVideoTrackOptions(p: Parsed): Record<string, unknown> {
+function buildTrackOptions(p: Parsed): Record<string, unknown> {
   const t = p.track;
-  const codecRoot = (t.codec ?? "").split(".")[0] || "avc1";
+  const codecRoot = (t.codec ?? "").split(".")[0] || (t.video ? "avc1" : "mp4a");
 
-  // Find the source avc1/hvc1 sample entry's codec config child box.
-  const srcEntry = p.iso.moov.traks[0].mdia.minf.stbl.stsd.entries[0];
-  const avcC = findChildBox(srcEntry, "avcC");
-  const hvcC = findChildBox(srcEntry, "hvcC");
+  // Source sample entry (avc1 / hvc1 / mp4a / opus / ...). Its children
+  // are the codec config boxes we need to carry over.
+  const srcEntry = p.iso.moov.traks[0]?.mdia.minf.stbl.stsd.entries[0];
+  const childBoxes = (srcEntry?.boxes ?? []).slice();
 
   const opts: Record<string, unknown> = {
     type: codecRoot,
     timescale: t.timescale,
     duration: t.samples_duration,
-    width: t.video?.width,
-    height: t.video?.height,
+    description_boxes: childBoxes,
   };
-  const avcRecord = extractBoxBody(avcC);
-  if (avcRecord) opts.avcDecoderConfigRecord = avcRecord;
-  const hvcRecord = extractBoxBody(hvcC);
-  if (hvcRecord) opts.hevcDecoderConfigRecord = hvcRecord;
+  if (t.video) {
+    opts.width = t.video.width;
+    opts.height = t.video.height;
+  }
+  if (t.audio) {
+    opts.channel_count = t.audio.channel_count;
+    opts.samplerate = t.audio.sample_rate;
+    opts.samplesize = t.audio.sample_size;
+  }
   return opts;
-}
-
-function buildAudioTrackOptions(p: Parsed): Record<string, unknown> {
-  const t = p.track;
-  const codecRoot = (t.codec ?? "").split(".")[0] || "mp4a";
-  return {
-    type: codecRoot,
-    timescale: t.timescale,
-    duration: t.samples_duration,
-    channel_count: t.audio?.channel_count,
-    samplerate: t.audio?.sample_rate,
-    samplesize: t.audio?.sample_size,
-  };
-}
-
-// addTrack's audio path doesn't add an esds child to the auto-created
-// mp4a sample entry, so AAC won't decode. Splice the source's esds box
-// into the output's mp4a entry post-creation.
-function carryOverAudioCodecConfig(out: AnyIso, audioTrackId: number, src: Parsed): void {
-  const outTrak = out.moov.traks.find((t) => t.tkhd.track_id === audioTrackId);
-  if (!outTrak) return;
-  const outEntry = outTrak.mdia.minf.stbl.stsd.entries[0];
-  const srcEntry = src.iso.moov.traks[0].mdia.minf.stbl.stsd.entries[0];
-  const srcEsds = findChildBox(srcEntry, "esds");
-  if (srcEsds && outEntry.addBox) outEntry.addBox(srcEsds);
 }
 
 function copySamples(out: AnyIso, dstTrackId: number, samples: ParsedSample[]): void {
@@ -156,6 +130,16 @@ function copySamples(out: AnyIso, dstTrackId: number, samples: ParsedSample[]): 
   }
 }
 
+function addTrackOrThrow(out: AnyIso, opts: Record<string, unknown>, role: string): number {
+  const id = out.addTrack(opts);
+  if (typeof id !== "number") {
+    throw new Error(
+      `mp4box addTrack returned undefined for ${role} codec "${String(opts.type)}" — codec not registered in BoxRegistry.sampleEntry`,
+    );
+  }
+  return id;
+}
+
 export async function muxFmp4(
   videoBytes: Uint8Array,
   audioBytes?: Uint8Array,
@@ -164,12 +148,11 @@ export async function muxFmp4(
   const audio = audioBytes ? parseFmp4(audioBytes) : null;
 
   const out = createFile() as unknown as AnyIso;
-  const videoTrackId = out.addTrack(buildVideoTrackOptions(video));
+  const videoTrackId = addTrackOrThrow(out, buildTrackOptions(video), "video");
   copySamples(out, videoTrackId, video.samples);
 
   if (audio) {
-    const audioTrackId = out.addTrack(buildAudioTrackOptions(audio));
-    carryOverAudioCodecConfig(out, audioTrackId, audio);
+    const audioTrackId = addTrackOrThrow(out, buildTrackOptions(audio), "audio");
     copySamples(out, audioTrackId, audio.samples);
   }
 
