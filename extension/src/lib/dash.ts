@@ -215,7 +215,16 @@ function buildRepresentation(
     if (rawInit) initUrl = resolveBaseUrl(baseUrls, rawInit);
     mediaUrls = rawMedia.map((u) => resolveBaseUrl(baseUrls, u));
   } else {
-    return { unsupported: "no-segments" };
+    // Single-file on-demand profile (urn:mpeg:dash:profile:isoff-on-demand:2011):
+    // a Representation with only <BaseURL>file.m4v</BaseURL> and no segment
+    // shape means the entire media is in one file. Treat as a one-segment,
+    // no-init Representation so the downloader fetches the whole file.
+    const last = baseUrls[baseUrls.length - 1];
+    if (last && !last.endsWith("/")) {
+      mediaUrls = [resolveBaseUrl(baseUrls, undefined)];
+    } else {
+      return { unsupported: "no-segments" };
+    }
   }
 
   return {

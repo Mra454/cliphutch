@@ -191,6 +191,41 @@ describe("parseMpd", () => {
     expect(m.unsupportedShape).toBe("byterange");
   });
 
+  it("treats a Representation with only <BaseURL>file</BaseURL> (single-file on-demand profile) as one-segment-no-init", () => {
+    // Real-world shape from dash.akamaized.net/.../SNE_DASH_SD_CASE1A_REVISED.mpd
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<MPD type="static" mediaPresentationDuration="PT9M57S" profiles="urn:mpeg:dash:profile:isoff-on-demand:2011">
+  <Period duration="PT9M57S">
+    <AdaptationSet contentType="audio" mimeType="audio/mp4" codecs="mp4a.40.5">
+      <Representation id="2_1" bandwidth="64000">
+        <BaseURL>DASH_vodaudio_Track5.m4a</BaseURL>
+      </Representation>
+    </AdaptationSet>
+    <AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4D401E">
+      <Representation id="1_1" bandwidth="1005568" width="854" height="480">
+        <BaseURL>DASH_vodvideo_Track2.m4v</BaseURL>
+      </Representation>
+      <Representation id="1_2" bandwidth="1609728" width="854" height="480">
+        <BaseURL>DASH_vodvideo_Track1.m4v</BaseURL>
+      </Representation>
+    </AdaptationSet>
+  </Period>
+</MPD>`;
+    const m = parseMpd(xml, "https://dash.akamaized.net/dash264/TestCases/1a/sony/SNE_DASH_SD_CASE1A_REVISED.mpd");
+    expect(m.video).toHaveLength(2);
+    expect(m.video[0].initSegmentUrl).toBeUndefined();
+    expect(m.video[0].mediaSegmentUrls).toEqual([
+      "https://dash.akamaized.net/dash264/TestCases/1a/sony/DASH_vodvideo_Track2.m4v",
+    ]);
+    expect(m.video[1].mediaSegmentUrls).toEqual([
+      "https://dash.akamaized.net/dash264/TestCases/1a/sony/DASH_vodvideo_Track1.m4v",
+    ]);
+    expect(m.audio).toHaveLength(1);
+    expect(m.audio[0].mediaSegmentUrls).toEqual([
+      "https://dash.akamaized.net/dash264/TestCases/1a/sony/DASH_vodaudio_Track5.m4a",
+    ]);
+  });
+
   it("expands a SegmentList", () => {
     const xml = `<?xml version="1.0"?>
 <MPD type="static"><Period><AdaptationSet contentType="video" mimeType="video/mp4">
