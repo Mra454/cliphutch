@@ -44,6 +44,9 @@ export type DownloadDashOptions = {
   signal: AbortSignal;
   sizeCapBytes: number;
   fetchImpl?: typeof fetch;
+  // When set, look up the video Representation by this @id instead of
+  // auto-picking the highest-bandwidth one.
+  videoRepresentationId?: string;
 };
 
 const FALLBACK_BITRATE_BPS = 5_000_000;
@@ -142,7 +145,10 @@ export async function downloadDash(
   if (manifest.unsupportedShape === "byterange") throw new ByteRangeError();
   if (manifest.video.length === 0) throw new EmptyManifestError();
 
-  const videoRep = pickHighestBandwidth(manifest.video);
+  const videoRep = opts.videoRepresentationId
+    ? manifest.video.find((r) => r.id === opts.videoRepresentationId) ??
+      pickHighestBandwidth(manifest.video)
+    : pickHighestBandwidth(manifest.video);
   if (!videoRep) throw new EmptyManifestError();
   const audioRep = manifest.audio[0];
 

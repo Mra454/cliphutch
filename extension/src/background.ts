@@ -287,10 +287,38 @@ async function findVideo(tabId: number, videoId: string): Promise<DetectedVideo 
   return list.find((v) => v.id === videoId);
 }
 
-type DownloadRequest = { type: "download"; tabId: number; videoId: string };
+type DownloadRequest = {
+  type: "download";
+  tabId: number;
+  videoId: string;
+  variantId?: string;
+  bypassSizeCap?: boolean;
+};
 type DownloadResponse =
   | { ok: true; downloadId?: number; jobId?: string }
   | { ok: false; error: string; code?: string };
+
+type ListVariantsRequest = {
+  type: "list-variants";
+  tabId: number;
+  videoId: string;
+};
+type VariantOption = {
+  id: string;
+  bandwidth: number;
+  width?: number;
+  height?: number;
+  codecs?: string;
+};
+type ListVariantsResponse =
+  | {
+      ok: true;
+      kind: "hls" | "dash";
+      variants: VariantOption[];
+      durationSec?: number;
+      sizeCapBytes: number;
+    }
+  | { ok: false; error: string };
 
 async function handleDownloadRequest(req: DownloadRequest): Promise<DownloadResponse> {
   const video = await findVideo(req.tabId, req.videoId);
@@ -306,13 +334,13 @@ async function handleDownloadRequest(req: DownloadRequest): Promise<DownloadResp
   }
 
   if (video.kind === "hls") {
-    const result = await startHlsDownload(req, video);
+    const result = await startHlsDownload(req, video, req.variantId, req.bypassSizeCap);
     if (result.ok) await recordDownload();
     return result;
   }
 
   if (video.kind === "dash") {
-    const result = await startDashDownload(req, video);
+    const result = await startDashDownload(req, video, req.variantId, req.bypassSizeCap);
     if (result.ok) await recordDownload();
     return result;
   }
@@ -352,10 +380,56 @@ async function handleDownloadRequest(req: DownloadRequest): Promise<DownloadResp
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (!message || typeof message !== "object" || message.type !== "download") return false;
-  void handleDownloadRequest(message as DownloadRequest).then(sendResponse);
-  return true;
+  if (!message || typeof message !== "object") return false;
+  const m = message as { type?: string };
+  if (m.type === "download") {
+    void handleDownloadRequest(message as DownloadRequest).then(sendResponse);
+    return true;
+  }
+  if (m.type === "list-variants") {
+    void handleListVariantsRequest(message as ListVariantsRequest).then(sendResponse);
+    return true;
+  }
+  return false;
 });
+
+async function handleListVariantsRequest(
+  req: ListVariantsRequest,
+): Promise<ListVariantsResponse> {
+  const video = await findVideo(req.tabId, req.videoId);
+  if (!video) return { ok: false, error: "Video not found in this tab." };
+  if (video.kind !== "hls" && video.kind !== "dash") {
+    return { ok: false, error: "Variant picker is only available for HLS / DASH streams." };
+  }
+
+  try {
+    await ensureOffscreenDocument();
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "Could not start offscreen document.",
+    };
+  }
+
+  const lookupKey = `lookup:${video.id}`;
+  await installHeaderReplayRule(lookupKey, video.id, video.url, video.kind);
+  try {
+    const result = (await chrome.runtime.sendMessage({
+      type: "list-variants-start",
+      url: video.url,
+      kind: video.kind,
+    })) as { ok: true; kind: "hls" | "dash"; variants: VariantOption[]; durationSec?: number } | { ok: false; error: string };
+
+    if (!result || result.ok === false) {
+      return { ok: false, error: (result && "error" in result && result.error) || "Manifest fetch failed" };
+    }
+
+    const settings = await getSettings();
+    return { ...result, sizeCapBytes: settings.hlsSizeCapBytes };
+  } finally {
+    await removeHeaderReplayRule(lookupKey);
+  }
+}
 
 async function handleDownloadChange(delta: chrome.downloads.DownloadDelta): Promise<void> {
   if (!delta.state) return;
@@ -462,9 +536,16 @@ async function ensureOffscreenDocument(): Promise<void> {
   });
 }
 
+// When the user explicitly clicks "Continue anyway" past the size cap, allow
+// up to 10× the configured cap. Caps the runaway-memory blast radius while
+// honoring the explicit opt-in.
+const BYPASS_CAP_MULTIPLIER = 10;
+
 async function startHlsDownload(
   req: DownloadRequest,
   video: DetectedVideo,
+  variantId: string | undefined,
+  bypassSizeCap: boolean | undefined,
 ): Promise<DownloadResponse> {
   const settings = await getSettings();
   const jobId = `hls-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -495,12 +576,17 @@ async function startHlsDownload(
 
   await installHeaderReplayRule(`hls:${jobId}`, video.id, video.url, "hls");
 
+  const effectiveCap = bypassSizeCap
+    ? settings.hlsSizeCapBytes * BYPASS_CAP_MULTIPLIER
+    : settings.hlsSizeCapBytes;
+
   void chrome.runtime
     .sendMessage({
       type: "hls-download-start",
       jobId,
       url: video.url,
-      sizeCapBytes: settings.hlsSizeCapBytes,
+      sizeCapBytes: effectiveCap,
+      variantUrl: variantId,
     })
     .catch(() => {});
 
@@ -611,6 +697,8 @@ async function setDashJob(job: DashJob): Promise<void> {
 async function startDashDownload(
   req: DownloadRequest,
   video: DetectedVideo,
+  variantId: string | undefined,
+  bypassSizeCap: boolean | undefined,
 ): Promise<DownloadResponse> {
   const settings = await getSettings();
   const jobId = `dash-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -641,12 +729,17 @@ async function startDashDownload(
 
   await installHeaderReplayRule(`dash:${jobId}`, video.id, video.url, "dash");
 
+  const effectiveCap = bypassSizeCap
+    ? settings.hlsSizeCapBytes * BYPASS_CAP_MULTIPLIER
+    : settings.hlsSizeCapBytes;
+
   void chrome.runtime
     .sendMessage({
       type: "dash-download-start",
       jobId,
       url: video.url,
-      sizeCapBytes: settings.hlsSizeCapBytes,
+      sizeCapBytes: effectiveCap,
+      videoRepresentationId: variantId,
     })
     .catch(() => {});
 

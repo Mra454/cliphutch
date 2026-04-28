@@ -1,6 +1,24 @@
 import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { DashJob, DetectedVideo, DirectJob, HlsJob } from "../types";
+
+type VariantOption = {
+  id: string;
+  bandwidth: number;
+  width?: number;
+  height?: number;
+  codecs?: string;
+};
+
+type ListVariantsResponse =
+  | {
+      ok: true;
+      kind: "hls" | "dash";
+      variants: VariantOption[];
+      durationSec?: number;
+      sizeCapBytes: number;
+    }
+  | { ok: false; error: string };
 import { getDetectedVideos } from "../lib/storage-session";
 import { DEFAULT_SETTINGS, getSettings, type UserSettings } from "../lib/storage-local";
 import { isLicensed, revalidateIfStale } from "../lib/license";
@@ -129,6 +147,11 @@ function VideoCard({
   const [job, setJob] = useState<AnyJob | null>(null);
   const [directProgress, setDirectProgress] = useState<{ received: number; total?: number } | null>(null);
   const [immediateError, setImmediateError] = useState<string | null>(null);
+  const [picker, setPicker] = useState<
+    | { state: "loading" }
+    | { state: "ready"; variants: VariantOption[]; durationSec?: number; sizeCapBytes: number }
+    | null
+  >(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -200,15 +223,54 @@ function VideoCard({
     };
   }, [job?.source === "direct" ? job.status : null, job?.source === "direct" ? job.downloadId : null]);
 
-  const onDownload = async () => {
-    setImmediateError(null);
+  const sendDownload = async (variantId?: string, bypassSizeCap?: boolean) => {
+    setPicker(null);
     const res = (await chrome.runtime.sendMessage({
       type: "download",
       tabId,
       videoId: v.id,
+      variantId,
+      bypassSizeCap,
     })) as { ok: true; downloadId?: number; jobId?: string } | { ok: false; error: string };
     if (res && !res.ok) setImmediateError(res.error);
   };
+
+  const onDownload = async () => {
+    setImmediateError(null);
+    if (v.kind !== "hls" && v.kind !== "dash") {
+      void sendDownload();
+      return;
+    }
+    setPicker({ state: "loading" });
+    const lr = (await chrome.runtime.sendMessage({
+      type: "list-variants",
+      tabId,
+      videoId: v.id,
+    })) as ListVariantsResponse;
+    if (!lr || lr.ok === false) {
+      setPicker(null);
+      setImmediateError(lr && "error" in lr ? lr.error : "Could not load manifest.");
+      return;
+    }
+    if (lr.variants.length === 0) {
+      setPicker(null);
+      setImmediateError("Manifest contained no usable video tracks.");
+      return;
+    }
+    if (lr.variants.length === 1) {
+      void sendDownload(lr.variants[0].id);
+      return;
+    }
+    const sortedVariants = [...lr.variants].sort((a, b) => b.bandwidth - a.bandwidth);
+    setPicker({
+      state: "ready",
+      variants: sortedVariants,
+      durationSec: lr.durationSec,
+      sizeCapBytes: lr.sizeCapBytes,
+    });
+  };
+
+  const onCancelPicker = () => setPicker(null);
 
   const onShowInFolder = () => {
     if (!job) return;
@@ -229,7 +291,78 @@ function VideoCard({
     void chrome.runtime.sendMessage({ type: "dash-download-cancel", jobId: job.jobId }).catch(() => {});
   };
 
+  function renderPicker() {
+    if (!picker) return null;
+    if (picker.state === "loading") {
+      return (
+        <div style={{ marginTop: 6, fontSize: 11, color: "#444" }}>
+          Loading variants…
+        </div>
+      );
+    }
+    return (
+      <div style={{ marginTop: 6 }}>
+        <div style={{ fontSize: 11, color: "#444", marginBottom: 4 }}>
+          Choose quality:
+        </div>
+        {picker.variants.map((variant) => {
+          const sizeBytes =
+            picker.durationSec !== undefined && variant.bandwidth > 0
+              ? (variant.bandwidth * picker.durationSec) / 8
+              : null;
+          const overCap = sizeBytes !== null && sizeBytes > picker.sizeCapBytes;
+          const resLabel =
+            variant.width && variant.height
+              ? `${variant.width}×${variant.height}`
+              : "?";
+          const mbpsLabel =
+            variant.bandwidth > 0
+              ? `${(variant.bandwidth / 1_000_000).toFixed(1)} Mbps`
+              : "bandwidth unknown";
+          const sizeLabel =
+            sizeBytes !== null ? ` · ${fmtBytes(sizeBytes) ?? ""}` : "";
+          return (
+            <div
+              key={variant.id}
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+                gap: 6,
+                padding: "4px 0",
+                borderTop: "1px solid #eee",
+              }}
+            >
+              <div style={{ fontSize: 11 }}>
+                <div>{resLabel} · {mbpsLabel}{sizeLabel}</div>
+                {overCap ? (
+                  <div style={{ color: "#a05", fontSize: 10 }}>
+                    over {fmtBytes(picker.sizeCapBytes)} cap
+                  </div>
+                ) : null}
+              </div>
+              <button
+                onClick={() => void sendDownload(variant.id, overCap)}
+                style={{
+                  ...buttonStyle,
+                  borderColor: overCap ? "#a05" : undefined,
+                  color: overCap ? "#a05" : undefined,
+                }}
+              >
+                {overCap ? "Continue anyway" : "Download"}
+              </button>
+            </div>
+          );
+        })}
+        <button onClick={onCancelPicker} style={{ ...buttonStyle, marginTop: 6 }}>
+          Cancel
+        </button>
+      </div>
+    );
+  }
+
   function renderAction() {
+    if (picker) return renderPicker();
     if (immediateError) {
       return (
         <>

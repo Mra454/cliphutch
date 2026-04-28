@@ -2,6 +2,8 @@ import { downloadHls, type HlsProgress } from "../workers/hls-downloader";
 import { downloadDash, type DashProgress } from "../workers/dash-downloader";
 import { HlsDownloadError } from "../lib/errors";
 import { MAX_CONCURRENT_HLS_JOBS } from "../lib/constants";
+import { isMasterPlaylist, parseMasterVariants } from "../lib/hls-variants";
+import { parseMpd } from "../lib/dash";
 
 console.log("[cliphutch] offscreen document loaded");
 
@@ -20,6 +22,7 @@ type HlsStartMessage = {
   jobId: string;
   url: string;
   sizeCapBytes: number;
+  variantUrl?: string;
 };
 
 type HlsCancelMessage = {
@@ -37,6 +40,7 @@ type DashStartMessage = {
   jobId: string;
   url: string;
   sizeCapBytes: number;
+  videoRepresentationId?: string;
 };
 
 type DashCancelMessage = {
@@ -49,13 +53,37 @@ type DashRevokeMessage = {
   jobId: string;
 };
 
+type ListVariantsMessage = {
+  type: "list-variants-start";
+  url: string;
+  kind: "hls" | "dash";
+};
+
 type IncomingMessage =
   | HlsStartMessage
   | HlsCancelMessage
   | HlsRevokeMessage
   | DashStartMessage
   | DashCancelMessage
-  | DashRevokeMessage;
+  | DashRevokeMessage
+  | ListVariantsMessage;
+
+export type VariantOption = {
+  id: string; // HLS: resolved URL of variant playlist; DASH: Representation @id
+  bandwidth: number;
+  width?: number;
+  height?: number;
+  codecs?: string;
+};
+
+export type ListVariantsResult =
+  | {
+      ok: true;
+      kind: "hls" | "dash";
+      variants: VariantOption[];
+      durationSec?: number;
+    }
+  | { ok: false; error: string };
 
 function send(msg: object): void {
   void chrome.runtime.sendMessage(msg).catch(() => {
@@ -82,6 +110,7 @@ async function runHlsJob(msg: HlsStartMessage): Promise<void> {
     const blob = await downloadHls(msg.url, {
       sizeCapBytes: msg.sizeCapBytes,
       signal: controller.signal,
+      variantUrl: msg.variantUrl,
       onProgress: (p: HlsProgress) => {
         send({
           type: "hls-download-progress",
@@ -141,6 +170,7 @@ async function runDashJob(msg: DashStartMessage): Promise<void> {
     const result = await downloadDash(msg.url, {
       sizeCapBytes: msg.sizeCapBytes,
       signal: controller.signal,
+      videoRepresentationId: msg.videoRepresentationId,
       onProgress: (p: DashProgress) => {
         send({
           type: "dash-download-progress",
@@ -198,6 +228,44 @@ function revokeJobBlobs(job: ActiveJob): void {
   if (job.audioBlobUrl) URL.revokeObjectURL(job.audioBlobUrl);
 }
 
+async function listVariants(msg: ListVariantsMessage): Promise<ListVariantsResult> {
+  try {
+    const res = await fetch(msg.url, { credentials: "include" });
+    if (!res.ok) return { ok: false, error: `Manifest ${res.status}` };
+    const text = await res.text();
+
+    if (msg.kind === "hls") {
+      if (!isMasterPlaylist(text)) {
+        // Variant playlist (no STREAM-INF). One implicit variant — the URL itself.
+        return { ok: true, kind: "hls", variants: [{ id: msg.url, bandwidth: 0 }] };
+      }
+      const parsed = parseMasterVariants(text);
+      const variants: VariantOption[] = parsed.map((v) => ({
+        id: new URL(v.uri, msg.url).href,
+        bandwidth: v.bandwidth,
+        width: v.width,
+        height: v.height,
+        codecs: v.codecs,
+      }));
+      return { ok: true, kind: "hls", variants };
+    }
+
+    const manifest = parseMpd(text, msg.url);
+    if (manifest.drm.protected) return { ok: false, error: `DRM-protected (${manifest.drm.scheme ?? "unknown"})` };
+    if (manifest.type === "dynamic") return { ok: false, error: "Live stream" };
+    const variants: VariantOption[] = manifest.video.map((r) => ({
+      id: r.id,
+      bandwidth: r.bandwidth,
+      width: r.width,
+      height: r.height,
+      codecs: r.codecs,
+    }));
+    return { ok: true, kind: "dash", variants, durationSec: manifest.durationSec };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "Manifest fetch failed" };
+  }
+}
+
 chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
   if (!message || typeof message !== "object") return false;
   const m = message as IncomingMessage;
@@ -233,6 +301,11 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
     }
     sendResponse({ ok: true });
     return false;
+  }
+
+  if (m.type === "list-variants-start") {
+    void listVariants(m).then(sendResponse);
+    return true;
   }
 
   return false;

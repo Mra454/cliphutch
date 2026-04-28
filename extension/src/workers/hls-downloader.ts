@@ -26,6 +26,9 @@ export type DownloadHlsOptions = {
   signal: AbortSignal;
   sizeCapBytes: number;
   fetchImpl?: typeof fetch;
+  // When set, skip pickEmbeddedVariant and use this resolved variant URL.
+  // Takes precedence over the highest-bandwidth auto-pick.
+  variantUrl?: string;
 };
 
 type ParsedSegment = {
@@ -197,9 +200,18 @@ export async function downloadHls(
   let variantUrl = playlistUrl;
 
   if (parsed.playlists && parsed.playlists.length > 0) {
-    const { variant, bandwidth } = pickEmbeddedVariant(parsed);
-    bandwidthBps = bandwidth;
-    variantUrl = resolveUrl(variant.uri, playlistUrl);
+    if (opts.variantUrl) {
+      // Caller picked a specific variant — skip pickEmbeddedVariant and use it.
+      variantUrl = opts.variantUrl;
+      const matched = parsed.playlists.find(
+        (p) => resolveUrl(p.uri, playlistUrl) === opts.variantUrl,
+      );
+      bandwidthBps = matched?.attributes.BANDWIDTH ?? 0;
+    } else {
+      const { variant, bandwidth } = pickEmbeddedVariant(parsed);
+      bandwidthBps = bandwidth;
+      variantUrl = resolveUrl(variant.uri, playlistUrl);
+    }
     const variantText = await fetchText(variantUrl, signal, fetchImpl);
     const variantDrm = classifyHlsManifestForDrm(variantText);
     if (variantDrm.protected) throw new DrmProtectedError(variantDrm.scheme);
