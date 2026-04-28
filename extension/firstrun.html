@@ -81,12 +81,16 @@
       Web Media Capture · Your browser's media shelf.
     </p>
     <p class="lede">
-      ClipHutch watches the network requests your browser makes on web
-      pages and lists the videos it can detect. Click the toolbar icon to see
+      ClipHutch watches the network requests your browser makes on web pages
+      and lists the videos it can detect. Click the toolbar icon to see
       what's been detected on the current tab; click <strong>Download</strong>
       to save a file via Chrome's download manager. All processing happens on
       your device — the extension does not contact any server operated by the
       developer.
+    </p>
+    <p class="lede" style="margin-top: 0.75em;">
+      <strong>5 permissions, not 14. No content scripts. No DOM access.</strong>
+      The full comparison is below.
     </p>
 
     <section>
@@ -117,7 +121,21 @@
         <tr>
           <th><code>offscreen</code></th>
           <td>
-            Used briefly to assemble HLS video segments into a downloadable file.
+            Used briefly to assemble HLS or DASH video segments into a
+            downloadable file.
+          </td>
+        </tr>
+        <tr>
+          <th><code>declarativeNetRequestWithHostAccess</code></th>
+          <td>
+            When you click Download on an HLS or DASH stream that requires
+            specific request headers (such as a Referer the page sent), a
+            temporary, session-scoped browser rule attaches those captured
+            headers to the extension's own segment fetches. The rule is
+            removed when the download completes, fails, or the tab closes.
+            This is the strictly-weakest declarative-net-request variant:
+            it cannot block or redirect requests, only modify headers, and
+            only on hosts you have already granted access to.
           </td>
         </tr>
         <tr>
@@ -128,11 +146,123 @@
             Required for <code>webRequest</code> to observe network requests
             across HTTP/HTTPS sites. The extension does not inject content
             scripts and does not read page DOM content. It does process network
-            request URLs and the active tab's URL/title to associate detected
-            videos with the page.
+            request URLs, request headers it observed when the page loaded,
+            and the active tab's URL/title to associate detected videos with
+            the page.
           </td>
         </tr>
       </table>
+    </section>
+
+    <section>
+      <h2>How ClipHutch compares</h2>
+      <p style="margin-top: 0.25em; color: #555; font-size: 14px;">
+        Below is the full permission set ClipHutch requests, alongside what
+        a typical Chrome video-downloader extension requests. The Chrome
+        Web Store shows every extension's permission list publicly, so
+        every claim here is verifiable: search the Web Store for a
+        comparable extension and click "View details".
+      </p>
+      <table>
+        <tr>
+          <th>Permission</th>
+          <th style="width: 18%; text-align: center;">ClipHutch</th>
+          <th style="width: 22%; text-align: center;">Typical downloader</th>
+        </tr>
+        <tr>
+          <td><code>webRequest</code> · observe network traffic</td>
+          <td style="text-align: center;">✓</td>
+          <td style="text-align: center;">✓</td>
+        </tr>
+        <tr>
+          <td><code>storage</code> · save settings</td>
+          <td style="text-align: center;">✓</td>
+          <td style="text-align: center;">✓</td>
+        </tr>
+        <tr>
+          <td><code>downloads</code> · save files</td>
+          <td style="text-align: center;">✓</td>
+          <td style="text-align: center;">✓</td>
+        </tr>
+        <tr>
+          <td><code>offscreen</code> · assemble streams in the background</td>
+          <td style="text-align: center;">✓</td>
+          <td style="text-align: center;">✓</td>
+        </tr>
+        <tr>
+          <td>
+            <code>declarativeNetRequest</code> · modify network requests
+            <div style="color: #888; font-size: 12px;">
+              ClipHutch uses the <code>WithHostAccess</code> variant, which
+              cannot block or redirect requests, only modify headers
+            </div>
+          </td>
+          <td style="text-align: center;">✓ <span style="color: #888; font-size: 12px;">(constrained)</span></td>
+          <td style="text-align: center;">✓ <span style="color: #888; font-size: 12px;">(full)</span></td>
+        </tr>
+        <tr>
+          <td><code>tabs</code> · read the URL and title of every open tab</td>
+          <td style="text-align: center; color: #888;">no</td>
+          <td style="text-align: center;">✓</td>
+        </tr>
+        <tr>
+          <td><code>scripting</code> · inject code into any page you visit</td>
+          <td style="text-align: center; color: #888;">no</td>
+          <td style="text-align: center;">✓</td>
+        </tr>
+        <tr>
+          <td><code>webNavigation</code> · observe the pages you navigate to</td>
+          <td style="text-align: center; color: #888;">no</td>
+          <td style="text-align: center;">✓</td>
+        </tr>
+        <tr>
+          <td><code>sidePanel</code> · host a persistent side panel</td>
+          <td style="text-align: center; color: #888;">no</td>
+          <td style="text-align: center;">✓</td>
+        </tr>
+        <tr>
+          <td><code>notifications</code> · pop OS-level notifications</td>
+          <td style="text-align: center; color: #888;">no</td>
+          <td style="text-align: center;">✓</td>
+        </tr>
+        <tr>
+          <td><code>contextMenus</code> · add items to your right-click menu</td>
+          <td style="text-align: center; color: #888;">no</td>
+          <td style="text-align: center;">✓</td>
+        </tr>
+        <tr>
+          <td><code>unlimitedStorage</code> · store unlimited data on your device</td>
+          <td style="text-align: center; color: #888;">no</td>
+          <td style="text-align: center;">✓</td>
+        </tr>
+        <tr>
+          <td>
+            <code>browsingData</code> · access your browsing history
+            <div style="color: #888; font-size: 12px;">optional permission on competitors</div>
+          </td>
+          <td style="text-align: center; color: #888;">no</td>
+          <td style="text-align: center;">✓</td>
+        </tr>
+        <tr>
+          <td>
+            Auto-open downloaded files (extension of the
+            <code>downloads</code> permission)
+            <div style="color: #888; font-size: 12px;">optional permission on competitors</div>
+          </td>
+          <td style="text-align: center; color: #888;">no</td>
+          <td style="text-align: center;">✓</td>
+        </tr>
+        <tr style="font-weight: 600; background: #f6f6f6;">
+          <td>Total permissions requested</td>
+          <td style="text-align: center;">5</td>
+          <td style="text-align: center;">14</td>
+        </tr>
+      </table>
+      <p style="margin-top: 1em; font-size: 14px; color: #444;">
+        Fewer permissions means a smaller surface for trust. The extension
+        can only see what the listed permissions allow, and you can revoke
+        any of them in <code>chrome://extensions</code> at any time.
+      </p>
     </section>
 
     <section>
