@@ -1,11 +1,18 @@
 import { describe, it, expect, vi } from "vitest";
+
+// Synthetic byte fixtures aren't valid fMP4; stub the muxer with a
+// deterministic concat-and-tag so the fMP4 test asserts on fetch +
+// orchestration logic without depending on mp4box.js.
+vi.mock("./dash-mux", () => ({
+  muxFmp4: async (videoBytes: Uint8Array) => videoBytes,
+}));
+
 import { downloadHls } from "./hls-downloader";
 import {
   AccessDeniedError,
   ByteRangeError,
   CancelledError,
   EncryptedStreamError,
-  FmpfourError,
   LiveStreamError,
   NetworkError,
   SeparateAudioError,
@@ -147,6 +154,25 @@ describe("downloadHls — happy path", () => {
     expect(blob.size).toBe(SEG_BYTES.length * 2);
   });
 
+  it("fMP4 VOD: fetches init + segments, muxes, returns video/mp4 Blob", async () => {
+    const INIT_BYTES = new Uint8Array([0x66, 0x74, 0x79, 0x70]);
+    const SEG_M4S = new Uint8Array([0x6d, 0x6f, 0x6f, 0x66]);
+    const f = makeFetch({
+      "https://a/p.m3u8": { body: FMP4_PLAYLIST },
+      "https://a/init.mp4": { body: INIT_BYTES },
+      "https://a/seg0.m4s": { body: SEG_M4S },
+    });
+    const blob = await downloadHls("https://a/p.m3u8", {
+      onProgress: noProgress,
+      signal: noSignal,
+      sizeCapBytes: cap,
+      fetchImpl: f,
+    });
+    expect(blob.type).toBe("video/mp4");
+    // Mocked muxFmp4 is identity → init + segments concatenated.
+    expect(blob.size).toBe(INIT_BYTES.length + SEG_M4S.length);
+  });
+
   it("calls onProgress for each segment", async () => {
     const f = makeFetch({
       "https://a/p.m3u8": { body: SIMPLE_VOD },
@@ -188,18 +214,6 @@ describe("downloadHls — rejection rules", () => {
         fetchImpl: f,
       }),
     ).rejects.toBeInstanceOf(EncryptedStreamError);
-  });
-
-  it("rejects fMP4 (EXT-X-MAP)", async () => {
-    const f = makeFetch({ "https://a/p.m3u8": { body: FMP4_PLAYLIST } });
-    await expect(
-      downloadHls("https://a/p.m3u8", {
-        onProgress: noProgress,
-        signal: noSignal,
-        sizeCapBytes: cap,
-        fetchImpl: f,
-      }),
-    ).rejects.toBeInstanceOf(FmpfourError);
   });
 
   it("rejects byte-range segments", async () => {

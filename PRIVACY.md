@@ -4,7 +4,7 @@
 
 ## 1. What this extension does
 
-ClipHutch observes the network requests your browser makes on HTTP and HTTPS pages and identifies the ones that look like video files: direct video formats (`.mp4`, `.webm`, `.mov`, `.m4v`, `.mkv`, `.ogv`), HLS playlists (`.m3u8`), and DASH manifests (`.mpd`). When you click **Download** in the popup, the extension either hands the file to Chrome's download manager (for direct files) or assembles the HLS segments locally into a playable `.ts` file. All processing happens on your device.
+ClipHutch observes the network requests your browser makes on HTTP and HTTPS pages and identifies the ones that look like video files: direct video formats (`.mp4`, `.webm`, `.mov`, `.m4v`, `.mkv`, `.ogv`), HLS playlists (`.m3u8`), and DASH manifests (`.mpd`). When you click **Download** in the popup, the extension either hands the file to Chrome's download manager (for direct files) or assembles the stream segments locally into a playable file (`.ts` for legacy MPEG-TS HLS streams, `.mp4` for fMP4 HLS and DASH streams). All processing happens on your device.
 
 ## 2. What data it accesses
 

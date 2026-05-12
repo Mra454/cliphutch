@@ -59,8 +59,21 @@ function dispositionFilename(cd?: string): string | undefined {
   return plain ? plain[1].trim() : undefined;
 }
 
+const GENERIC_MANIFEST_NAMES = new Set([
+  "playlist.m3u8",
+  "master.m3u8",
+  "index.m3u8",
+  "chunklist.m3u8",
+  "manifest.mpd",
+]);
+
 function displayName(v: DetectedVideo): string {
-  return dispositionFilename(v.contentDisposition) ?? basename(v.url);
+  const disp = dispositionFilename(v.contentDisposition);
+  if (disp) return disp;
+  const base = basename(v.url);
+  const title = v.pageTitle?.trim();
+  if (title && GENERIC_MANIFEST_NAMES.has(base.toLowerCase())) return title;
+  return base;
 }
 
 const KIND_BADGE: Record<string, string> = {

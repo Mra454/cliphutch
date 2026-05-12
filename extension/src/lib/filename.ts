@@ -50,12 +50,34 @@ export function inferFilename(
 }
 
 function pickRawName(video: DetectedVideo): string {
-  return (
-    parseContentDisposition(video.contentDisposition) ??
-    urlBasename(video.url) ??
-    cleanTitle(video.pageTitle) ??
-    fallbackStem()
-  );
+  const fromDisposition = parseContentDisposition(video.contentDisposition);
+  if (fromDisposition) return fromDisposition;
+
+  const basename = urlBasename(video.url);
+  // For stream manifests the URL basename is almost always a generic
+  // playlist/master/index.m3u8 or manifest.mpd that tells the user nothing
+  // about the video. Prefer the page title when one is available.
+  const basenameIsManifest = basename !== undefined && isManifestBasename(basename, video.kind);
+  if (basename && !basenameIsManifest) return basename;
+
+  const fromTitle = cleanTitle(video.pageTitle);
+  if (fromTitle) return fromTitle;
+
+  return basename ?? fallbackStem();
+}
+
+// Generic CDN manifest filenames that carry no signal about the video.
+// Named manifests (e.g. "movie-clip.m3u8") still win over pageTitle.
+const GENERIC_MANIFEST_NAMES = new Set([
+  "playlist.m3u8",
+  "master.m3u8",
+  "index.m3u8",
+  "chunklist.m3u8",
+  "manifest.mpd",
+]);
+
+function isManifestBasename(name: string, _kind: VideoKind): boolean {
+  return GENERIC_MANIFEST_NAMES.has(name.toLowerCase());
 }
 
 export function parseContentDisposition(cd?: string): string | undefined {

@@ -128,6 +128,7 @@ async function runHlsJob(msg: HlsStartMessage): Promise<void> {
       jobId: msg.jobId,
       blobUrl,
       sizeBytes: blob.size,
+      containerExt: blob.type === "video/mp4" ? ".mp4" : ".ts",
     });
   } catch (err) {
     if (err instanceof HlsDownloadError) {

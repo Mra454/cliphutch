@@ -339,15 +339,13 @@ async function handleDownloadRequest(req: DownloadRequest): Promise<DownloadResp
   }
 
   if (video.kind === "hls") {
-    const result = await startHlsDownload(req, video, req.variantId, req.bypassSizeCap);
-    if (result.ok) await recordDownload();
-    return result;
+    // recordDownload fires from handleHlsBlobReady on actual save success,
+    // not on kickoff — failed downloads must not consume the free-tier quota.
+    return startHlsDownload(req, video, req.variantId, req.bypassSizeCap);
   }
 
   if (video.kind === "dash") {
-    const result = await startDashDownload(req, video, req.variantId, req.bypassSizeCap);
-    if (result.ok) await recordDownload();
-    return result;
+    return startDashDownload(req, video, req.variantId, req.bypassSizeCap);
   }
 
   // Header replay does NOT apply to chrome.downloads.download — those fetches
@@ -595,6 +593,7 @@ async function handleHlsBlobReady(msg: {
   jobId: string;
   blobUrl: string;
   sizeBytes: number;
+  containerExt?: string;
 }): Promise<void> {
   const jobs = await getHlsJobs();
   const job = jobs[msg.jobId];
@@ -614,13 +613,14 @@ async function handleHlsBlobReady(msg: {
   try {
     const downloadId = await chrome.downloads.download({
       url: msg.blobUrl,
-      filename: inferFilename(video, { forcedExtension: ".ts" }),
+      filename: inferFilename(video, { forcedExtension: msg.containerExt ?? ".ts" }),
       conflictAction: "uniquify",
       saveAs: false,
     });
     job.downloadId = downloadId;
     job.status = "saving";
     await setHlsJob(job);
+    await recordDownload();
   } catch (err) {
     job.status = "error";
     job.errorMessage = err instanceof Error ? err.message : "Could not save HLS file.";
@@ -774,6 +774,7 @@ async function handleDashBlobReady(msg: {
     job.downloadId = downloadId;
     job.status = "saving";
     await setDashJob(job);
+    await recordDownload();
   } catch (err) {
     job.status = "error";
     job.errorMessage = err instanceof Error ? err.message : "Could not save DASH file.";

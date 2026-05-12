@@ -5,7 +5,6 @@ import {
   CancelledError,
   DrmProtectedError,
   EncryptedStreamError,
-  FmpfourError,
   LiveStreamError,
   NetworkError,
   ParseError,
@@ -14,6 +13,7 @@ import {
 } from "../lib/errors";
 import { classifyHlsManifestForDrm } from "../lib/drm";
 import { HLS_SEGMENT_FETCH_CONCURRENCY } from "../lib/constants";
+import { muxFmp4 } from "./dash-mux";
 
 export type HlsProgress = {
   done: number;
@@ -128,12 +128,17 @@ function validateVariant(parsed: ParsedManifest): void {
   if (!parsed.endList) throw new LiveStreamError();
   const segments = parsed.segments ?? [];
   for (const seg of segments) {
-    if (seg.map) throw new FmpfourError();
     if (seg.byterange) throw new ByteRangeError();
     if (seg.key && seg.key.method && seg.key.method.toUpperCase() !== "NONE") {
       throw new EncryptedStreamError();
     }
   }
+}
+
+// First segment's EXT-X-MAP URI, if present. Assumes uniform map across the
+// variant (true for VOD without mid-stream discontinuities — the common case).
+function detectFmp4InitUri(segments: ParsedSegment[]): string | undefined {
+  return segments[0]?.map?.uri;
 }
 
 function estimateSize(parsed: ParsedManifest, bandwidthBps: number): number {
@@ -224,14 +229,35 @@ export async function downloadHls(
   if (estimatedBytes > sizeCapBytes) throw new SizeCapError(sizeCapBytes);
 
   const segments = parsed.segments ?? [];
+  const fmp4InitUri = detectFmp4InitUri(segments);
+
+  let initBytes: Uint8Array | undefined;
+  if (fmp4InitUri) {
+    initBytes = await fetchBytes(resolveUrl(fmp4InitUri, variantUrl), signal, fetchImpl);
+    if (initBytes.length > sizeCapBytes) throw new SizeCapError(sizeCapBytes);
+  }
+
   const buffers = await fetchSegmentsConcurrent(
     segments,
     variantUrl,
-    sizeCapBytes,
+    sizeCapBytes - (initBytes?.length ?? 0),
     onProgress,
     signal,
     fetchImpl,
   );
+
+  if (fmp4InitUri && initBytes) {
+    const mediaLength = buffers.reduce((sum, b) => sum + b.length, 0);
+    const combined = new Uint8Array(initBytes.length + mediaLength);
+    combined.set(initBytes, 0);
+    let offset = initBytes.length;
+    for (const b of buffers) {
+      combined.set(b, offset);
+      offset += b.length;
+    }
+    const muxed = await muxFmp4(combined);
+    return new Blob([muxed as BlobPart], { type: "video/mp4" });
+  }
 
   const totalLength = buffers.reduce((sum, b) => sum + b.length, 0);
   const concat = new Uint8Array(totalLength);

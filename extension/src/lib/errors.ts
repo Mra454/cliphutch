@@ -42,16 +42,6 @@ export class DrmProtectedError extends HlsDownloadError {
   }
 }
 
-export class FmpfourError extends HlsDownloadError {
-  constructor() {
-    super(
-      "FMP4",
-      "This HLS stream uses fMP4 segments (CMAF). v1 supports MPEG-TS only.",
-    );
-    this.name = "FmpfourError";
-  }
-}
-
 export class ByteRangeError extends HlsDownloadError {
   constructor() {
     super(
