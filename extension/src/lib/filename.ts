@@ -73,6 +73,7 @@ const GENERIC_MANIFEST_NAMES = new Set([
   "master.m3u8",
   "index.m3u8",
   "chunklist.m3u8",
+  "video.m3u8",
   "manifest.mpd",
 ]);
 
