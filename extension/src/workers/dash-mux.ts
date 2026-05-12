@@ -117,6 +117,17 @@ function parseFmp4(bytes: Uint8Array): Parsed {
   iso.onReady = (info: unknown) => {
     const tracks = (info as { tracks: (ParsedTrack & { id: number })[] }).tracks;
     if (!tracks || tracks.length === 0) return;
+    // Guard against silently dropping tracks: this parser extracts only
+    // tracks[0]. Single-track inputs (DASH adaptation sets, video-only fMP4
+    // HLS) are fine. Multi-track input would lose audio (or video) without
+    // notice — fail loudly instead. Lifting this requires the separate-audio
+    // HLS work (Option C); see fmp4-hls-stream-labels review for details.
+    if (tracks.length > 1) {
+      throw new Error(
+        `Multi-track fMP4 input not supported (got ${tracks.length} tracks). ` +
+          `ClipHutch does not yet mux embedded multi-track fMP4 streams.`,
+      );
+    }
     track = tracks[0];
     iso.setExtractionOptions(tracks[0].id, null, { nbSamples: 1_000_000 });
     iso.start();

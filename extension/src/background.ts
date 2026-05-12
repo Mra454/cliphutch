@@ -593,7 +593,7 @@ async function handleHlsBlobReady(msg: {
   jobId: string;
   blobUrl: string;
   sizeBytes: number;
-  containerExt?: string;
+  containerExt: string;
 }): Promise<void> {
   const jobs = await getHlsJobs();
   const job = jobs[msg.jobId];
@@ -613,7 +613,7 @@ async function handleHlsBlobReady(msg: {
   try {
     const downloadId = await chrome.downloads.download({
       url: msg.blobUrl,
-      filename: inferFilename(video, { forcedExtension: msg.containerExt ?? ".ts" }),
+      filename: inferFilename(video, { forcedExtension: msg.containerExt }),
       conflictAction: "uniquify",
       saveAs: false,
     });
