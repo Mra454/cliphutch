@@ -21,6 +21,7 @@ type HlsStartMessage = {
   url: string;
   sizeCapBytes: number;
   variantUrl?: string;
+  audioUrl?: string;
 };
 
 type HlsCancelMessage = {
@@ -72,6 +73,10 @@ export type VariantOption = {
   width?: number;
   height?: number;
   codecs?: string;
+  // HLS only: resolved URL of the matching audio rendition when the variant
+  // references a separate AUDIO group. Carried through to the download
+  // request so downloadHls can fetch + mux both streams.
+  audioRenditionUrl?: string;
 };
 
 export type ListVariantsResult =
@@ -109,6 +114,7 @@ async function runHlsJob(msg: HlsStartMessage): Promise<void> {
       sizeCapBytes: msg.sizeCapBytes,
       signal: controller.signal,
       variantUrl: msg.variantUrl,
+      audioUrl: msg.audioUrl,
       onProgress: (p: HlsProgress) => {
         send({
           type: "hls-download-progress",
@@ -232,6 +238,9 @@ async function listVariants(msg: ListVariantsMessage): Promise<ListVariantsResul
         width: v.width,
         height: v.height,
         codecs: v.codecs,
+        audioRenditionUrl: v.audioRenditionUri
+          ? new URL(v.audioRenditionUri, msg.url).href
+          : undefined,
       }));
       return { ok: true, kind: "hls", variants };
     }

@@ -54,22 +54,50 @@ describe("parseMasterVariants", () => {
       width: 640,
       height: 360,
       codecs: "avc1.42c01e,mp4a.40.2",
+      audioRenditionUri: undefined,
     });
     expect(variants[2].uri).toBe("1080p.m3u8");
     expect(variants[2].bandwidth).toBe(5000000);
     expect(variants[2].width).toBe(1920);
     expect(variants[2].height).toBe(1080);
+    expect(variants[2].audioRenditionUri).toBeUndefined();
   });
 
-  it("filters out variants whose AUDIO group references a separate audio rendition", () => {
+  it("resolves audioRenditionUri for separate-audio variants (DEFAULT=YES rendition)", () => {
     const variants = parseMasterVariants(MASTER_WITH_SEPARATE_AUDIO);
-    expect(variants).toEqual([]);
+    expect(variants).toHaveLength(2);
+    expect(variants[0].uri).toBe("720p.m3u8");
+    expect(variants[0].audioRenditionUri).toBe("audio_en.m3u8");
+    expect(variants[1].audioRenditionUri).toBe("audio_en.m3u8");
   });
 
-  it("keeps embedded-audio variants and drops separate-audio ones in a mixed master", () => {
+  it("mixed master: embedded variants have no audioRenditionUri; separate ones do", () => {
     const variants = parseMasterVariants(MASTER_MIXED);
-    expect(variants).toHaveLength(1);
-    expect(variants[0].uri).toBe("360p_embedded.m3u8");
+    expect(variants).toHaveLength(2);
+    const byUri = Object.fromEntries(variants.map((v) => [v.uri, v]));
+    expect(byUri["360p_embedded.m3u8"].audioRenditionUri).toBeUndefined();
+    expect(byUri["720p_separate.m3u8"].audioRenditionUri).toBe("audio_en.m3u8");
+  });
+
+  it("picks first audio rendition when no DEFAULT=YES is set", () => {
+    const NO_DEFAULT = `#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud1",NAME="A",URI="a.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud1",NAME="B",URI="b.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1500000,AUDIO="aud1"
+v.m3u8
+`;
+    const variants = parseMasterVariants(NO_DEFAULT);
+    expect(variants[0].audioRenditionUri).toBe("a.m3u8");
+  });
+
+  it("skips audio renditions with no URI (signals embedded audio)", () => {
+    const EMBEDDED_FLAG = `#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud1",NAME="Audio",DEFAULT=YES
+#EXT-X-STREAM-INF:BANDWIDTH=1500000,AUDIO="aud1"
+v.m3u8
+`;
+    const variants = parseMasterVariants(EMBEDDED_FLAG);
+    expect(variants[0].audioRenditionUri).toBeUndefined();
   });
 });
 

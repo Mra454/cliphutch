@@ -4,11 +4,12 @@ import {
   ByteRangeError,
   CancelledError,
   DrmProtectedError,
+  EmptyManifestError,
   EncryptedStreamError,
   LiveStreamError,
+  MixedContainerAudioError,
   NetworkError,
   ParseError,
-  SeparateAudioError,
   SizeCapError,
 } from "../lib/errors";
 import { classifyHlsManifestForDrm } from "../lib/drm";
@@ -26,9 +27,13 @@ export type DownloadHlsOptions = {
   signal: AbortSignal;
   sizeCapBytes: number;
   fetchImpl?: typeof fetch;
-  // When set, skip pickEmbeddedVariant and use this resolved variant URL.
+  // When set, skip pickVariant and use this resolved variant URL.
   // Takes precedence over the highest-bandwidth auto-pick.
   variantUrl?: string;
+  // Resolved URI of a separate audio rendition to download in parallel and
+  // mux into the output MP4. Required for separate-audio variants. Both the
+  // video variant and the audio rendition must be fMP4 (Stage 1 limitation).
+  audioUrl?: string;
 };
 
 type ParsedSegment = {
@@ -101,27 +106,33 @@ async function fetchBytes(
   return new Uint8Array(await res.arrayBuffer());
 }
 
-function variantHasSeparateAudio(
-  v: ParsedVariant,
+function resolveDefaultAudioRenditionUri(
+  audioGroupId: string | undefined,
   groups: ParsedManifest["mediaGroups"],
-): boolean {
-  const audioGroupId = v.attributes.AUDIO;
-  if (!audioGroupId) return false;
+): string | undefined {
+  if (!audioGroupId) return undefined;
   const group = groups?.AUDIO?.[audioGroupId];
-  if (!group) return false;
-  return Object.values(group).some((rendition) => Boolean(rendition.uri));
+  if (!group) return undefined;
+  const withUri = Object.values(group).filter((r) => Boolean(r.uri));
+  if (withUri.length === 0) return undefined;
+  const def = withUri.find((r) => r.default === true);
+  return (def ?? withUri[0]).uri;
 }
 
-function pickEmbeddedVariant(
+function pickVariant(
   parsed: ParsedManifest,
-): { variant: ParsedVariant; bandwidth: number } {
+): { variant: ParsedVariant; bandwidth: number; audioRenditionUri?: string } {
   const variants = parsed.playlists ?? [];
-  const candidates = variants
-    .filter((v) => !variantHasSeparateAudio(v, parsed.mediaGroups))
-    .sort((a, b) => (b.attributes.BANDWIDTH ?? 0) - (a.attributes.BANDWIDTH ?? 0));
-  if (candidates.length === 0) throw new SeparateAudioError();
-  const v = candidates[0];
-  return { variant: v, bandwidth: v.attributes.BANDWIDTH ?? 0 };
+  if (variants.length === 0) throw new EmptyManifestError();
+  const sorted = [...variants].sort(
+    (a, b) => (b.attributes.BANDWIDTH ?? 0) - (a.attributes.BANDWIDTH ?? 0),
+  );
+  const v = sorted[0];
+  return {
+    variant: v,
+    bandwidth: v.attributes.BANDWIDTH ?? 0,
+    audioRenditionUri: resolveDefaultAudioRenditionUri(v.attributes.AUDIO, parsed.mediaGroups),
+  };
 }
 
 function validateVariant(parsed: ParsedManifest): void {
@@ -152,18 +163,18 @@ function resolveUrl(uri: string, base: string): string {
   return new URL(uri, base).href;
 }
 
+// Caller owns size-cap + progress accounting via onSegmentDone, so multiple
+// concurrent streams (video + audio) can share a single running-bytes
+// counter without re-implementing the worker pool per call.
 async function fetchSegmentsConcurrent(
   segments: ParsedSegment[],
   baseUrl: string,
-  sizeCapBytes: number,
-  onProgress: (p: HlsProgress) => void,
   signal: AbortSignal,
   fetchImpl: typeof fetch,
+  onSegmentDone: (idx: number, bytes: number) => void,
 ): Promise<Uint8Array[]> {
   const total = segments.length;
   const buffers: Uint8Array[] = new Array(total);
-  let runningBytes = 0;
-  let done = 0;
   let nextIndex = 0;
 
   async function worker(): Promise<void> {
@@ -174,17 +185,25 @@ async function fetchSegmentsConcurrent(
       const seg = segments[idx];
       const url = resolveUrl(seg.uri, baseUrl);
       const bytes = await fetchBytes(url, signal, fetchImpl);
-      runningBytes += bytes.length;
-      if (runningBytes > sizeCapBytes) throw new SizeCapError(sizeCapBytes);
       buffers[idx] = bytes;
-      done += 1;
-      onProgress({ done, total, bytes: runningBytes });
+      onSegmentDone(idx, bytes.length);
     }
   }
 
   const concurrency = Math.min(HLS_SEGMENT_FETCH_CONCURRENCY, Math.max(total, 1));
   await Promise.all(Array.from({ length: concurrency }, () => worker()));
   return buffers;
+}
+
+function concatBuffers(parts: Uint8Array[]): Uint8Array {
+  const total = parts.reduce((s, b) => s + b.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const p of parts) {
+    out.set(p, offset);
+    offset += p.length;
+  }
+  return out;
 }
 
 export async function downloadHls(
@@ -196,6 +215,8 @@ export async function downloadHls(
 
   if (signal.aborted) throw new CancelledError();
 
+  // === Step 1: resolve video variant + (optionally) audio rendition ===
+
   const playlistText = await fetchText(playlistUrl, signal, fetchImpl);
   const masterDrm = classifyHlsManifestForDrm(playlistText);
   if (masterDrm.protected) throw new DrmProtectedError(masterDrm.scheme);
@@ -203,19 +224,31 @@ export async function downloadHls(
 
   let bandwidthBps = 0;
   let variantUrl = playlistUrl;
+  let audioRenditionUrl: string | undefined = opts.audioUrl;
 
   if (parsed.playlists && parsed.playlists.length > 0) {
     if (opts.variantUrl) {
-      // Caller picked a specific variant — skip pickEmbeddedVariant and use it.
+      // Caller picked a specific variant — locate it to read AUDIO group when
+      // opts.audioUrl wasn't pre-resolved.
       variantUrl = opts.variantUrl;
       const matched = parsed.playlists.find(
         (p) => resolveUrl(p.uri, playlistUrl) === opts.variantUrl,
       );
       bandwidthBps = matched?.attributes.BANDWIDTH ?? 0;
+      if (!audioRenditionUrl && matched) {
+        const renditionUri = resolveDefaultAudioRenditionUri(
+          matched.attributes.AUDIO,
+          parsed.mediaGroups,
+        );
+        if (renditionUri) audioRenditionUrl = resolveUrl(renditionUri, playlistUrl);
+      }
     } else {
-      const { variant, bandwidth } = pickEmbeddedVariant(parsed);
+      const { variant, bandwidth, audioRenditionUri } = pickVariant(parsed);
       bandwidthBps = bandwidth;
       variantUrl = resolveUrl(variant.uri, playlistUrl);
+      if (!audioRenditionUrl && audioRenditionUri) {
+        audioRenditionUrl = resolveUrl(audioRenditionUri, playlistUrl);
+      }
     }
     const variantText = await fetchText(variantUrl, signal, fetchImpl);
     const variantDrm = classifyHlsManifestForDrm(variantText);
@@ -225,47 +258,121 @@ export async function downloadHls(
 
   validateVariant(parsed);
 
+  const videoSegments = parsed.segments ?? [];
+  const videoInitUri = detectFmp4InitUri(videoSegments);
+
+  // === Step 2: parse + validate audio rendition (if any) ===
+
+  let audioSegments: ParsedSegment[] = [];
+  let audioInitUri: string | undefined;
+  let audioBaseUrl = "";
+
+  if (audioRenditionUrl) {
+    const audioText = await fetchText(audioRenditionUrl, signal, fetchImpl);
+    const audioDrm = classifyHlsManifestForDrm(audioText);
+    if (audioDrm.protected) throw new DrmProtectedError(audioDrm.scheme);
+    const audioParsed = parseManifest(audioText);
+    validateVariant(audioParsed);
+    audioSegments = audioParsed.segments ?? [];
+    audioInitUri = detectFmp4InitUri(audioSegments);
+    audioBaseUrl = audioRenditionUrl;
+
+    // Stage 1: video and audio must both be fMP4. Mixed-container muxing
+    // (fMP4 video + MPEG-TS audio, as Squarespace ships) is Stage 2.
+    if (!videoInitUri || !audioInitUri) {
+      throw new MixedContainerAudioError();
+    }
+  }
+
+  // === Step 3: size cap estimate ===
+
   const estimatedBytes = estimateSize(parsed, bandwidthBps);
   if (estimatedBytes > sizeCapBytes) throw new SizeCapError(sizeCapBytes);
 
-  const segments = parsed.segments ?? [];
-  const fmp4InitUri = detectFmp4InitUri(segments);
+  // === Step 4: fetch init segments (video + optional audio) ===
 
-  let initBytes: Uint8Array | undefined;
-  if (fmp4InitUri) {
-    initBytes = await fetchBytes(resolveUrl(fmp4InitUri, variantUrl), signal, fetchImpl);
-    if (initBytes.length > sizeCapBytes) throw new SizeCapError(sizeCapBytes);
+  let runningBytes = 0;
+  const checkCap = () => {
+    if (runningBytes > sizeCapBytes) throw new SizeCapError(sizeCapBytes);
+  };
+
+  let videoInitBytes: Uint8Array | undefined;
+  let audioInitBytes: Uint8Array | undefined;
+
+  if (videoInitUri) {
+    videoInitBytes = await fetchBytes(resolveUrl(videoInitUri, variantUrl), signal, fetchImpl);
+    runningBytes += videoInitBytes.length;
+    checkCap();
+  }
+  if (audioInitUri && audioRenditionUrl) {
+    audioInitBytes = await fetchBytes(resolveUrl(audioInitUri, audioBaseUrl), signal, fetchImpl);
+    runningBytes += audioInitBytes.length;
+    checkCap();
   }
 
-  const buffers = await fetchSegmentsConcurrent(
-    segments,
+  // === Step 5: fetch media segments — parallel video + audio when both present ===
+
+  const videoTotal = videoSegments.length;
+  const audioTotal = audioSegments.length;
+  let videoDone = 0;
+  let audioDone = 0;
+  const emitProgress = () => {
+    onProgress({
+      done: videoDone + audioDone,
+      total: videoTotal + audioTotal,
+      bytes: runningBytes,
+    });
+  };
+
+  const videoFetch = fetchSegmentsConcurrent(
+    videoSegments,
     variantUrl,
-    sizeCapBytes - (initBytes?.length ?? 0),
-    onProgress,
     signal,
     fetchImpl,
+    (_idx, bytes) => {
+      runningBytes += bytes;
+      checkCap();
+      videoDone += 1;
+      emitProgress();
+    },
   );
 
-  if (fmp4InitUri && initBytes) {
-    const mediaLength = buffers.reduce((sum, b) => sum + b.length, 0);
-    const combined = new Uint8Array(initBytes.length + mediaLength);
-    combined.set(initBytes, 0);
-    let offset = initBytes.length;
-    for (const b of buffers) {
-      combined.set(b, offset);
-      offset += b.length;
-    }
+  const audioFetch = audioRenditionUrl
+    ? fetchSegmentsConcurrent(
+        audioSegments,
+        audioBaseUrl,
+        signal,
+        fetchImpl,
+        (_idx, bytes) => {
+          runningBytes += bytes;
+          checkCap();
+          audioDone += 1;
+          emitProgress();
+        },
+      )
+    : Promise.resolve([] as Uint8Array[]);
+
+  const [videoBuffers, audioBuffers] = await Promise.all([videoFetch, audioFetch]);
+
+  // === Step 6: assemble output blob ===
+
+  // Branch A: separate-audio fMP4 + fMP4 — mux into single MP4.
+  if (audioRenditionUrl && videoInitBytes && audioInitBytes) {
+    const videoBytes = concatBuffers([videoInitBytes, ...videoBuffers]);
+    const audioBytes = concatBuffers([audioInitBytes, ...audioBuffers]);
+    const muxed = await muxFmp4(videoBytes, audioBytes);
+    return new Blob([muxed as BlobPart], { type: "video/mp4" });
+  }
+
+  // Branch B: embedded-audio fMP4 (Cloudflare-shape) — pass single concatenated
+  // stream through muxFmp4 to produce a non-fragmented MP4.
+  if (videoInitUri && videoInitBytes) {
+    const combined = concatBuffers([videoInitBytes, ...videoBuffers]);
     const muxed = await muxFmp4(combined);
     return new Blob([muxed as BlobPart], { type: "video/mp4" });
   }
 
-  const totalLength = buffers.reduce((sum, b) => sum + b.length, 0);
-  const concat = new Uint8Array(totalLength);
-  let offset = 0;
-  for (const b of buffers) {
-    concat.set(b, offset);
-    offset += b.length;
-  }
-
+  // Branch C: MPEG-TS embedded — concatenate segments as-is, return .ts blob.
+  const concat = concatBuffers(videoBuffers);
   return new Blob([concat], { type: "video/mp2t" });
 }

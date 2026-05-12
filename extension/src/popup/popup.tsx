@@ -9,6 +9,7 @@ type VariantOption = {
   width?: number;
   height?: number;
   codecs?: string;
+  audioRenditionUrl?: string;
 };
 
 type ListVariantsResponse =
@@ -238,13 +239,14 @@ function VideoCard({
     };
   }, [job?.source === "direct" ? job.status : null, job?.source === "direct" ? job.downloadId : null]);
 
-  const sendDownload = async (variantId?: string, bypassSizeCap?: boolean) => {
+  const sendDownload = async (variant?: VariantOption, bypassSizeCap?: boolean) => {
     setPicker(null);
     const res = (await chrome.runtime.sendMessage({
       type: "download",
       tabId,
       videoId: v.id,
-      variantId,
+      variantId: variant?.id,
+      audioRenditionUrl: variant?.audioRenditionUrl,
       bypassSizeCap,
     })) as { ok: true; downloadId?: number; jobId?: string } | { ok: false; error: string };
     if (res && !res.ok) setImmediateError(res.error);
@@ -273,7 +275,7 @@ function VideoCard({
       return;
     }
     if (lr.variants.length === 1) {
-      void sendDownload(lr.variants[0].id);
+      void sendDownload(lr.variants[0]);
       return;
     }
     const sortedVariants = [...lr.variants].sort((a, b) => b.bandwidth - a.bandwidth);
@@ -357,7 +359,7 @@ function VideoCard({
                 ) : null}
               </div>
               <button
-                onClick={() => void sendDownload(variant.id, overCap)}
+                onClick={() => void sendDownload(variant, overCap)}
                 style={{
                   ...buttonStyle,
                   borderColor: overCap ? "#a05" : undefined,

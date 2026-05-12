@@ -9,13 +9,13 @@ export class HlsDownloadError extends Error {
   }
 }
 
-export class SeparateAudioError extends HlsDownloadError {
+export class MixedContainerAudioError extends HlsDownloadError {
   constructor() {
     super(
-      "SEPARATE_AUDIO",
-      "This HLS stream uses separate audio renditions. v1 supports only streams with embedded audio.",
+      "MIXED_CONTAINER_AUDIO",
+      "This stream pairs fMP4 video with non-fMP4 audio. ClipHutch does not yet mux across container types.",
     );
-    this.name = "SeparateAudioError";
+    this.name = "MixedContainerAudioError";
   }
 }
 

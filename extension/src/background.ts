@@ -297,6 +297,10 @@ type DownloadRequest = {
   tabId: number;
   videoId: string;
   variantId?: string;
+  // HLS only: resolved URL of the audio rendition matched to the picked
+  // variant. When set, downloadHls fetches it in parallel with the video and
+  // muxes both into a single MP4.
+  audioRenditionUrl?: string;
   bypassSizeCap?: boolean;
 };
 type DownloadResponse =
@@ -341,7 +345,7 @@ async function handleDownloadRequest(req: DownloadRequest): Promise<DownloadResp
   if (video.kind === "hls") {
     // recordDownload fires from handleHlsBlobReady on actual save success,
     // not on kickoff — failed downloads must not consume the free-tier quota.
-    return startHlsDownload(req, video, req.variantId, req.bypassSizeCap);
+    return startHlsDownload(req, video, req.variantId, req.audioRenditionUrl, req.bypassSizeCap);
   }
 
   if (video.kind === "dash") {
@@ -528,6 +532,7 @@ async function startHlsDownload(
   req: DownloadRequest,
   video: DetectedVideo,
   variantId: string | undefined,
+  audioRenditionUrl: string | undefined,
   bypassSizeCap: boolean | undefined,
 ): Promise<DownloadResponse> {
   const settings = await getSettings();
@@ -570,6 +575,7 @@ async function startHlsDownload(
       url: video.url,
       sizeCapBytes: effectiveCap,
       variantUrl: variantId,
+      audioUrl: audioRenditionUrl,
     })
     .catch(() => {});
 

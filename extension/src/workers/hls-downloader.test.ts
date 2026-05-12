@@ -14,8 +14,8 @@ import {
   CancelledError,
   EncryptedStreamError,
   LiveStreamError,
+  MixedContainerAudioError,
   NetworkError,
-  SeparateAudioError,
   SizeCapError,
 } from "../lib/errors";
 
@@ -111,13 +111,6 @@ const MASTER_EMBEDDED = `#EXTM3U
 high.m3u8
 #EXT-X-STREAM-INF:BANDWIDTH=500000,RESOLUTION=640x360
 low.m3u8
-`;
-
-const MASTER_SEPARATE_AUDIO = `#EXTM3U
-#EXT-X-VERSION:3
-#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",NAME="English",DEFAULT=YES,URI="audio/playlist.m3u8"
-#EXT-X-STREAM-INF:BANDWIDTH=1500000,RESOLUTION=1280x720,AUDIO="audio"
-video/playlist.m3u8
 `;
 
 const HIGH_VARIANT = `#EXTM3U
@@ -228,9 +221,40 @@ describe("downloadHls — rejection rules", () => {
     ).rejects.toBeInstanceOf(ByteRangeError);
   });
 
-  it("rejects master with only separate-audio variants", async () => {
+  it("rejects fMP4 video + MPEG-TS audio (mixed container — Stage 2)", async () => {
+    const INIT = new Uint8Array([0x66, 0x74, 0x79, 0x70]);
+    const SEG = new Uint8Array([0x6d, 0x6f, 0x6f, 0x66]);
+    // Video is fMP4, audio rendition is MPEG-TS (no EXT-X-MAP).
+    const SEPARATE_AUDIO_MIXED = `#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",NAME="English",DEFAULT=YES,URI="audio.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1500000,RESOLUTION=1280x720,AUDIO="aac"
+video.m3u8
+`;
+    const VIDEO_FMP4 = `#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-TARGETDURATION:2
+#EXT-X-MAP:URI="vinit.mp4"
+#EXTINF:2.0,
+v0.m4s
+#EXT-X-ENDLIST
+`;
+    const AUDIO_TS = `#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-TARGETDURATION:2
+#EXTINF:2.0,
+a0.ts
+#EXT-X-ENDLIST
+`;
     const f = makeFetch({
-      "https://a/master.m3u8": { body: MASTER_SEPARATE_AUDIO },
+      "https://a/master.m3u8": { body: SEPARATE_AUDIO_MIXED },
+      "https://a/video.m3u8": { body: VIDEO_FMP4 },
+      "https://a/audio.m3u8": { body: AUDIO_TS },
+      "https://a/vinit.mp4": { body: INIT },
+      "https://a/v0.m4s": { body: SEG },
+      "https://a/a0.ts": { body: SEG },
     });
     await expect(
       downloadHls("https://a/master.m3u8", {
@@ -239,7 +263,94 @@ describe("downloadHls — rejection rules", () => {
         sizeCapBytes: cap,
         fetchImpl: f,
       }),
-    ).rejects.toBeInstanceOf(SeparateAudioError);
+    ).rejects.toBeInstanceOf(MixedContainerAudioError);
+  });
+});
+
+describe("downloadHls — separate-audio fMP4 + fMP4", () => {
+  const MASTER = `#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",NAME="English",DEFAULT=YES,URI="audio.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1500000,RESOLUTION=1280x720,AUDIO="aac"
+video.m3u8
+`;
+  const VIDEO = `#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-TARGETDURATION:2
+#EXT-X-MAP:URI="vinit.mp4"
+#EXTINF:2.0,
+v0.m4s
+#EXTINF:2.0,
+v1.m4s
+#EXT-X-ENDLIST
+`;
+  const AUDIO = `#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-TARGETDURATION:2
+#EXT-X-MAP:URI="ainit.mp4"
+#EXTINF:2.0,
+a0.m4s
+#EXTINF:2.0,
+a1.m4s
+#EXT-X-ENDLIST
+`;
+  const V_INIT = new Uint8Array([0x76, 0x69, 0x76, 0x69]); // 4 B
+  const V_SEG = new Uint8Array([0x76, 0x73, 0x76, 0x73, 0x76, 0x73]); // 6 B
+  const A_INIT = new Uint8Array([0x61, 0x69]); // 2 B
+  const A_SEG = new Uint8Array([0x61, 0x73, 0x61, 0x73]); // 4 B
+
+  const f = makeFetch({
+    "https://a/master.m3u8": { body: MASTER },
+    "https://a/video.m3u8": { body: VIDEO },
+    "https://a/audio.m3u8": { body: AUDIO },
+    "https://a/vinit.mp4": { body: V_INIT },
+    "https://a/v0.m4s": { body: V_SEG },
+    "https://a/v1.m4s": { body: V_SEG },
+    "https://a/ainit.mp4": { body: A_INIT },
+    "https://a/a0.m4s": { body: A_SEG },
+    "https://a/a1.m4s": { body: A_SEG },
+  });
+
+  it("fetches video + audio in parallel, mux returns video/mp4", async () => {
+    const blob = await downloadHls("https://a/master.m3u8", {
+      onProgress: noProgress,
+      signal: noSignal,
+      sizeCapBytes: cap,
+      fetchImpl: f,
+    });
+    expect(blob.type).toBe("video/mp4");
+    // Mocked muxFmp4 is identity on the first arg; video bytes = V_INIT + 2×V_SEG.
+    expect(blob.size).toBe(V_INIT.length + V_SEG.length * 2);
+  });
+
+  it("emits combined progress for video + audio segments", async () => {
+    const progress = vi.fn();
+    await downloadHls("https://a/master.m3u8", {
+      onProgress: progress,
+      signal: noSignal,
+      sizeCapBytes: cap,
+      fetchImpl: f,
+    });
+    // Last call should report all 4 media segments done.
+    const last = progress.mock.calls[progress.mock.calls.length - 1][0];
+    expect(last.done).toBe(4);
+    expect(last.total).toBe(4);
+    expect(last.bytes).toBe(
+      V_INIT.length + A_INIT.length + V_SEG.length * 2 + A_SEG.length * 2,
+    );
+  });
+
+  it("honors caller-supplied audioUrl (overrides DEFAULT rendition)", async () => {
+    const blob = await downloadHls("https://a/master.m3u8", {
+      onProgress: noProgress,
+      signal: noSignal,
+      sizeCapBytes: cap,
+      fetchImpl: f,
+      audioUrl: "https://a/audio.m3u8",
+    });
+    expect(blob.type).toBe("video/mp4");
   });
 });
 
