@@ -10,7 +10,8 @@ vi.mock("./dash-mux", () => ({
 import { downloadHls } from "./hls-downloader";
 import {
   AccessDeniedError,
-  ByteRangeError,
+  ByteRangeOutOfBoundsError,
+  ByteRangeUnsupportedError,
   CancelledError,
   EncryptedStreamError,
   LiveStreamError,
@@ -23,7 +24,19 @@ type FetchEntry = {
   body: string | Uint8Array;
   status?: number;
   delayMs?: number;
+  // When set, override how the mock responds to a Range request:
+  //   "ignore-range": return full body with 200 (server ignored Range).
+  //   "out-of-bounds": return 416.
+  // Default: slice the body by the request's Range header and return 206.
+  rangeBehavior?: "ignore-range" | "out-of-bounds";
 };
+
+function parseRange(header: string | null): { start: number; end: number } | null {
+  if (!header) return null;
+  const m = header.match(/bytes=(\d+)-(\d+)/);
+  if (!m) return null;
+  return { start: Number(m[1]), end: Number(m[2]) };
+}
 
 function makeFetch(map: Record<string, FetchEntry>): typeof fetch {
   return (async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -50,6 +63,29 @@ function makeFetch(map: Record<string, FetchEntry>): typeof fetch {
     if (entry.status && entry.status >= 400) {
       return new Response("", { status: entry.status });
     }
+
+    // Honor Range headers: if the caller sent Range and the entry body is
+    // bytes, slice the body and return 206. The rangeBehavior flag overrides
+    // this for testing server-side anomalies.
+    const headers =
+      init?.headers instanceof Headers
+        ? init.headers
+        : new Headers(init?.headers as Record<string, string> | undefined);
+    const rangeHeader = headers.get("Range");
+    if (rangeHeader && entry.body instanceof Uint8Array) {
+      if (entry.rangeBehavior === "out-of-bounds") {
+        return new Response("", { status: 416 });
+      }
+      if (entry.rangeBehavior === "ignore-range") {
+        return new Response(entry.body as unknown as BodyInit, { status: 200 });
+      }
+      const range = parseRange(rangeHeader);
+      if (range) {
+        const slice = entry.body.slice(range.start, range.end + 1);
+        return new Response(slice as unknown as BodyInit, { status: 206 });
+      }
+    }
+
     if (typeof entry.body === "string") {
       return new Response(entry.body, { status: entry.status ?? 200 });
     }
@@ -92,16 +128,6 @@ const FMP4_PLAYLIST = `#EXTM3U
 #EXT-X-MAP:URI="init.mp4"
 #EXTINF:2.0,
 seg0.m4s
-#EXT-X-ENDLIST
-`;
-
-const BYTERANGE_PLAYLIST = `#EXTM3U
-#EXT-X-VERSION:4
-#EXT-X-PLAYLIST-TYPE:VOD
-#EXT-X-TARGETDURATION:2
-#EXTINF:2.0,
-#EXT-X-BYTERANGE:1000@0
-seg0.ts
 #EXT-X-ENDLIST
 `;
 
@@ -209,18 +235,6 @@ describe("downloadHls — rejection rules", () => {
     ).rejects.toBeInstanceOf(EncryptedStreamError);
   });
 
-  it("rejects byte-range segments", async () => {
-    const f = makeFetch({ "https://a/p.m3u8": { body: BYTERANGE_PLAYLIST } });
-    await expect(
-      downloadHls("https://a/p.m3u8", {
-        onProgress: noProgress,
-        signal: noSignal,
-        sizeCapBytes: cap,
-        fetchImpl: f,
-      }),
-    ).rejects.toBeInstanceOf(ByteRangeError);
-  });
-
   it("rejects fMP4 video + MPEG-TS audio (mixed container — Stage 2)", async () => {
     const INIT = new Uint8Array([0x66, 0x74, 0x79, 0x70]);
     const SEG = new Uint8Array([0x6d, 0x6f, 0x6f, 0x66]);
@@ -264,6 +278,111 @@ a0.ts
         fetchImpl: f,
       }),
     ).rejects.toBeInstanceOf(MixedContainerAudioError);
+  });
+});
+
+describe("downloadHls — byte-range segments (Apple single-file CMAF shape)", () => {
+  // Apple's advanced fMP4 stream uses a single main.mp4 file with the init
+  // box at the head (delimited by EXT-X-MAP BYTERANGE) and media samples
+  // spread across the rest of the file (each segment is a slice).
+  //
+  // Synthetic file: 64 bytes total. Init = bytes 0..7 (8). Seg0 = bytes
+  // 8..23 (16). Seg1 = bytes 24..39 (16, implicit offset). Seg2 = bytes
+  // 40..55 (16, implicit offset).
+  const MAIN_BYTES = new Uint8Array(64);
+  for (let i = 0; i < 64; i++) MAIN_BYTES[i] = i;
+
+  const SINGLE_FILE_PLAYLIST = `#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-TARGETDURATION:2
+#EXT-X-MAP:URI="main.mp4",BYTERANGE="8@0"
+#EXTINF:2.0,
+#EXT-X-BYTERANGE:16@8
+main.mp4
+#EXTINF:2.0,
+#EXT-X-BYTERANGE:16
+main.mp4
+#EXTINF:2.0,
+#EXT-X-BYTERANGE:16
+main.mp4
+#EXT-X-ENDLIST
+`;
+
+  it("downloads init + range-sliced segments, muxes to video/mp4", async () => {
+    const f = makeFetch({
+      "https://a/p.m3u8": { body: SINGLE_FILE_PLAYLIST },
+      "https://a/main.mp4": { body: MAIN_BYTES },
+    });
+    const blob = await downloadHls("https://a/p.m3u8", {
+      onProgress: noProgress,
+      signal: noSignal,
+      sizeCapBytes: cap,
+      fetchImpl: f,
+    });
+    expect(blob.type).toBe("video/mp4");
+    // Mocked muxFmp4 is identity: blob bytes = init(8) + 3 segs (16 each).
+    expect(blob.size).toBe(8 + 16 * 3);
+  });
+
+  it("implicit offsets resolve to consecutive ranges", async () => {
+    // Capture every Range header the implementation sends.
+    const ranges: string[] = [];
+    const wrapped = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const headers =
+        init?.headers instanceof Headers
+          ? init.headers
+          : new Headers(init?.headers as Record<string, string> | undefined);
+      const r = headers.get("Range");
+      if (r) ranges.push(r);
+      return (makeFetch({
+        "https://a/p.m3u8": { body: SINGLE_FILE_PLAYLIST },
+        "https://a/main.mp4": { body: MAIN_BYTES },
+      }) as typeof fetch)(input, init);
+    }) as typeof fetch;
+    await downloadHls("https://a/p.m3u8", {
+      onProgress: noProgress,
+      signal: noSignal,
+      sizeCapBytes: cap,
+      fetchImpl: wrapped,
+    });
+    // Init (8@0) + seg0 (16@8) + seg1 (16@24, implicit) + seg2 (16@40, implicit)
+    expect(ranges).toEqual([
+      "bytes=0-7",
+      "bytes=8-23",
+      "bytes=24-39",
+      "bytes=40-55",
+    ]);
+  });
+
+  it("server returns 200 to Range request → ByteRangeUnsupportedError", async () => {
+    const f = makeFetch({
+      "https://a/p.m3u8": { body: SINGLE_FILE_PLAYLIST },
+      "https://a/main.mp4": { body: MAIN_BYTES, rangeBehavior: "ignore-range" },
+    });
+    await expect(
+      downloadHls("https://a/p.m3u8", {
+        onProgress: noProgress,
+        signal: noSignal,
+        sizeCapBytes: cap,
+        fetchImpl: f,
+      }),
+    ).rejects.toBeInstanceOf(ByteRangeUnsupportedError);
+  });
+
+  it("server returns 416 → ByteRangeOutOfBoundsError", async () => {
+    const f = makeFetch({
+      "https://a/p.m3u8": { body: SINGLE_FILE_PLAYLIST },
+      "https://a/main.mp4": { body: MAIN_BYTES, rangeBehavior: "out-of-bounds" },
+    });
+    await expect(
+      downloadHls("https://a/p.m3u8", {
+        onProgress: noProgress,
+        signal: noSignal,
+        sizeCapBytes: cap,
+        fetchImpl: f,
+      }),
+    ).rejects.toBeInstanceOf(ByteRangeOutOfBoundsError);
   });
 });
 

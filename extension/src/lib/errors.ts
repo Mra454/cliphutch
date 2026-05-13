@@ -23,7 +23,7 @@ export class EncryptedStreamError extends HlsDownloadError {
   constructor() {
     super(
       "ENCRYPTED",
-      "This HLS stream is encrypted (AES-128 transport encryption). v1 does not fetch and apply encryption keys.",
+      "This HLS stream is encrypted with AES-128 transport encryption. ClipHutch does not fetch encryption keys.",
     );
     this.name = "EncryptedStreamError";
   }
@@ -42,13 +42,36 @@ export class DrmProtectedError extends HlsDownloadError {
   }
 }
 
+// Preemptive refusal — the manifest declares a byte-range shape ClipHutch
+// doesn't yet handle (e.g. DASH SegmentBase+indexRange). Distinct from the
+// runtime errors below which fire after a Range request is actually sent.
 export class ByteRangeError extends HlsDownloadError {
   constructor() {
     super(
       "BYTERANGE",
-      "This stream uses byte-range segments. v1 does not support byte-range fetching.",
+      "This stream uses a byte-range layout ClipHutch doesn't yet support.",
     );
     this.name = "ByteRangeError";
+  }
+}
+
+export class ByteRangeUnsupportedError extends HlsDownloadError {
+  constructor() {
+    super(
+      "BYTERANGE_UNSUPPORTED",
+      "A server returned a full response to a byte-range request. The stream cannot be downloaded one segment at a time from this origin.",
+    );
+    this.name = "ByteRangeUnsupportedError";
+  }
+}
+
+export class ByteRangeOutOfBoundsError extends HlsDownloadError {
+  constructor() {
+    super(
+      "BYTERANGE_OUT_OF_BOUNDS",
+      "A byte-range request fell outside the file's size. The manifest may be stale or the source file changed.",
+    );
+    this.name = "ByteRangeOutOfBoundsError";
   }
 }
 
@@ -66,7 +89,7 @@ export class LiveStreamError extends HlsDownloadError {
   constructor() {
     super(
       "LIVE",
-      "This is a live stream. v1 supports VOD streams only.",
+      "This is a live stream. ClipHutch downloads on-demand (VOD) streams only.",
     );
     this.name = "LiveStreamError";
   }

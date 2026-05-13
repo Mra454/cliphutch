@@ -1,7 +1,8 @@
 import { Parser } from "m3u8-parser";
 import {
   AccessDeniedError,
-  ByteRangeError,
+  ByteRangeOutOfBoundsError,
+  ByteRangeUnsupportedError,
   CancelledError,
   DrmProtectedError,
   EmptyManifestError,
@@ -36,12 +37,14 @@ export type DownloadHlsOptions = {
   audioUrl?: string;
 };
 
+type ByteRange = { length: number; offset: number };
+
 type ParsedSegment = {
   uri: string;
   duration?: number;
   key?: { method?: string; uri?: string };
-  map?: { uri?: string };
-  byterange?: { length: number; offset: number };
+  map?: { uri?: string; byterange?: ByteRange };
+  byterange?: ByteRange;
 };
 
 type ParsedVariant = {
@@ -106,6 +109,52 @@ async function fetchBytes(
   return new Uint8Array(await res.arrayBuffer());
 }
 
+async function fetchByteRange(
+  url: string,
+  offset: number,
+  length: number,
+  signal: AbortSignal,
+  fetchImpl: typeof fetch,
+): Promise<Uint8Array> {
+  const end = offset + length - 1;
+  let res: Response;
+  try {
+    res = await fetchImpl(url, {
+      credentials: "include",
+      signal,
+      headers: { Range: `bytes=${offset}-${end}` },
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") throw new CancelledError();
+    throw new NetworkError(err instanceof Error ? err.message : undefined);
+  }
+  if (res.status === 401 || res.status === 403) throw new AccessDeniedError();
+  if (res.status === 416) throw new ByteRangeOutOfBoundsError();
+  // 200 means the server ignored the Range header and sent the full resource.
+  // Using the full body would silently produce huge / wrong segments, so
+  // surface this rather than fall through.
+  if (res.status === 200) throw new ByteRangeUnsupportedError();
+  if (res.status !== 206 && !res.ok) throw new NetworkError(`Status ${res.status}`);
+  const bytes = new Uint8Array(await res.arrayBuffer());
+  // Some servers honor 206 but return the full body anyway. Trim defensively
+  // so callers get exactly the requested range length.
+  if (bytes.length > length) return bytes.slice(0, length);
+  return bytes;
+}
+
+async function fetchSegmentBytes(
+  seg: ParsedSegment,
+  baseUrl: string,
+  signal: AbortSignal,
+  fetchImpl: typeof fetch,
+): Promise<Uint8Array> {
+  const url = resolveUrl(seg.uri, baseUrl);
+  if (seg.byterange) {
+    return fetchByteRange(url, seg.byterange.offset, seg.byterange.length, signal, fetchImpl);
+  }
+  return fetchBytes(url, signal, fetchImpl);
+}
+
 function resolveDefaultAudioRenditionUri(
   audioGroupId: string | undefined,
   groups: ParsedManifest["mediaGroups"],
@@ -139,17 +188,20 @@ function validateVariant(parsed: ParsedManifest): void {
   if (!parsed.endList) throw new LiveStreamError();
   const segments = parsed.segments ?? [];
   for (const seg of segments) {
-    if (seg.byterange) throw new ByteRangeError();
     if (seg.key && seg.key.method && seg.key.method.toUpperCase() !== "NONE") {
       throw new EncryptedStreamError();
     }
   }
 }
 
-// First segment's EXT-X-MAP URI, if present. Assumes uniform map across the
-// variant (true for VOD without mid-stream discontinuities — the common case).
-function detectFmp4InitUri(segments: ParsedSegment[]): string | undefined {
-  return segments[0]?.map?.uri;
+// First segment's EXT-X-MAP info, if present. Carries the optional byterange
+// (Apple-style single-file CMAF uses BYTERANGE on EXT-X-MAP to delimit the
+// init box at the head of main.mp4). Assumes uniform map across the variant
+// (true for VOD without mid-stream discontinuities — the common case).
+function detectFmp4Init(segments: ParsedSegment[]): { uri: string; byterange?: ByteRange } | undefined {
+  const map = segments[0]?.map;
+  if (!map?.uri) return undefined;
+  return { uri: map.uri, byterange: map.byterange };
 }
 
 function estimateSize(parsed: ParsedManifest, bandwidthBps: number): number {
@@ -182,9 +234,7 @@ async function fetchSegmentsConcurrent(
       if (signal.aborted) throw new CancelledError();
       const idx = nextIndex++;
       if (idx >= total) return;
-      const seg = segments[idx];
-      const url = resolveUrl(seg.uri, baseUrl);
-      const bytes = await fetchBytes(url, signal, fetchImpl);
+      const bytes = await fetchSegmentBytes(segments[idx], baseUrl, signal, fetchImpl);
       buffers[idx] = bytes;
       onSegmentDone(idx, bytes.length);
     }
@@ -259,12 +309,12 @@ export async function downloadHls(
   validateVariant(parsed);
 
   const videoSegments = parsed.segments ?? [];
-  const videoInitUri = detectFmp4InitUri(videoSegments);
+  const videoInit = detectFmp4Init(videoSegments);
 
   // === Step 2: parse + validate audio rendition (if any) ===
 
   let audioSegments: ParsedSegment[] = [];
-  let audioInitUri: string | undefined;
+  let audioInit: { uri: string; byterange?: ByteRange } | undefined;
   let audioBaseUrl = "";
 
   if (audioRenditionUrl) {
@@ -274,12 +324,12 @@ export async function downloadHls(
     const audioParsed = parseManifest(audioText);
     validateVariant(audioParsed);
     audioSegments = audioParsed.segments ?? [];
-    audioInitUri = detectFmp4InitUri(audioSegments);
+    audioInit = detectFmp4Init(audioSegments);
     audioBaseUrl = audioRenditionUrl;
 
     // Stage 1: video and audio must both be fMP4. Mixed-container muxing
-    // (fMP4 video + MPEG-TS audio, as Squarespace ships) is Stage 2.
-    if (!videoInitUri || !audioInitUri) {
+    // (fMP4 video + MPEG-TS audio, as Squarespace ships) is Stage 2C.
+    if (!videoInit || !audioInit) {
       throw new MixedContainerAudioError();
     }
   }
@@ -296,16 +346,27 @@ export async function downloadHls(
     if (runningBytes > sizeCapBytes) throw new SizeCapError(sizeCapBytes);
   };
 
+  const fetchInit = async (
+    init: { uri: string; byterange?: ByteRange },
+    baseUrl: string,
+  ): Promise<Uint8Array> => {
+    const url = resolveUrl(init.uri, baseUrl);
+    if (init.byterange) {
+      return fetchByteRange(url, init.byterange.offset, init.byterange.length, signal, fetchImpl);
+    }
+    return fetchBytes(url, signal, fetchImpl);
+  };
+
   let videoInitBytes: Uint8Array | undefined;
   let audioInitBytes: Uint8Array | undefined;
 
-  if (videoInitUri) {
-    videoInitBytes = await fetchBytes(resolveUrl(videoInitUri, variantUrl), signal, fetchImpl);
+  if (videoInit) {
+    videoInitBytes = await fetchInit(videoInit, variantUrl);
     runningBytes += videoInitBytes.length;
     checkCap();
   }
-  if (audioInitUri && audioRenditionUrl) {
-    audioInitBytes = await fetchBytes(resolveUrl(audioInitUri, audioBaseUrl), signal, fetchImpl);
+  if (audioInit && audioRenditionUrl) {
+    audioInitBytes = await fetchInit(audioInit, audioBaseUrl);
     runningBytes += audioInitBytes.length;
     checkCap();
   }
@@ -366,7 +427,7 @@ export async function downloadHls(
 
   // Branch B: embedded-audio fMP4 (Cloudflare-shape) — pass single concatenated
   // stream through muxFmp4 to produce a non-fragmented MP4.
-  if (videoInitUri && videoInitBytes) {
+  if (videoInit && videoInitBytes) {
     const combined = concatBuffers([videoInitBytes, ...videoBuffers]);
     const muxed = await muxFmp4(combined);
     return new Blob([muxed as BlobPart], { type: "video/mp4" });

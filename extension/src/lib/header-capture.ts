@@ -71,6 +71,16 @@ export function extractCapturedHeaders(
 // https://cdn.example.com/v/abc/playlist.m3u8, returns "||cdn.example.com/v/abc/"
 // so the segments in the same directory are also matched. For a direct file,
 // returns the URL itself, so the rule applies only to that one fetch.
+//
+// Audio-rendition assumption: separate-audio HLS variants reference audio
+// playlists that are almost always co-located with the master (same dir or
+// deeper subdir on the same host). The prefix filter ||host/path/ matches
+// any URL starting with host/path/ — including deeper subdirs — so audio
+// segments at host/path/audio/foo.m4s ARE covered. If a deployment ever
+// places audio at a parallel path like host/audio/ when the master lives at
+// host/video/, this filter would not match and the audio fetch would skip
+// header replay. Install a second DNR rule for the audio rendition URL in
+// that case.
 export function buildUrlFilter(url: string, kind: "hls" | "dash" | "direct"): string {
   if (kind === "direct") return url;
   try {
