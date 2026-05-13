@@ -78,6 +78,44 @@ Open work to do during/after the review window:
 - **M5** — Stale docs in `cloudflare/README.md` (mentions `licenses@cliphutch.app`; "Phase 3 stub" claim is wrong).
 - **Trader verification** — Google Payments verification submitted 2026-04-28 with Vismu LLC Articles of Organization; pending. Listing will display "non-trader" until Google approves.
 
+## Option C work-in-progress — paused 2026-05-13
+
+Active branch: **`option-c-stage-1-separate-audio`** (pushed). Two PRs not yet merged.
+
+Goal: download a single playable MP4 containing the selected video variant plus the default audio rendition for separate-audio HLS (Squarespace, Apple advanced fMP4, modern Vimeo non-DRM, Wistia, etc.).
+
+Shipped on this branch (3 commits past master's last open PR `fmp4-hls-stream-labels`):
+
+| Commit | What | Sites unlocked |
+|---|---|---|
+| `02fb183` | **Stage 1** — separate-audio fMP4 + fMP4. `parseMasterVariants` no longer filters separate-audio variants; resolves `audioRenditionUri`. `downloadHls` accepts `audioUrl`, fetches video + audio in parallel, calls `muxFmp4(video, audio)`. New `MixedContainerAudioError` for fMP4 video + non-fMP4 audio. | Mux `tos_ismc`, modern Vimeo non-DRM |
+| `178a184` | **Stage 2A** — byte-range segment fetch. New `fetchByteRange()`. `detectFmp4Init` returns `{uri, byterange?}`. `validateVariant` drops the byterange throw. m3u8-parser already resolves implicit `EXT-X-BYTERANGE` offsets. New `ByteRangeUnsupportedError` (server returned 200 to Range), `ByteRangeOutOfBoundsError` (416). `ByteRangeError` kept for DASH's preemptive refusal. | Apple `img_bipbop_adv_example_fmp4/master.m3u8` |
+
+Stage 1 and 2A are **unverified end-to-end.** Tests pass, build clean, audit PASS, but no real browser smoke test ran. Both rounds got committed before user-driven smoke confirmation. Combined smoke gate is at the end of Stage 2.
+
+### What's next (in order)
+
+1. **Stage 2B — mux.js compatibility spike** (~30 min). Add `mux.js` to `package.json`, attempt `import { mp2t } from 'mux.js'` in a one-off test, parse a tiny MPEG-TS fixture, confirm it produces ADTS-framed AAC + AudioSpecificConfig. Decision gate: library or hand-roll for Stage 2C.
+2. **Stage 2C — MPEG-TS audio → fMP4** (~6-8 hours). `extension/src/workers/ts-demux.ts` extracts AAC ADTS + AudioSpecificConfig from MPEG-TS PES packets. `extension/src/workers/aac-to-fmp4.ts` repackages as fMP4 audio (synthetic init + media segment) so the existing `muxFmp4(video, audio)` works unchanged. Drop the `MixedContainerAudioError` throw at `hls-downloader.ts:332`. Generate Squarespace-shape fixture locally with ffmpeg.
+3. **Smoke gate** (~30 min, requires user). Three URLs:
+   - Mux `tos_ismc` (validates Stage 1)
+   - Apple `img_bipbop_adv_example_fmp4` (validates Stage 1 + 2A together)
+   - Real Squarespace page (validates Stage 1 + 2A + 2C together — the actual reported failure case)
+   Plus regression: Cloudflare Stream, MPEG-TS embedded.
+4. **Stage 2D — privacy + permissions copy** (~1 hour). Update `PRIVACY.md`, `PERMISSIONS.md`, `extension/firstrun.html` together to mention separate-audio fetching and mixed-container muxing. Mirror to `~/projects/cliphutch-site/public/privacy.html`. Drop more `v1` framing if any remains.
+5. **Codex adversarial review** of the combined Stage 1 + 2A + 2C diff before merge. See `~/.claude/projects/-Users-mikey/memory/feedback_codex_adversarial_review_cycle.md`.
+6. **PR + merge.** Single Option C PR covering Stages 1, 2A, 2C, 2D.
+
+### Known concerns parked
+
+- **DNR header replay scope.** `buildUrlFilter` at `lib/header-capture.ts:74` creates `||host/dir/` from the master URL's directory. Works in practice (audio renditions co-located). If a deployment ever places audio at a parallel path on the same host, audio fetches go header-less. Documented inline in `header-capture.ts`. Fix is a second DNR rule for the audio URL when its path falls outside the video's prefix.
+- **Multi-track init muxer.** `dash-mux.ts parseFmp4` extracts `tracks[0]` only; multi-track fMP4 input now throws (guard from `5fca8a9`). No public test stream exercises this. Defer the full multi-track fix until a real site reports silent audio.
+- **Out of scope after Option C lands:** AES-128 transport encryption, FairPlay/Widevine DRM, live/event playlists, discontinuities with codec changes, multi-period DASH, WebM/Opus HLS, CMAF subtitles/timed metadata, MSE-only flows (YouTube, Twitter), sites needing headers/cookies not captured at detection time.
+
+### Where the master plan lives
+
+In the conversation history of the session that branched `option-c-stage-1-separate-audio`. The plan covered Stages 1, 2A, 2B, 2C, 2D with file-by-file changes and accept criteria. Memory: `~/.claude/projects/-Users-mikey/memory/`. If a future session needs the plan and can't find it: ask Codex to re-draft from this section.
+
 ## What future sessions tend to get wrong
 
 - Drop "API" from the 5-permissions claim. **Don't.**
