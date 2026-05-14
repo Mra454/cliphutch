@@ -1,4 +1,4 @@
-const HISTORY_KEY = "download-history";
+export const VIDEO_DOWNLOAD_HISTORY_KEY = "video-download-history";
 const WINDOW_MS = 24 * 60 * 60 * 1000;
 
 export const FREE_DOWNLOAD_LIMIT = 4;
@@ -6,13 +6,13 @@ export const FREE_DOWNLOAD_LIMIT = 4;
 type DownloadEvent = { at: number };
 
 async function getHistory(): Promise<DownloadEvent[]> {
-  const result = await chrome.storage.local.get(HISTORY_KEY);
-  const stored = result[HISTORY_KEY];
+  const result = await chrome.storage.local.get(VIDEO_DOWNLOAD_HISTORY_KEY);
+  const stored = result[VIDEO_DOWNLOAD_HISTORY_KEY];
   return Array.isArray(stored) ? (stored as DownloadEvent[]) : [];
 }
 
 async function setHistory(events: DownloadEvent[]): Promise<void> {
-  await chrome.storage.local.set({ [HISTORY_KEY]: events });
+  await chrome.storage.local.set({ [VIDEO_DOWNLOAD_HISTORY_KEY]: events });
 }
 
 function pruneOld(events: DownloadEvent[], now: number): DownloadEvent[] {
@@ -36,5 +36,5 @@ export async function isRateLimited(now: number = Date.now()): Promise<boolean> 
 }
 
 export async function resetHistory(): Promise<void> {
-  await chrome.storage.local.remove(HISTORY_KEY);
+  await chrome.storage.local.remove(VIDEO_DOWNLOAD_HISTORY_KEY);
 }

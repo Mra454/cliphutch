@@ -4,6 +4,7 @@ import { HlsDownloadError } from "../lib/errors";
 import { MAX_CONCURRENT_HLS_JOBS } from "../lib/constants";
 import { isMasterPlaylist, parseMasterVariants } from "../lib/hls-variants";
 import { parseMpd } from "../lib/dash";
+import { terminateWebmTranscoder, transcodeWebmToMp4 } from "../workers/webm-transcoder";
 
 console.log("[cliphutch] offscreen document loaded");
 
@@ -58,6 +59,23 @@ type ListVariantsMessage = {
   kind: "hls" | "dash";
 };
 
+type WebmTranscodeStartMessage = {
+  type: "webm-transcode-start";
+  jobId: string;
+  url: string;
+  sizeCapBytes: number;
+};
+
+type WebmTranscodeCancelMessage = {
+  type: "webm-transcode-cancel";
+  jobId: string;
+};
+
+type WebmTranscodeRevokeMessage = {
+  type: "webm-transcode-revoke";
+  jobId: string;
+};
+
 type IncomingMessage =
   | HlsStartMessage
   | HlsCancelMessage
@@ -65,7 +83,10 @@ type IncomingMessage =
   | DashStartMessage
   | DashCancelMessage
   | DashRevokeMessage
-  | ListVariantsMessage;
+  | ListVariantsMessage
+  | WebmTranscodeStartMessage
+  | WebmTranscodeCancelMessage
+  | WebmTranscodeRevokeMessage;
 
 export type VariantOption = {
   id: string; // HLS: resolved URL of variant playlist; DASH: Representation @id
@@ -216,6 +237,64 @@ async function runDashJob(msg: DashStartMessage): Promise<void> {
   }
 }
 
+async function runWebmTranscodeJob(msg: WebmTranscodeStartMessage): Promise<void> {
+  if (activeJobs.size >= MAX_CONCURRENT_HLS_JOBS) {
+    send({
+      type: "webm-transcode-error",
+      jobId: msg.jobId,
+      code: "CONCURRENT_LIMIT",
+      userMessage: "Another download is already running. Wait for it to finish.",
+    });
+    return;
+  }
+
+  const controller = new AbortController();
+  const job: ActiveJob = { jobId: msg.jobId, controller };
+  activeJobs.set(msg.jobId, job);
+
+  try {
+    const blob = await transcodeWebmToMp4(msg.url, {
+      sizeCapBytes: msg.sizeCapBytes,
+      signal: controller.signal,
+      onProgress: (ratio, message) => {
+        send({
+          type: "webm-transcode-progress",
+          jobId: msg.jobId,
+          ratio,
+          message,
+        });
+      },
+    });
+
+    const blobUrl = URL.createObjectURL(blob);
+    job.blobUrl = blobUrl;
+
+    send({
+      type: "webm-transcode-blob-ready",
+      jobId: msg.jobId,
+      blobUrl,
+      sizeBytes: blob.size,
+    });
+  } catch (err) {
+    if (err instanceof HlsDownloadError) {
+      send({
+        type: "webm-transcode-error",
+        jobId: msg.jobId,
+        code: err.code,
+        userMessage: err.userMessage,
+      });
+    } else {
+      send({
+        type: "webm-transcode-error",
+        jobId: msg.jobId,
+        code: "TRANSCODE_FAILED",
+        userMessage: err instanceof Error ? err.message : "WebM transcode failed.",
+      });
+    }
+    activeJobs.delete(msg.jobId);
+  }
+}
+
 function revokeJobBlobs(job: ActiveJob): void {
   if (job.blobUrl) URL.revokeObjectURL(job.blobUrl);
 }
@@ -277,10 +356,21 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
     return false;
   }
 
-  if (m.type === "hls-download-cancel" || m.type === "dash-download-cancel") {
+  if (m.type === "webm-transcode-start") {
+    void runWebmTranscodeJob(m);
+    sendResponse({ ok: true });
+    return false;
+  }
+
+  if (
+    m.type === "hls-download-cancel" ||
+    m.type === "dash-download-cancel" ||
+    m.type === "webm-transcode-cancel"
+  ) {
     const job = activeJobs.get(m.jobId);
     if (job) {
       job.controller.abort();
+      if (m.type === "webm-transcode-cancel") terminateWebmTranscoder();
       revokeJobBlobs(job);
       activeJobs.delete(m.jobId);
     }
@@ -288,7 +378,11 @@ chrome.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) =
     return false;
   }
 
-  if (m.type === "hls-download-revoke" || m.type === "dash-download-revoke") {
+  if (
+    m.type === "hls-download-revoke" ||
+    m.type === "dash-download-revoke" ||
+    m.type === "webm-transcode-revoke"
+  ) {
     const job = activeJobs.get(m.jobId);
     if (job) {
       revokeJobBlobs(job);

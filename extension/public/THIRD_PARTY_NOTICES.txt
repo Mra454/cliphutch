@@ -1,0 +1,63 @@
+ClipHutch third-party notices
+
+ClipHutch bundles third-party open-source software so video conversion can run
+locally in the browser extension.
+
+@ffmpeg/core 0.12.10
+License: GPL-2.0-or-later
+Project: https://github.com/ffmpegwasm/ffmpeg.wasm
+Package: https://www.npmjs.com/package/@ffmpeg/core/v/0.12.10
+Included files:
+- ffmpeg-core/ffmpeg-core.js
+- ffmpeg-core/ffmpeg-core.wasm
+License text: licenses/GPL-2.0.txt
+
+@ffmpeg/ffmpeg 0.12.15
+License: MIT
+Project: https://github.com/ffmpegwasm/ffmpeg.wasm
+License text: licenses/MIT-ffmpegwasm.txt
+
+@ffmpeg/util 0.12.2
+License: MIT
+Project: https://github.com/ffmpegwasm/ffmpeg.wasm
+License text: licenses/MIT-ffmpegwasm.txt
+
+fast-xml-parser 5.7.2
+License: MIT
+Project: https://github.com/NaturalIntelligence/fast-xml-parser
+License text: licenses/MIT-fast-xml-parser.txt
+
+m3u8-parser 7.2.0
+License: Apache-2.0
+Project: https://github.com/videojs/m3u8-parser
+License text: licenses/Apache-2.0-m3u8-parser.txt
+
+mp4box 2.3.0
+License: BSD-3-Clause
+Project: https://github.com/gpac/mp4box.js
+License text: licenses/BSD-3-Clause-mp4box.txt
+
+mux.js 6.3.0
+License: Apache-2.0
+Project: https://github.com/videojs/mux.js
+License text: licenses/Apache-2.0-muxjs.txt
+
+react 18.3.1
+License: MIT
+Project: https://github.com/facebook/react
+License text: licenses/MIT-react.txt
+
+react-dom 18.3.1
+License: MIT
+Project: https://github.com/facebook/react
+License text: licenses/MIT-react.txt
+
+GPL notice
+
+@ffmpeg/core is licensed under GPL-2.0-or-later. The GPL 2.0 license text is
+included in this package at licenses/GPL-2.0.txt.
+
+Source code
+
+The source-code offer for this ClipHutch release is included at
+SOURCE_OFFER.txt.

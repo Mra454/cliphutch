@@ -1,4 +1,4 @@
-import { StrictMode, useEffect, useState } from "react";
+import { StrictMode, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   DEFAULT_SETTINGS,
@@ -78,6 +78,7 @@ function Options() {
   const [licenseError, setLicenseError] = useState<string | null>(null);
   const [licenseFlashOk, setLicenseFlashOk] = useState(false);
   const [deactivateConfirming, setDeactivateConfirming] = useState(false);
+  const savedTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     void Promise.all([getSettings(), getLicense()]).then(([s, l]) => {
@@ -85,6 +86,9 @@ function Options() {
       setCapInputMB(String(bytesToMB(s.hlsSizeCapBytes)));
       setLicenseState(l);
     });
+    return () => {
+      if (savedTimer.current) clearTimeout(savedTimer.current);
+    };
   }, []);
 
   if (!settings) {
@@ -93,6 +97,11 @@ function Options() {
 
   function flashSaved() {
     setSavedAt(Date.now());
+    if (savedTimer.current) clearTimeout(savedTimer.current);
+    savedTimer.current = setTimeout(() => {
+      setSavedAt(null);
+      savedTimer.current = null;
+    }, 2000);
   }
 
   async function changeTemplate(value: FilenameTemplate) {
@@ -170,12 +179,16 @@ function Options() {
     }
   }
 
+  function openExtensionFile(path: string) {
+    window.open(chrome.runtime.getURL(path), "_blank");
+  }
+
   const showSaved = savedAt !== null && Date.now() - savedAt < 2000;
 
   return (
     <div style={{ padding: "1.25em 1.5em", maxWidth: 560 }}>
       <header style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
-        <h1 style={{ margin: 0, fontSize: 20 }}>ClipHutch — Options</h1>
+        <h1 style={{ margin: 0, fontSize: 20 }}>ClipHutch - Options</h1>
         {showSaved && (
           <span style={{ color: "#2c5e2c", fontSize: 12 }}>Saved.</span>
         )}
@@ -250,12 +263,12 @@ function Options() {
         {license.key ? (
           <div>
             <div style={{ fontSize: 13, color: "#2c5e2c", marginBottom: 6 }}>
-              <strong>Licensed</strong> — unlimited downloads.
+              <strong>Licensed</strong> - unlimited video downloads.
             </div>
             <div style={{ fontSize: 12, color: "#666", marginBottom: 8 }}>
               Key: <code>{license.key}</code>
               {license.activatedAt && (
-                <span> — activated {new Date(license.activatedAt).toLocaleDateString()}</span>
+                <span> - activated {new Date(license.activatedAt).toLocaleDateString()}</span>
               )}
             </div>
             <button
@@ -275,7 +288,7 @@ function Options() {
         ) : (
           <div>
             <div style={{ fontSize: 13, marginBottom: 8 }}>
-              <strong>Free tier</strong> — 4 downloads per 24 hours. Unlock unlimited downloads with a one-time payment of ${PRICE_USD} (no subscription).
+              <strong>Free tier</strong> - 4 video downloads per 24 hours. Still-image downloads do not count against this limit. Get unlimited video downloads with a one-time payment of ${PRICE_USD} (no subscription).
             </div>
             <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 6 }}>
               <input
@@ -298,7 +311,7 @@ function Options() {
             <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 8 }}>
               <button
                 onClick={openCheckout}
-                title="One-time payment — no subscription"
+                title="One-time payment, no subscription"
                 style={{
                   padding: "6px 12px",
                   fontSize: 12,
@@ -310,7 +323,7 @@ function Options() {
                   cursor: "pointer",
                 }}
               >
-                Buy license — ${PRICE_USD} one-time
+                Buy license - ${PRICE_USD} one-time
               </button>
               <span style={helpStyle}>License is emailed after purchase. No subscription.</span>
             </div>
@@ -329,6 +342,29 @@ function Options() {
           Default download folder is controlled by Chrome at{" "}
           <code>chrome://settings/downloads</code>.
         </p>
+      </section>
+
+      <section style={sectionStyle}>
+        <h2 style={headingStyle}>Licenses and source</h2>
+        <p style={{ marginTop: 0, fontSize: 13, color: "#555" }}>
+          ClipHutch bundles @ffmpeg/core for local WebM conversion.
+          Third-party notices, license text, and the source-code offer are
+          included with the extension.
+        </p>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <button
+            onClick={() => openExtensionFile("THIRD_PARTY_NOTICES.txt")}
+            style={{ padding: "5px 10px", fontSize: 12, cursor: "pointer" }}
+          >
+            Third-party notices
+          </button>
+          <button
+            onClick={() => openExtensionFile("SOURCE_OFFER.txt")}
+            style={{ padding: "5px 10px", fontSize: 12, cursor: "pointer" }}
+          >
+            Source-code offer
+          </button>
+        </div>
       </section>
 
       <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "1em" }}>

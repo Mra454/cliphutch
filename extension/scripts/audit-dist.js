@@ -201,10 +201,19 @@ if (!existsSync(manifestPath)) {
     fail(`web_accessible_resources present: ${JSON.stringify(manifest.web_accessible_resources)}`);
   }
 
-  if (!manifest.content_scripts || manifest.content_scripts.length === 0) {
-    pass("content_scripts absent or empty");
+  const contentScripts = manifest.content_scripts ?? [];
+  if (
+    contentScripts.length === 1 &&
+    contentScripts[0].matches?.length === 2 &&
+    contentScripts[0].matches.includes("http://*/*") &&
+    contentScripts[0].matches.includes("https://*/*") &&
+    contentScripts[0].js?.length === 1 &&
+    contentScripts[0].js[0] === "content-script.js" &&
+    contentScripts[0].run_at === "document_idle"
+  ) {
+    pass("content_scripts match DOM image scanner");
   } else {
-    fail(`content_scripts present: ${JSON.stringify(manifest.content_scripts)}`);
+    fail(`content_scripts mismatch: ${JSON.stringify(contentScripts)}`);
   }
 }
 
@@ -228,7 +237,71 @@ if (syncUsed) review("chrome.storage.sync referenced — document why if intenti
 else pass("chrome.storage.sync not referenced (expected)");
 
 // ---------------------------------------------------------------------------
-// 5. POLICY — marketing/positioning language
+// 5. GPL / THIRD-PARTY NOTICE FILES
+// ---------------------------------------------------------------------------
+
+header("GPL — bundled ffmpeg notices");
+const requiredNoticeFiles = [
+  "THIRD_PARTY_NOTICES.txt",
+  "SOURCE_OFFER.txt",
+  "licenses/GPL-2.0.txt",
+  "licenses/MIT-ffmpegwasm.txt",
+  "licenses/MIT-fast-xml-parser.txt",
+  "licenses/MIT-react.txt",
+  "licenses/Apache-2.0-m3u8-parser.txt",
+  "licenses/Apache-2.0-muxjs.txt",
+  "licenses/BSD-3-Clause-mp4box.txt",
+  "ffmpeg-core/ffmpeg-core.js",
+  "ffmpeg-core/ffmpeg-core.wasm",
+];
+for (const file of requiredNoticeFiles) {
+  const fullPath = join(DIST_DIR, file);
+  if (existsSync(fullPath)) pass(`${file} present`);
+  else fail(`${file} missing`);
+}
+
+const thirdPartyNoticePath = join(DIST_DIR, "THIRD_PARTY_NOTICES.txt");
+const sourceOfferPath = join(DIST_DIR, "SOURCE_OFFER.txt");
+if (existsSync(thirdPartyNoticePath)) {
+  const notice = readFileSync(thirdPartyNoticePath, "utf8");
+  const requiredNoticeTerms = [
+    /@ffmpeg\/core[\s\S]*GPL-2\.0-or-later/,
+    /@ffmpeg\/ffmpeg[\s\S]*MIT/,
+    /@ffmpeg\/util[\s\S]*MIT/,
+    /fast-xml-parser[\s\S]*MIT/,
+    /m3u8-parser[\s\S]*Apache-2\.0/,
+    /mp4box[\s\S]*BSD-3-Clause/,
+    /mux\.js[\s\S]*Apache-2\.0/,
+    /react 18\.3\.1[\s\S]*MIT/,
+    /react-dom[\s\S]*MIT/,
+  ];
+  const missing = requiredNoticeTerms.filter((re) => !re.test(notice));
+  if (missing.length === 0) {
+    pass("third-party notice identifies bundled runtime dependencies and licenses");
+  } else {
+    fail(`third-party notice missing ${missing.length} required dependency/license entries`);
+  }
+}
+if (existsSync(sourceOfferPath)) {
+  const offer = readFileSync(sourceOfferPath, "utf8");
+  const requiredOfferTerms = [
+    /cliphutch-v0\.1\.0-cws-submit-2026-05-14/,
+    /github\.com\/Mra454\/cliphutch\/releases\/tag\/cliphutch-v0\.1\.0-cws-submit-2026-05-14/,
+    /licenses@cliphutch\.com/,
+    /three years/,
+    /@ffmpeg\/core 0\.12\.10/,
+    /does not patch @ffmpeg\/core/,
+  ];
+  const missing = requiredOfferTerms.filter((re) => !re.test(offer));
+  if (missing.length === 0) {
+    pass("source-code offer includes tag, repo, contact email, duration, and ffmpeg provenance");
+  } else {
+    fail(`source-code offer missing ${missing.length} required term(s)`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 6. POLICY — marketing/positioning language
 // ---------------------------------------------------------------------------
 
 const POLICY_FORBIDDEN = [
@@ -277,7 +350,7 @@ for (const file of policyTargets) {
 if (policyHits === 0) pass("no marketing/positioning flags");
 
 // ---------------------------------------------------------------------------
-// 6. MANUAL CHECKLIST
+// 7. MANUAL CHECKLIST
 // ---------------------------------------------------------------------------
 
 header("MANUAL CHECKLIST — must complete before store submission");
@@ -304,7 +377,7 @@ console.log(`  [ ] Run: npm run build && npm run package  →  upload extension/
 console.log(`  [ ] Submit for review`);
 
 // ---------------------------------------------------------------------------
-// 7. NETWORK AUDIT (manual)
+// 8. NETWORK AUDIT (manual)
 // ---------------------------------------------------------------------------
 
 header("NETWORK AUDIT — manual procedure");

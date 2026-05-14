@@ -19,6 +19,16 @@ export class MixedContainerAudioError extends HlsDownloadError {
   }
 }
 
+export class UnsupportedTsCodecError extends HlsDownloadError {
+  constructor() {
+    super(
+      "UNSUPPORTED_TS_CODEC",
+      "This HLS stream uses MPEG-TS codecs ClipHutch cannot repackage as MP4. ClipHutch currently supports H.264 video with AAC audio in MPEG-TS.",
+    );
+    this.name = "UnsupportedTsCodecError";
+  }
+}
+
 export class EncryptedStreamError extends HlsDownloadError {
   constructor() {
     super(

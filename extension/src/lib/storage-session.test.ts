@@ -84,6 +84,20 @@ describe("addOrUpdateVideo", () => {
     expect(list.length).toBe(50);
   });
 
+  it("lets newly detected videos replace older images at the cap", async () => {
+    await addOrUpdateVideo(1, mk("https://a/photo.jpg", { kind: "image" }));
+    for (let i = 0; i < 49; i++) {
+      await addOrUpdateVideo(1, mk(`https://a/v${i}.mp4`));
+    }
+
+    await addOrUpdateVideo(1, mk("https://a/priority.mp4"));
+
+    const list = await getDetectedVideos(1);
+    expect(list.length).toBe(50);
+    expect(list.some((v) => v.url === "https://a/photo.jpg")).toBe(false);
+    expect(list.some((v) => v.url === "https://a/priority.mp4")).toBe(true);
+  });
+
   it("isolates tabs", async () => {
     await addOrUpdateVideo(1, mk("https://a/x.mp4"));
     await addOrUpdateVideo(2, mk("https://a/y.mp4"));

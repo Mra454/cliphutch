@@ -21,9 +21,13 @@
     "vitest": "^1.4.0"
   },
   "dependencies": {
+    "@ffmpeg/core": "^0.12.10",
+    "@ffmpeg/ffmpeg": "^0.12.15",
+    "@ffmpeg/util": "^0.12.2",
     "fast-xml-parser": "^5.7.2",
     "m3u8-parser": "^7.2.0",
     "mp4box": "^2.3.0",
+    "mux.js": "^6.3.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0"
   }

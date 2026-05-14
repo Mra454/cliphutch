@@ -7,7 +7,16 @@ vi.mock("./dash-mux", () => ({
   muxFmp4: async (videoBytes: Uint8Array) => videoBytes,
 }));
 
+vi.mock("./ts-audio-to-fmp4", () => ({
+  transmuxTsAudioToFmp4: vi.fn(() => new Uint8Array([0x61, 0x75, 0x64, 0x69, 0x6f])),
+  transmuxTsToMp4: vi.fn((segments: Uint8Array[]) => {
+    const total = segments.reduce((sum, seg) => sum + seg.length, 0);
+    return new Uint8Array(total);
+  }),
+}));
+
 import { downloadHls } from "./hls-downloader";
+import { transmuxTsAudioToFmp4, transmuxTsToMp4 } from "./ts-audio-to-fmp4";
 import {
   AccessDeniedError,
   ByteRangeOutOfBoundsError,
@@ -15,7 +24,6 @@ import {
   CancelledError,
   EncryptedStreamError,
   LiveStreamError,
-  MixedContainerAudioError,
   NetworkError,
   SizeCapError,
 } from "../lib/errors";
@@ -157,7 +165,7 @@ const noSignal = new AbortController().signal;
 const cap = 100 * 1024 * 1024;
 
 describe("downloadHls — happy path", () => {
-  it("simple VOD: fetches segments, returns Blob with concatenated bytes", async () => {
+  it("simple VOD: fetches segments, transmuxes MPEG-TS, returns MP4 Blob", async () => {
     const f = makeFetch({
       "https://a/p.m3u8": { body: SIMPLE_VOD },
       "https://a/seg0.ts": { body: SEG_BYTES },
@@ -169,8 +177,9 @@ describe("downloadHls — happy path", () => {
       sizeCapBytes: cap,
       fetchImpl: f,
     });
-    expect(blob.type).toBe("video/mp2t");
+    expect(blob.type).toBe("video/mp4");
     expect(blob.size).toBe(SEG_BYTES.length * 2);
+    expect(transmuxTsToMp4).toHaveBeenCalledWith([SEG_BYTES, SEG_BYTES]);
   });
 
   it("fMP4 VOD: fetches init + segments, muxes, returns video/mp4 Blob", async () => {
@@ -235,7 +244,7 @@ describe("downloadHls — rejection rules", () => {
     ).rejects.toBeInstanceOf(EncryptedStreamError);
   });
 
-  it("rejects fMP4 video + MPEG-TS audio (mixed container — Stage 2)", async () => {
+  it("transmuxes MPEG-TS separate audio before muxing with fMP4 video", async () => {
     const INIT = new Uint8Array([0x66, 0x74, 0x79, 0x70]);
     const SEG = new Uint8Array([0x6d, 0x6f, 0x6f, 0x66]);
     // Video is fMP4, audio rendition is MPEG-TS (no EXT-X-MAP).
@@ -270,14 +279,15 @@ a0.ts
       "https://a/v0.m4s": { body: SEG },
       "https://a/a0.ts": { body: SEG },
     });
-    await expect(
-      downloadHls("https://a/master.m3u8", {
-        onProgress: noProgress,
-        signal: noSignal,
-        sizeCapBytes: cap,
-        fetchImpl: f,
-      }),
-    ).rejects.toBeInstanceOf(MixedContainerAudioError);
+    const blob = await downloadHls("https://a/master.m3u8", {
+      onProgress: noProgress,
+      signal: noSignal,
+      sizeCapBytes: cap,
+      fetchImpl: f,
+    });
+
+    expect(blob.type).toBe("video/mp4");
+    expect(transmuxTsAudioToFmp4).toHaveBeenCalledWith([SEG]);
   });
 });
 

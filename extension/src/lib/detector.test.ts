@@ -17,6 +17,12 @@ describe("classifyUrl — extension matching", () => {
     ["https://a.example/segment.m4s", "segment"],
     ["https://a.example/segment.cmfv", "segment"],
     ["https://a.example/segment.cmfa", "segment"],
+    ["https://a.example/photo.jpg", "image"],
+    ["https://a.example/photo.jpeg", "image"],
+    ["https://a.example/photo.png", "image"],
+    ["https://a.example/photo.webp", "image"],
+    ["https://a.example/photo.avif", "image"],
+    ["https://a.example/photo.gif", "image"],
   ])("%s → %s", (url, expected) => {
     expect(classifyUrl(url).kind).toBe(expected);
   });
@@ -66,6 +72,14 @@ describe("classifyUrl — content-type fallback", () => {
     expect(classifyUrl("https://a.example/page", "text/html").kind).toBe("unknown");
   });
 
+  it("no extension + image/jpeg → image", () => {
+    expect(classifyUrl("https://a.example/photo", "image/jpeg").kind).toBe("image");
+  });
+
+  it("image contentType with parameters is parsed", () => {
+    expect(classifyUrl("https://a.example/photo", "image/webp; charset=binary").kind).toBe("image");
+  });
+
   it("contentType with parameters is parsed", () => {
     expect(classifyUrl("https://a.example/x", "video/mp4; codecs=avc1.4d401f").kind).toBe("direct");
   });
@@ -85,7 +99,6 @@ describe("classifyUrl — content-type fallback", () => {
 
 describe("classifyUrl — non-video and edge cases", () => {
   it.each([
-    "https://a.example/image.png",
     "https://a.example/script.js",
     "https://a.example/page.html",
     "https://a.example/data.json",

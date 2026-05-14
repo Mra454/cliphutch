@@ -1,6 +1,10 @@
 import { classifyUrl } from "./lib/detector";
 import { addOrUpdateVideo, clearTab, getDetectedVideos } from "./lib/storage-session";
-import { VIDEO_REQUEST_TYPES } from "./lib/constants";
+import {
+  MIN_STILL_IMAGE_SIZE_BYTES,
+  VIDEO_REQUEST_TYPES,
+  WEBM_TRANSCODE_SIZE_CAP_BYTES,
+} from "./lib/constants";
 import { inferFilename } from "./lib/filename";
 import { getSettings } from "./lib/storage-local";
 import { isLicensed } from "./lib/license";
@@ -12,21 +16,36 @@ import {
   type CapturedHeaders,
 } from "./lib/header-capture";
 import { filterCoveredByManifests } from "./lib/manifest-coverage";
+import { isStillImage, isWebmDirectVideo } from "./lib/media-format";
 import type {
   DetectedVideo,
   DashJob,
   HlsJob,
-  VideoKind,
+  WebmTranscodeJob,
+  MediaKind,
 } from "./types";
 
 type TabInfo = { pageUrl?: string; pageTitle?: string };
 
 type Pending = {
   url: string;
-  kind: VideoKind;
   tabId: number;
   tabInfo: Promise<TabInfo>;
   capturedHeaders?: CapturedHeaders;
+};
+
+type DomImageCandidate = {
+  url: string;
+  source?: "rendered-image" | "markup";
+  width?: number;
+  height?: number;
+};
+
+type DomImagesDetectedMessage = {
+  type: "dom-images-detected";
+  pageUrl?: string;
+  pageTitle?: string;
+  images?: DomImageCandidate[];
 };
 
 const pendingByRequestId = new Map<string, Pending>();
@@ -98,12 +117,9 @@ console.log("[cliphutch] service worker booted");
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
     if (details.tabId < 0) return;
-    const cls = classifyUrl(details.url);
-    if (cls.kind === "unknown" || cls.kind === "segment") return;
 
     pendingByRequestId.set(details.requestId, {
       url: details.url,
-      kind: cls.kind,
       tabId: details.tabId,
       tabInfo: resolveTabInfo(details.tabId),
     });
@@ -136,7 +152,9 @@ async function handleHeadersReceived(
 
   const recl = classifyUrl(pending.url, contentType);
   if (recl.kind === "unknown" || recl.kind === "segment") return;
-  const kind: VideoKind = recl.kind;
+  const kind: MediaKind = recl.kind;
+  const normalizedSize = sizeBytes !== undefined && Number.isFinite(sizeBytes) ? sizeBytes : undefined;
+  if (kind === "image" && normalizedSize !== undefined && normalizedSize < MIN_STILL_IMAGE_SIZE_BYTES) return;
 
   const { pageUrl, pageTitle } = await pending.tabInfo;
 
@@ -147,7 +165,7 @@ async function handleHeadersReceived(
     detectedAt: Date.now(),
     pageUrl,
     pageTitle,
-    sizeBytes: sizeBytes !== undefined && Number.isFinite(sizeBytes) ? sizeBytes : undefined,
+    sizeBytes: normalizedSize,
     contentType: contentType ? contentType.split(";")[0].trim() : undefined,
     contentDisposition,
   };
@@ -225,7 +243,7 @@ type DownloadJob = {
   videoId: string;
   tabId: number;
   downloadId: number;
-  kind: VideoKind;
+  kind: MediaKind;
   startedAt: number;
   status: DownloadStatus;
   errorMessage?: string;
@@ -331,14 +349,15 @@ type ListVariantsResponse =
 
 async function handleDownloadRequest(req: DownloadRequest): Promise<DownloadResponse> {
   const video = await findVideo(req.tabId, req.videoId);
-  if (!video) return { ok: false, error: "Video not found in this tab." };
+  if (!video) return { ok: false, error: "Media not found in this tab." };
 
+  const countsAgainstVideoLimit = !isStillImage(video);
 
-  if (!(await isLicensed()) && (await isRateLimited())) {
+  if (countsAgainstVideoLimit && !(await isLicensed()) && (await isRateLimited())) {
     return {
       ok: false,
       code: "RATE_LIMITED",
-      error: `You've used all ${FREE_DOWNLOAD_LIMIT} free downloads in the last 24 hours. Upgrade for unlimited downloads.`,
+      error: `You've used all ${FREE_DOWNLOAD_LIMIT} free video downloads in the last 24 hours. Upgrade for unlimited video downloads.`,
     };
   }
 
@@ -350,6 +369,10 @@ async function handleDownloadRequest(req: DownloadRequest): Promise<DownloadResp
 
   if (video.kind === "dash") {
     return startDashDownload(req, video, req.variantId, req.bypassSizeCap);
+  }
+
+  if (isWebmDirectVideo(video)) {
+    return startWebmTranscode(req, video);
   }
 
   // Header replay does NOT apply to chrome.downloads.download — those fetches
@@ -376,7 +399,7 @@ async function handleDownloadRequest(req: DownloadRequest): Promise<DownloadResp
       startedAt: Date.now(),
       status: "in_progress",
     });
-    await recordDownload();
+    if (countsAgainstVideoLimit) await recordDownload();
     return { ok: true, downloadId };
   } catch (err) {
     return {
@@ -386,7 +409,39 @@ async function handleDownloadRequest(req: DownloadRequest): Promise<DownloadResp
   }
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+async function handleDomImagesDetected(
+  message: DomImagesDetectedMessage,
+  sender: chrome.runtime.MessageSender,
+): Promise<void> {
+  const tabId = sender.tab?.id;
+  if (tabId === undefined || !Array.isArray(message.images)) return;
+
+  let changed = false;
+  for (const image of message.images) {
+    if (!image || typeof image.url !== "string") continue;
+    const cls = classifyUrl(image.url);
+    const isRenderedUnknownImage =
+      cls.kind === "unknown" &&
+      image.source === "rendered-image" &&
+      typeof image.width === "number" &&
+      typeof image.height === "number";
+    if (cls.kind !== "image" && !isRenderedUnknownImage) continue;
+    const video: DetectedVideo = {
+      id: makeId(image.url, tabId),
+      url: image.url,
+      kind: "image",
+      detectedAt: Date.now(),
+      pageUrl: message.pageUrl,
+      pageTitle: message.pageTitle,
+    };
+    await addOrUpdateVideo(tabId, video);
+    changed = true;
+  }
+
+  if (changed) await updateBadge(tabId);
+}
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || typeof message !== "object") return false;
   const m = message as { type?: string };
   if (m.type === "download") {
@@ -396,6 +451,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (m.type === "list-variants") {
     void handleListVariantsRequest(message as ListVariantsRequest).then(sendResponse);
     return true;
+  }
+  if (m.type === "dom-images-detected") {
+    void handleDomImagesDetected(message as DomImagesDetectedMessage, sender).catch(() => {});
+    return false;
   }
   return false;
 });
@@ -474,6 +533,23 @@ async function handleDownloadChange(delta: chrome.downloads.DownloadDelta): Prom
     return;
   }
 
+  const webmJobs = await getWebmTranscodeJobs();
+  const webm = Object.values(webmJobs).find((j) => j.downloadId === delta.id);
+  if (webm) {
+    if (delta.state.current === "complete") {
+      webm.status = "complete";
+      await setWebmTranscodeJob(webm);
+      void chrome.runtime.sendMessage({ type: "webm-transcode-revoke", jobId: webm.jobId }).catch(() => {});
+    } else if (delta.state.current === "interrupted") {
+      webm.status = "error";
+      webm.errorMessage = DIRECT_DOWNLOAD_FAILURE_MESSAGE;
+      webm.errorCode = "SAVE_INTERRUPTED";
+      await setWebmTranscodeJob(webm);
+      void chrome.runtime.sendMessage({ type: "webm-transcode-revoke", jobId: webm.jobId }).catch(() => {});
+    }
+    return;
+  }
+
   const dashJobs = await getDashJobs();
   const dash = Object.values(dashJobs).find((j) => j.downloadId === delta.id);
   if (!dash) return;
@@ -511,6 +587,20 @@ async function setHlsJob(job: HlsJob): Promise<void> {
   await chrome.storage.session.set({ [HLS_JOBS_KEY]: jobs });
 }
 
+const WEBM_TRANSCODE_JOBS_KEY = "webm-transcode-jobs";
+
+async function getWebmTranscodeJobs(): Promise<Record<string, WebmTranscodeJob>> {
+  const result = await chrome.storage.session.get(WEBM_TRANSCODE_JOBS_KEY);
+  const jobs = result[WEBM_TRANSCODE_JOBS_KEY];
+  return jobs && typeof jobs === "object" ? (jobs as Record<string, WebmTranscodeJob>) : {};
+}
+
+async function setWebmTranscodeJob(job: WebmTranscodeJob): Promise<void> {
+  const jobs = await getWebmTranscodeJobs();
+  jobs[job.jobId] = job;
+  await chrome.storage.session.set({ [WEBM_TRANSCODE_JOBS_KEY]: jobs });
+}
+
 async function ensureOffscreenDocument(): Promise<void> {
   const contexts = (await chrome.runtime.getContexts({
     contextTypes: ["OFFSCREEN_DOCUMENT" as chrome.runtime.ContextType],
@@ -519,7 +609,7 @@ async function ensureOffscreenDocument(): Promise<void> {
   await chrome.offscreen.createDocument({
     url: "offscreen.html",
     reasons: [chrome.offscreen.Reason.BLOBS],
-    justification: "Assemble HLS segments into a downloadable blob",
+    justification: "Assemble streams or convert WebM files into downloadable MP4 blobs",
   });
 }
 
@@ -582,6 +672,48 @@ async function startHlsDownload(
   return { ok: true, jobId };
 }
 
+async function startWebmTranscode(
+  req: DownloadRequest,
+  video: DetectedVideo,
+): Promise<DownloadResponse> {
+  const jobId = `webm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+  await setWebmTranscodeJob({
+    jobId,
+    videoId: video.id,
+    tabId: req.tabId,
+    url: video.url,
+    kind: "direct",
+    startedAt: Date.now(),
+    status: "running",
+    progress: { ratio: 0, message: "Starting WebM to MP4 transcode" },
+  });
+
+  try {
+    await ensureOffscreenDocument();
+  } catch (err) {
+    const job = (await getWebmTranscodeJobs())[jobId];
+    if (job) {
+      job.status = "error";
+      job.errorCode = "OFFSCREEN_INIT";
+      job.errorMessage = err instanceof Error ? err.message : "Could not start offscreen document.";
+      await setWebmTranscodeJob(job);
+    }
+    return { ok: false, error: job?.errorMessage ?? "Could not start offscreen document." };
+  }
+
+  void chrome.runtime
+    .sendMessage({
+      type: "webm-transcode-start",
+      jobId,
+      url: video.url,
+      sizeCapBytes: WEBM_TRANSCODE_SIZE_CAP_BYTES,
+    })
+    .catch(() => {});
+
+  return { ok: true, jobId };
+}
+
 async function handleHlsProgress(msg: {
   jobId: string;
   done: number;
@@ -599,7 +731,7 @@ async function handleHlsBlobReady(msg: {
   jobId: string;
   blobUrl: string;
   sizeBytes: number;
-  containerExt: string;
+  containerExt: ".mp4" | ".ts";
 }): Promise<void> {
   const jobs = await getHlsJobs();
   const job = jobs[msg.jobId];
@@ -624,6 +756,7 @@ async function handleHlsBlobReady(msg: {
       saveAs: false,
     });
     job.downloadId = downloadId;
+    job.containerExt = msg.containerExt;
     job.status = "saving";
     await setHlsJob(job);
     await recordDownload();
@@ -652,6 +785,71 @@ async function handleHlsError(msg: {
   await removeHeaderReplayRule(`hls:${msg.jobId}`);
 }
 
+async function handleWebmTranscodeProgress(msg: {
+  jobId: string;
+  ratio: number;
+  message?: string;
+}): Promise<void> {
+  const jobs = await getWebmTranscodeJobs();
+  const job = jobs[msg.jobId];
+  if (!job) return;
+  job.progress = { ratio: msg.ratio, message: msg.message ?? job.progress.message };
+  await setWebmTranscodeJob(job);
+}
+
+async function handleWebmTranscodeBlobReady(msg: {
+  jobId: string;
+  blobUrl: string;
+  sizeBytes: number;
+}): Promise<void> {
+  const jobs = await getWebmTranscodeJobs();
+  const job = jobs[msg.jobId];
+  if (!job) return;
+
+  const video = await findVideo(job.tabId, job.videoId);
+  if (!video) {
+    job.status = "error";
+    job.errorMessage = "Video missing when saving WebM transcode.";
+    job.errorCode = "VIDEO_MISSING";
+    await setWebmTranscodeJob(job);
+    void chrome.runtime.sendMessage({ type: "webm-transcode-revoke", jobId: msg.jobId }).catch(() => {});
+    return;
+  }
+
+  try {
+    const downloadId = await chrome.downloads.download({
+      url: msg.blobUrl,
+      filename: inferFilename(video, { forcedExtension: ".mp4" }),
+      conflictAction: "uniquify",
+      saveAs: false,
+    });
+    job.downloadId = downloadId;
+    job.status = "saving";
+    await setWebmTranscodeJob(job);
+    await recordDownload();
+  } catch (err) {
+    job.status = "error";
+    job.errorMessage = err instanceof Error ? err.message : "Could not save transcoded MP4.";
+    job.errorCode = "SAVE_FAILED";
+    await setWebmTranscodeJob(job);
+    void chrome.runtime.sendMessage({ type: "webm-transcode-revoke", jobId: msg.jobId }).catch(() => {});
+  }
+}
+
+async function handleWebmTranscodeError(msg: {
+  jobId: string;
+  code: string;
+  userMessage: string;
+}): Promise<void> {
+  const jobs = await getWebmTranscodeJobs();
+  const job = jobs[msg.jobId];
+  if (!job) return;
+  job.status = msg.code === "CANCELLED" ? "cancelled" : "error";
+  job.errorCode = msg.code;
+  job.errorMessage = msg.userMessage;
+  await setWebmTranscodeJob(job);
+}
+
 chrome.runtime.onMessage.addListener((message: unknown) => {
   if (!message || typeof message !== "object") return false;
   const m = message as { type?: string };
@@ -667,6 +865,12 @@ chrome.runtime.onMessage.addListener((message: unknown) => {
     void handleDashBlobReady(message as Parameters<typeof handleDashBlobReady>[0]);
   } else if (m.type === "dash-download-error") {
     void handleDashError(message as Parameters<typeof handleDashError>[0]);
+  } else if (m.type === "webm-transcode-progress") {
+    void handleWebmTranscodeProgress(message as Parameters<typeof handleWebmTranscodeProgress>[0]);
+  } else if (m.type === "webm-transcode-blob-ready") {
+    void handleWebmTranscodeBlobReady(message as Parameters<typeof handleWebmTranscodeBlobReady>[0]);
+  } else if (m.type === "webm-transcode-error") {
+    void handleWebmTranscodeError(message as Parameters<typeof handleWebmTranscodeError>[0]);
   }
   return false;
 });

@@ -1,11 +1,12 @@
-import type { VideoKind } from "../types";
+import type { MediaKind } from "../types";
 
 export type Classification = {
-  kind: VideoKind | "segment" | "unknown";
+  kind: MediaKind | "segment" | "unknown";
   confidence: "high" | "low";
 };
 
 const DIRECT_EXT = new Set([".mp4", ".webm", ".mov", ".m4v", ".mkv", ".ogv"]);
+const IMAGE_EXT = new Set([".jpg", ".jpeg", ".png", ".webp", ".avif", ".gif"]);
 const HLS_EXT = new Set([".m3u8"]);
 const DASH_EXT = new Set([".mpd"]);
 const SEGMENT_EXT = new Set([".ts", ".m4s", ".cmfv", ".cmfa"]);
@@ -16,6 +17,13 @@ const HLS_MIMES = new Set([
   "audio/mpegurl",
 ]);
 const DASH_MIMES = new Set(["application/dash+xml"]);
+const IMAGE_MIMES = new Set([
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+  "image/avif",
+  "image/gif",
+]);
 
 function pathExtension(rawUrl: string): string | null {
   let pathname: string;
@@ -42,11 +50,12 @@ export function classifyUrl(url: string, contentType?: string): Classification {
   if (ct) {
     if (HLS_MIMES.has(ct)) return { kind: "hls", confidence: "high" };
     if (DASH_MIMES.has(ct)) return { kind: "dash", confidence: "high" };
+    if (IMAGE_MIMES.has(ct)) return { kind: "image", confidence: "high" };
     if (ct.startsWith("video/")) {
       if (ext && SEGMENT_EXT.has(ext)) return { kind: "segment", confidence: "high" };
       return { kind: "direct", confidence: "high" };
     }
-    if (ext && (DIRECT_EXT.has(ext) || HLS_EXT.has(ext) || DASH_EXT.has(ext))) {
+    if (ext && (DIRECT_EXT.has(ext) || IMAGE_EXT.has(ext) || HLS_EXT.has(ext) || DASH_EXT.has(ext))) {
       return { kind: "unknown", confidence: "low" };
     }
   }
@@ -54,6 +63,7 @@ export function classifyUrl(url: string, contentType?: string): Classification {
   if (ext) {
     if (SEGMENT_EXT.has(ext)) return { kind: "segment", confidence: "high" };
     if (DIRECT_EXT.has(ext)) return { kind: "direct", confidence: "high" };
+    if (IMAGE_EXT.has(ext)) return { kind: "image", confidence: "high" };
     if (HLS_EXT.has(ext)) return { kind: "hls", confidence: "high" };
     if (DASH_EXT.has(ext)) return { kind: "dash", confidence: "high" };
   }

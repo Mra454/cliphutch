@@ -15,6 +15,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         ".ts": "video/mp2t",
         ".mp4": "video/mp4",
         ".webm": "video/webm",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+        ".avif": "image/avif",
+        ".gif": "image/gif",
         ".mpd": "application/dash+xml",
         ".aac": "audio/aac",
     }

@@ -16,6 +16,7 @@ import {
 import { classifyHlsManifestForDrm } from "../lib/drm";
 import { HLS_SEGMENT_FETCH_CONCURRENCY } from "../lib/constants";
 import { muxFmp4 } from "./dash-mux";
+import { transmuxTsAudioToFmp4, transmuxTsToMp4 } from "./ts-audio-to-fmp4";
 
 export type HlsProgress = {
   done: number;
@@ -327,9 +328,9 @@ export async function downloadHls(
     audioInit = detectFmp4Init(audioSegments);
     audioBaseUrl = audioRenditionUrl;
 
-    // Stage 1: video and audio must both be fMP4. Mixed-container muxing
-    // (fMP4 video + MPEG-TS audio, as Squarespace ships) is Stage 2C.
-    if (!videoInit || !audioInit) {
+    // Separate MPEG-TS audio can be transmuxed to fMP4 before muxing. The
+    // selected video variant still needs to be fMP4 for the final MP4 muxer.
+    if (!videoInit) {
       throw new MixedContainerAudioError();
     }
   }
@@ -417,10 +418,13 @@ export async function downloadHls(
 
   // === Step 6: assemble output blob ===
 
-  // Branch A: separate-audio fMP4 + fMP4 — mux into single MP4.
-  if (audioRenditionUrl && videoInitBytes && audioInitBytes) {
+  // Branch A: separate-audio fMP4 video + fMP4 or MPEG-TS AAC audio — mux
+  // into a single MP4.
+  if (audioRenditionUrl && videoInitBytes) {
     const videoBytes = concatBuffers([videoInitBytes, ...videoBuffers]);
-    const audioBytes = concatBuffers([audioInitBytes, ...audioBuffers]);
+    const audioBytes = audioInitBytes
+      ? concatBuffers([audioInitBytes, ...audioBuffers])
+      : transmuxTsAudioToFmp4(audioBuffers);
     const muxed = await muxFmp4(videoBytes, audioBytes);
     return new Blob([muxed as BlobPart], { type: "video/mp4" });
   }
@@ -433,7 +437,8 @@ export async function downloadHls(
     return new Blob([muxed as BlobPart], { type: "video/mp4" });
   }
 
-  // Branch C: MPEG-TS embedded — concatenate segments as-is, return .ts blob.
-  const concat = concatBuffers(videoBuffers);
-  return new Blob([concat], { type: "video/mp2t" });
+  // Branch C: MPEG-TS embedded — transmux to MP4 so users do not need a
+  // transport-stream-specific player.
+  const muxed = transmuxTsToMp4(videoBuffers);
+  return new Blob([muxed as BlobPart], { type: "video/mp4" });
 }

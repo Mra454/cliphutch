@@ -21,7 +21,11 @@ export async function addOrUpdateVideo(tabId: number, video: DetectedVideo): Pro
     if (video.pageUrl !== undefined) existing.pageUrl = video.pageUrl;
     if (video.pageTitle !== undefined) existing.pageTitle = video.pageTitle;
   } else {
-    if (list.length >= MAX_VIDEOS_PER_TAB) return;
+    if (list.length >= MAX_VIDEOS_PER_TAB) {
+      const imageIndex = list.findIndex((v) => v.kind === "image");
+      if (video.kind === "image" || imageIndex === -1) return;
+      list.splice(imageIndex, 1);
+    }
     list.push(video);
   }
 

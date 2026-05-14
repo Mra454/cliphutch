@@ -1,6 +1,6 @@
 import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import type { DashJob, DetectedVideo, DirectJob, HlsJob } from "../types";
+import type { DashJob, DetectedVideo, DirectJob, HlsJob, WebmTranscodeJob } from "../types";
 import { filterCoveredByManifests } from "../lib/manifest-coverage";
 
 type VariantOption = {
@@ -21,20 +21,32 @@ type ListVariantsResponse =
       sizeCapBytes: number;
     }
   | { ok: false; error: string };
+
+type MediaFilter = "videos" | "stills";
+
+type BulkResult = {
+  started: number;
+  skipped: number;
+  failed: number;
+  message?: string;
+};
 import { getDetectedVideos } from "../lib/storage-session";
 import { DEFAULT_SETTINGS, getSettings, type UserSettings } from "../lib/storage-local";
 import { isLicensed, revalidateIfStale } from "../lib/license";
-import { FREE_DOWNLOAD_LIMIT, getDownloadCount } from "../lib/rate-limit";
-import { CHECKOUT_URL, PRICE_USD } from "../lib/constants";
+import { FREE_DOWNLOAD_LIMIT, VIDEO_DOWNLOAD_HISTORY_KEY, getDownloadCount } from "../lib/rate-limit";
+import { CHECKOUT_URL, MIN_STILL_IMAGE_SIZE_BYTES, PRICE_USD } from "../lib/constants";
+import { isStillImage, isWebmDirectVideo } from "../lib/media-format";
 
 const DIRECT_JOBS_KEY = "download-jobs";
 const HLS_JOBS_KEY = "hls-download-jobs";
 const DASH_JOBS_KEY = "dash-download-jobs";
+const WEBM_TRANSCODE_JOBS_KEY = "webm-transcode-jobs";
 
 type AnyJob =
   | ({ source: "direct" } & DirectJob)
   | ({ source: "hls" } & HlsJob)
-  | ({ source: "dash" } & DashJob);
+  | ({ source: "dash" } & DashJob)
+  | ({ source: "webm" } & WebmTranscodeJob);
 
 function basename(rawUrl: string): string {
   try {
@@ -81,15 +93,40 @@ function displayName(v: DetectedVideo): string {
 const KIND_BADGE: Record<string, string> = {
   hls: "HLS",
   dash: "DASH",
+  image: "STILL",
 };
 
+const PREVIEWABLE_DIRECT_EXT = new Set(["mp4", "webm", "mov", "m4v", "ogv"]);
+
 function badgeText(v: DetectedVideo): string {
-  if (v.kind !== "direct") return KIND_BADGE[v.kind] ?? v.kind.toUpperCase();
+  if (v.kind !== "direct") {
+    if (v.kind === "image") {
+      try {
+        const ext = new URL(v.url).pathname.split(".").pop()?.toUpperCase();
+        return ext && ext.length <= 5 ? ext : "STILL";
+      } catch {
+        return "STILL";
+      }
+    }
+    return KIND_BADGE[v.kind] ?? v.kind.toUpperCase();
+  }
   try {
     const ext = new URL(v.url).pathname.split(".").pop()?.toUpperCase();
     return ext && ext.length <= 5 ? ext : "VIDEO";
   } catch {
     return "VIDEO";
+  }
+}
+
+function canPreview(v: DetectedVideo): boolean {
+  if (v.kind !== "direct") return false;
+  const contentType = v.contentType?.split(";")[0].trim().toLowerCase();
+  if (contentType?.startsWith("video/")) return true;
+  try {
+    const ext = new URL(v.url).pathname.split(".").pop()?.toLowerCase();
+    return Boolean(ext && PREVIEWABLE_DIRECT_EXT.has(ext));
+  } catch {
+    return false;
   }
 }
 
@@ -116,39 +153,181 @@ function urlDisplay(rawUrl: string, showFull: boolean): string {
 
 function Empty() {
   return (
-    <p style={{ marginTop: 8, color: "#666" }}>
-      No videos detected yet. Try playing a video, reloading the page, or
-      interacting with the player. Some sites only request video URLs after
-      interaction. Requests served from Chrome's memory cache may not be visible.
+    <p style={{ margin: "10px 0", color: "#536156", fontSize: 10.5, lineHeight: 1.35 }}>
+      Nothing on this shelf yet. Try reloading or interacting with the page.
     </p>
   );
 }
 
 const errorBoxStyle: React.CSSProperties = {
-  background: "#fdecea",
+  background: "#fff1ed",
   color: "#7a1f1a",
-  border: "1px solid #f3b6b0",
-  borderRadius: 3,
-  padding: "4px 6px",
+  border: "1px solid #efb6aa",
+  borderRadius: 6,
+  padding: "6px 8px",
   fontSize: 11,
-  marginTop: 6,
+  marginTop: 8,
 };
 
 const noteBoxStyle: React.CSSProperties = {
-  background: "#eef5fb",
-  color: "#234a6b",
-  border: "1px solid #b9d4ea",
-  borderRadius: 3,
-  padding: "4px 6px",
+  background: "#f1f7f4",
+  color: "#244f3a",
+  border: "1px solid #bdd7c8",
+  borderRadius: 6,
+  padding: "6px 8px",
   fontSize: 11,
-  marginTop: 6,
+  marginTop: 8,
 };
 
 const buttonStyle: React.CSSProperties = {
   fontSize: 11,
-  padding: "3px 8px",
+  padding: "5px 10px",
   cursor: "pointer",
+  border: "1px solid #b9c9bc",
+  borderRadius: 6,
+  background: "#ffffff",
+  color: "#1f2a22",
 };
+
+const primaryButtonStyle: React.CSSProperties = {
+  ...buttonStyle,
+  border: "1px solid #2f5f3a",
+  background: "#2f5f3a",
+  color: "#fff",
+  fontWeight: 650,
+};
+
+const shelfLineStyle: React.CSSProperties = {
+  height: 3,
+  borderRadius: 999,
+  background: "linear-gradient(90deg, #8a6a47, #b68a58 48%, #7b5a38)",
+  opacity: 0.8,
+};
+
+const iconButtonStyle: React.CSSProperties = {
+  width: 28,
+  height: 28,
+  display: "inline-flex",
+  alignItems: "center",
+  justifyContent: "center",
+  border: "1px solid #c8d8cc",
+  borderRadius: 6,
+  background: "#ffffff",
+  color: "#26352b",
+  cursor: "pointer",
+  fontSize: 14,
+  lineHeight: 1,
+};
+
+function VideoPreview({ v }: { v: DetectedVideo }) {
+  const [failed, setFailed] = useState(false);
+  if (!canPreview(v) || failed) return null;
+
+  return (
+    <div
+      style={{
+        width: "100%",
+        height: 128,
+        marginTop: 8,
+        borderRadius: 6,
+        background: "#161411",
+        overflow: "hidden",
+        border: "1px solid #26211c",
+      }}
+    >
+      <video
+        src={v.url}
+        controls
+        muted
+        playsInline
+        preload="metadata"
+        onError={() => setFailed(true)}
+        style={{
+          display: "block",
+          width: "100%",
+          height: "100%",
+          objectFit: "contain",
+        }}
+      />
+    </div>
+  );
+}
+
+function ImagePreview({ v }: { v: DetectedVideo }) {
+  const [failed, setFailed] = useState(false);
+  if (!isStillImage(v) || failed) return null;
+
+  return (
+    <div
+      style={{
+        width: "100%",
+        height: 142,
+        marginTop: 8,
+        borderRadius: 6,
+        background: "#eef5f1",
+        overflow: "hidden",
+        border: "1px solid #d7e4dc",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+    >
+      <img
+        src={v.url}
+        alt=""
+        loading="lazy"
+        onError={() => setFailed(true)}
+        style={{
+          display: "block",
+          width: "100%",
+          height: "100%",
+          objectFit: "contain",
+        }}
+      />
+    </div>
+  );
+}
+
+function bulkResultText(result: BulkResult): string {
+  const parts = [
+    `Started ${result.started}`,
+    `skipped ${result.skipped}`,
+    `failed ${result.failed}`,
+  ];
+  return result.message ? `${parts.join(" · ")} · ${result.message}` : parts.join(" · ");
+}
+
+function ShelfTab({
+  active,
+  count,
+  label,
+  onClick,
+}: {
+  active: boolean;
+  count: number;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        flex: 1,
+        border: active ? "1px solid #315f42" : "1px solid #cbd8cf",
+        borderBottomColor: active ? "#315f42" : "#a8b8ae",
+        background: active ? "#ffffff" : "#eef4ef",
+        color: active ? "#1d261f" : "#59675c",
+        borderRadius: 6,
+        padding: "5px 8px",
+        cursor: "pointer",
+        fontSize: 10.5,
+        fontWeight: active ? 700 : 600,
+      }}
+    >
+      {label} <span style={{ color: active ? "#2f5f3a" : "#758277" }}>{count}</span>
+    </button>
+  );
+}
 
 function VideoCard({
   v,
@@ -173,10 +352,16 @@ function VideoCard({
     let cancelled = false;
 
     const refresh = async () => {
-      const result = await chrome.storage.session.get([DIRECT_JOBS_KEY, HLS_JOBS_KEY, DASH_JOBS_KEY]);
+      const result = await chrome.storage.session.get([
+        DIRECT_JOBS_KEY,
+        HLS_JOBS_KEY,
+        DASH_JOBS_KEY,
+        WEBM_TRANSCODE_JOBS_KEY,
+      ]);
       const directs = (result[DIRECT_JOBS_KEY] as Record<string, DirectJob>) ?? {};
       const hlses = (result[HLS_JOBS_KEY] as Record<string, HlsJob>) ?? {};
       const dashes = (result[DASH_JOBS_KEY] as Record<string, DashJob>) ?? {};
+      const webms = (result[WEBM_TRANSCODE_JOBS_KEY] as Record<string, WebmTranscodeJob>) ?? {};
       const matches: AnyJob[] = [];
       for (const j of Object.values(directs)) {
         if (j.videoId === v.id && j.tabId === tabId) matches.push({ source: "direct", ...j });
@@ -186,6 +371,9 @@ function VideoCard({
       }
       for (const j of Object.values(dashes)) {
         if (j.videoId === v.id && j.tabId === tabId) matches.push({ source: "dash", ...j });
+      }
+      for (const j of Object.values(webms)) {
+        if (j.videoId === v.id && j.tabId === tabId) matches.push({ source: "webm", ...j });
       }
       matches.sort((a, b) => b.startedAt - a.startedAt);
       if (!cancelled) setJob(matches[0] ?? null);
@@ -198,7 +386,14 @@ function VideoCard({
       area: string,
     ) => {
       if (area !== "session") return;
-      if (changes[DIRECT_JOBS_KEY] || changes[HLS_JOBS_KEY] || changes[DASH_JOBS_KEY]) void refresh();
+      if (
+        changes[DIRECT_JOBS_KEY] ||
+        changes[HLS_JOBS_KEY] ||
+        changes[DASH_JOBS_KEY] ||
+        changes[WEBM_TRANSCODE_JOBS_KEY]
+      ) {
+        void refresh();
+      }
     };
     chrome.storage.onChanged.addListener(listener);
     return () => {
@@ -241,15 +436,19 @@ function VideoCard({
 
   const sendDownload = async (variant?: VariantOption, bypassSizeCap?: boolean) => {
     setPicker(null);
-    const res = (await chrome.runtime.sendMessage({
-      type: "download",
-      tabId,
-      videoId: v.id,
-      variantId: variant?.id,
-      audioRenditionUrl: variant?.audioRenditionUrl,
-      bypassSizeCap,
-    })) as { ok: true; downloadId?: number; jobId?: string } | { ok: false; error: string };
-    if (res && !res.ok) setImmediateError(res.error);
+    try {
+      const res = (await chrome.runtime.sendMessage({
+        type: "download",
+        tabId,
+        videoId: v.id,
+        variantId: variant?.id,
+        audioRenditionUrl: variant?.audioRenditionUrl,
+        bypassSizeCap,
+      })) as { ok: true; downloadId?: number; jobId?: string } | { ok: false; error: string };
+      if (res && !res.ok) setImmediateError(res.error);
+    } catch (err) {
+      setImmediateError(err instanceof Error ? err.message : "Could not start download.");
+    }
   };
 
   const onDownload = async () => {
@@ -259,11 +458,18 @@ function VideoCard({
       return;
     }
     setPicker({ state: "loading" });
-    const lr = (await chrome.runtime.sendMessage({
-      type: "list-variants",
-      tabId,
-      videoId: v.id,
-    })) as ListVariantsResponse;
+    let lr: ListVariantsResponse;
+    try {
+      lr = (await chrome.runtime.sendMessage({
+        type: "list-variants",
+        tabId,
+        videoId: v.id,
+      })) as ListVariantsResponse;
+    } catch (err) {
+      setPicker(null);
+      setImmediateError(err instanceof Error ? err.message : "Could not load manifest.");
+      return;
+    }
     if (!lr || lr.ok === false) {
       setPicker(null);
       setImmediateError(lr && "error" in lr ? lr.error : "Could not load manifest.");
@@ -308,6 +514,11 @@ function VideoCard({
     void chrome.runtime.sendMessage({ type: "dash-download-cancel", jobId: job.jobId }).catch(() => {});
   };
 
+  const onCancelWebm = () => {
+    if (job?.source !== "webm") return;
+    void chrome.runtime.sendMessage({ type: "webm-transcode-cancel", jobId: job.jobId }).catch(() => {});
+  };
+
   function renderPicker() {
     if (!picker) return null;
     if (picker.state === "loading") {
@@ -319,9 +530,9 @@ function VideoCard({
     }
     return (
       <div style={{ marginTop: 6 }}>
-        <div style={{ fontSize: 11, color: "#444", marginBottom: 4 }}>
-          Choose quality:
-        </div>
+            <div style={{ fontSize: 11, color: "#444", marginBottom: 4 }}>
+              Choose quality:
+            </div>
         {picker.variants.map((variant) => {
           const sizeBytes =
             picker.durationSec !== undefined && variant.bandwidth > 0
@@ -361,7 +572,7 @@ function VideoCard({
               <button
                 onClick={() => void sendDownload(variant, overCap)}
                 style={{
-                  ...buttonStyle,
+                  ...(overCap ? buttonStyle : primaryButtonStyle),
                   borderColor: overCap ? "#a05" : undefined,
                   color: overCap ? "#a05" : undefined,
                 }}
@@ -392,8 +603,20 @@ function VideoCard({
     }
 
     if (!job) {
+      if (isWebmDirectVideo(v)) {
+        return (
+          <>
+            <div style={noteBoxStyle}>
+              WebM will be transcoded to MP4 before saving. This can take a while.
+            </div>
+            <button onClick={onDownload} style={{ ...primaryButtonStyle, marginTop: 8 }}>
+              Convert to MP4
+            </button>
+          </>
+        );
+      }
       return (
-        <button onClick={onDownload} style={{ ...buttonStyle, marginTop: 6 }}>
+        <button onClick={onDownload} style={{ ...primaryButtonStyle, marginTop: 8 }}>
           Download
         </button>
       );
@@ -408,7 +631,7 @@ function VideoCard({
           <div style={{ marginTop: 6 }}>
             <div style={{ fontSize: 11, color: "#444" }}>
               {pct !== null
-                ? `Downloading ${pct}% — ${fmtBytes(received)} / ${fmtBytes(total)}`
+                ? `Downloading ${pct}% - ${fmtBytes(received)} / ${fmtBytes(total)}`
                 : received > 0
                   ? `Downloading… ${fmtBytes(received)}`
                   : "Starting…"}
@@ -467,10 +690,16 @@ function VideoCard({
         );
       }
       if (job.status === "complete") {
+        const savedNote =
+          job.containerExt === ".ts"
+            ? "Saved as .ts file."
+            : job.containerExt === ".mp4"
+              ? "Saved as MP4."
+              : "Saved.";
         return (
           <div style={{ marginTop: 6 }}>
             <div style={noteBoxStyle}>
-              Saved as .ts file. Plays in VLC. MP4 conversion may come in a future version.
+              {savedNote}
             </div>
             <div style={{ marginTop: 6, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <span style={{ color: "#2c5e2c", fontSize: 11 }}>Saved</span>
@@ -495,6 +724,64 @@ function VideoCard({
         <>
           <div style={errorBoxStyle}>
             {job.errorMessage ?? "Download failed."}
+            {job.errorCode ? <span style={{ opacity: 0.6 }}> [{job.errorCode}]</span> : null}
+          </div>
+          <button onClick={onDownload} style={{ ...buttonStyle, marginTop: 6 }}>
+            Retry
+          </button>
+        </>
+      );
+    }
+
+    if (job.source === "webm") {
+      if (job.status === "running") {
+        const pct = Math.round(job.progress.ratio * 100);
+        return (
+          <div style={{ marginTop: 6 }}>
+            <div style={{ fontSize: 11, color: "#444" }}>
+              {job.progress.message ?? "Transcoding WebM to MP4"} {pct > 0 ? `${pct}%` : ""}
+            </div>
+            <progress value={job.progress.ratio} max={1} style={{ width: "100%", marginTop: 3 }} />
+            <button onClick={onCancelWebm} style={{ ...buttonStyle, marginTop: 4 }}>
+              Cancel
+            </button>
+          </div>
+        );
+      }
+      if (job.status === "saving") {
+        return (
+          <div style={{ marginTop: 6, fontSize: 11, color: "#444" }}>
+            Saving MP4…
+          </div>
+        );
+      }
+      if (job.status === "complete") {
+        return (
+          <div style={{ marginTop: 6, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
+            <span style={{ color: "#2c5e2c", fontSize: 11 }}>Saved as MP4</span>
+            <button
+              onClick={() => job.downloadId !== undefined && chrome.downloads.show(job.downloadId)}
+              style={buttonStyle}
+            >
+              Show in folder
+            </button>
+          </div>
+        );
+      }
+      if (job.status === "cancelled") {
+        return (
+          <>
+            <div style={noteBoxStyle}>Transcode cancelled.</div>
+            <button onClick={onDownload} style={{ ...buttonStyle, marginTop: 6 }}>
+              Try again
+            </button>
+          </>
+        );
+      }
+      return (
+        <>
+          <div style={errorBoxStyle}>
+            {job.errorMessage ?? "WebM transcode failed."}
             {job.errorCode ? <span style={{ opacity: 0.6 }}> [{job.errorCode}]</span> : null}
           </div>
           <button onClick={onDownload} style={{ ...buttonStyle, marginTop: 6 }}>
@@ -570,20 +857,22 @@ function VideoCard({
   return (
     <div
       style={{
-        border: "1px solid #ddd",
-        borderRadius: 4,
-        padding: 8,
-        marginBottom: 6,
-        background: "#fff",
+        border: "1px solid #cbd8cf",
+        borderRadius: 8,
+        padding: 10,
+        marginBottom: 10,
+        background: "#ffffff",
+        boxShadow: "0 1px 1px rgba(62, 48, 30, 0.06)",
       }}
     >
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
         <strong
           style={{
-            fontSize: 12,
+            fontSize: 13,
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
+            color: "#172018",
           }}
         >
           {displayName(v)}
@@ -591,28 +880,41 @@ function VideoCard({
         <span
           style={{
             fontSize: 10,
-            padding: "1px 6px",
-            background: "#eee",
-            borderRadius: 3,
+            padding: "2px 7px",
+            background: "#e7f0e9",
+            borderRadius: 999,
+            color: "#2f4f3a",
             whiteSpace: "nowrap",
+            border: "1px solid #d3e0d7",
           }}
         >
           {badgeText(v)}
         </span>
       </div>
       {fmtBytes(v.sizeBytes) !== undefined && (
-        <div style={{ color: "#888", fontSize: 11, marginTop: 2 }}>{fmtBytes(v.sizeBytes)}</div>
+        <div style={{ color: "#6f7c72", fontSize: 11, marginTop: 2 }}>{fmtBytes(v.sizeBytes)}</div>
       )}
-      <div style={{ color: "#666", fontSize: 10, wordBreak: "break-all", marginTop: 4 }}>
+      <VideoPreview v={v} />
+      <ImagePreview v={v} />
+      <div style={{ color: "#59675d", fontSize: 10, wordBreak: "break-all", marginTop: 7 }}>
         {urlDisplay(v.url, showFull)}{" "}
         <button
           onClick={() => setShowFull((s) => !s)}
-          style={{ marginLeft: 4, fontSize: 10, padding: "0 4px", cursor: "pointer" }}
+          style={{
+            marginLeft: 4,
+            fontSize: 10,
+            padding: "1px 5px",
+            cursor: "pointer",
+            border: "1px solid #c8d6cc",
+            borderRadius: 4,
+            background: "#f7fbf8",
+          }}
         >
           {showFull ? "hide" : "show full URL"}
         </button>
       </div>
       {renderAction()}
+      <div style={{ ...shelfLineStyle, marginTop: 10 }} />
     </div>
   );
 }
@@ -620,10 +922,12 @@ function VideoCard({
 function Popup() {
   const [tabId, setTabId] = useState<number | null>(null);
   const [videos, setVideos] = useState<DetectedVideo[]>([]);
+  const [mediaFilter, setMediaFilter] = useState<MediaFilter>("videos");
   const [settings, setSettingsState] = useState<UserSettings>(DEFAULT_SETTINGS);
   const [loaded, setLoaded] = useState(false);
   const [licensed, setLicensed] = useState(false);
   const [downloadCount, setDownloadCount] = useState(0);
+  const [bulkResult, setBulkResult] = useState<BulkResult | null>(null);
 
   async function refreshUsage() {
     const [lic, count] = await Promise.all([isLicensed(), getDownloadCount()]);
@@ -670,7 +974,7 @@ function Popup() {
       area: string,
     ) => {
       if (area !== "local") return;
-      if (changes["download-history"] || changes["license"]) void refreshUsage();
+      if (changes[VIDEO_DOWNLOAD_HISTORY_KEY] || changes["license"]) void refreshUsage();
     };
     chrome.storage.onChanged.addListener(listener);
     return () => chrome.storage.onChanged.removeListener(listener);
@@ -706,53 +1010,99 @@ function Popup() {
   }
 
   // Direct video segments that are covered by a detected manifest are
-  // hidden from the popup — see lib/manifest-coverage.ts. The full
+  // hidden from the popup; see lib/manifest-coverage.ts. The full
   // detection list stays in storage so badge counts stay accurate; only
   // the user-facing list is filtered.
-  const visibleVideos = filterCoveredByManifests(videos);
+  const visibleMedia = filterCoveredByManifests(videos);
+  const visibleVideos = visibleMedia.filter((v) => !isStillImage(v));
+  const visibleStills = visibleMedia.filter(isStillImage);
+  const activeMedia = mediaFilter === "videos" ? visibleVideos : visibleStills;
 
   async function downloadAll() {
     if (tabId === null) return;
-    const result = await chrome.storage.session.get([DIRECT_JOBS_KEY, HLS_JOBS_KEY, DASH_JOBS_KEY]);
+    const resultSummary: BulkResult = { started: 0, skipped: 0, failed: 0 };
+    const result = await chrome.storage.session.get([
+      DIRECT_JOBS_KEY,
+      HLS_JOBS_KEY,
+      DASH_JOBS_KEY,
+      WEBM_TRANSCODE_JOBS_KEY,
+    ]);
     const directs = (result[DIRECT_JOBS_KEY] as Record<string, DirectJob>) ?? {};
     const hlses = (result[HLS_JOBS_KEY] as Record<string, HlsJob>) ?? {};
     const dashes = (result[DASH_JOBS_KEY] as Record<string, DashJob>) ?? {};
+    const webms = (result[WEBM_TRANSCODE_JOBS_KEY] as Record<string, WebmTranscodeJob>) ?? {};
 
     const isActive = (status: string) =>
       status === "in_progress" || status === "running" || status === "saving";
+    let streamJobQueued = [...Object.values(hlses), ...Object.values(dashes), ...Object.values(webms)].some(
+      (j) => j.tabId === tabId && isActive(j.status),
+    );
 
-    for (const v of visibleVideos) {
+    for (const v of activeMedia) {
       const matches = [
         ...Object.values(directs).filter((j) => j.videoId === v.id && j.tabId === tabId),
         ...Object.values(hlses).filter((j) => j.videoId === v.id && j.tabId === tabId),
         ...Object.values(dashes).filter((j) => j.videoId === v.id && j.tabId === tabId),
+        ...Object.values(webms).filter((j) => j.videoId === v.id && j.tabId === tabId),
       ];
       const eligible = !matches.some(
         (j) => isActive(j.status) || j.status === "complete",
       );
-      if (!eligible) continue;
+      if (!eligible) {
+        resultSummary.skipped++;
+        continue;
+      }
+      const usesOffscreenJob = v.kind === "hls" || v.kind === "dash" || isWebmDirectVideo(v);
+      if (usesOffscreenJob && streamJobQueued) {
+        resultSummary.skipped++;
+        continue;
+      }
 
-      void chrome.runtime
-        .sendMessage({ type: "download", tabId, videoId: v.id })
-        .catch(() => {});
+      try {
+        const res = (await chrome.runtime.sendMessage({
+          type: "download",
+          tabId,
+          videoId: v.id,
+        })) as { ok: true; downloadId?: number; jobId?: string } | { ok: false; error: string } | undefined;
+        if (res?.ok) {
+          resultSummary.started++;
+          if (usesOffscreenJob) streamJobQueued = true;
+        } else {
+          resultSummary.failed++;
+          if (!resultSummary.message && res && "error" in res) resultSummary.message = res.error;
+        }
+      } catch {
+        resultSummary.failed++;
+        if (!resultSummary.message) resultSummary.message = "Could not start one download.";
+      }
     }
+    setBulkResult(resultSummary);
   }
 
   function renderBody() {
     if (!loaded) {
       return (
-        <p style={{ marginTop: 8, color: "#888" }}>Loading detected videos…</p>
+        <p style={{ marginTop: 8, color: "#888" }}>Loading detected media…</p>
       );
     }
     if (tabId === null) {
       return (
-        <p style={{ marginTop: 8, color: "#888" }}>
+        <p style={{ margin: "12px 0", color: "#536156", fontSize: 11 }}>
           No active tab. Open this popup from a regular browser tab.
         </p>
       );
     }
-    if (visibleVideos.length === 0) return <Empty />;
-    return visibleVideos.map((v) => (
+    if (activeMedia.length === 0) {
+      if (mediaFilter === "stills") {
+        return (
+          <p style={{ margin: "10px 0", color: "#536156", fontSize: 10.5, lineHeight: 1.35 }}>
+            Nothing on this shelf yet. Tiny page assets under {fmtBytes(MIN_STILL_IMAGE_SIZE_BYTES)} are tucked away.
+          </p>
+        );
+      }
+      return <Empty />;
+    }
+    return activeMedia.map((v) => (
       <VideoCard key={v.id} v={v} tabId={tabId} settings={settings} />
     ));
   }
@@ -762,8 +1112,11 @@ function Popup() {
       style={{
         padding: 12,
         fontSize: 12,
-        minWidth: 360,
+        minWidth: 340,
+        maxWidth: 370,
         fontFamily: "-apple-system, system-ui, sans-serif",
+        background: "#f4f8f5",
+        color: "#1d261f",
       }}
     >
       <div
@@ -774,84 +1127,73 @@ function Popup() {
           gap: 8,
         }}
       >
-        <h2 style={{ margin: 0, fontSize: 14 }}>ClipHutch</h2>
+        <div>
+          <h2 style={{ margin: 0, fontSize: 18, letterSpacing: 0, lineHeight: 1 }}>ClipHutch</h2>
+        </div>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <span
             style={{
-              color: licensed ? "#2c5e2c" : atLimit ? "#a02a1f" : "#999",
+              color: licensed ? "#2f5f3a" : atLimit ? "#a02a1f" : "#59675c",
               fontSize: 11,
               fontWeight: licensed || atLimit ? 600 : 400,
+              border: "1px solid #cbd8cf",
+              background: "#ffffff",
+              borderRadius: 999,
+              padding: "4px 8px",
             }}
-            title={licensed ? "Unlimited downloads (licensed)" : `Free tier: ${remaining} of ${FREE_DOWNLOAD_LIMIT} downloads left in the next 24h`}
+            title={licensed ? "Unlimited downloads (licensed)" : `Free tier: ${remaining} of ${FREE_DOWNLOAD_LIMIT} video downloads left in the next 24h`}
           >
             {licensed ? "Licensed" : `${remaining}/${FREE_DOWNLOAD_LIMIT} left`}
           </span>
-          <span style={{ color: "#ddd", fontSize: 11 }}>·</span>
-          <span style={{ color: "#999", fontSize: 11 }}>
-            {visibleVideos.length > 0 ? `${visibleVideos.length} detected` : ""}
-          </span>
-          {visibleVideos.length > 0 && (
+          {activeMedia.length > 0 && (
             <button
               onClick={() => void downloadAll()}
-              title="Download all detected videos (skips in-flight and already-saved)"
-              style={{
-                border: "1px solid #2c5e2c",
-                background: "#fff",
-                color: "#2c5e2c",
-                borderRadius: 4,
-                padding: "2px 8px",
-                cursor: "pointer",
-                fontSize: 11,
-                fontWeight: 600,
-              }}
+              title={`Download this ${mediaFilter === "videos" ? "video" : "still"} shelf (skips in-flight and already-saved items)`}
+              style={primaryButtonStyle}
             >
-              Download all
+              Download shelf
             </button>
           )}
           <button
             onClick={() => chrome.runtime.openOptionsPage()}
             title="Settings"
             aria-label="Settings"
-            style={{
-              border: "1px solid #ddd",
-              background: "#fff",
-              borderRadius: 4,
-              padding: "2px 6px",
-              cursor: "pointer",
-              fontSize: 13,
-              lineHeight: 1,
-            }}
+            style={iconButtonStyle}
           >
             ⚙
           </button>
         </div>
       </div>
+      <div style={{ ...shelfLineStyle, marginTop: 9 }} />
       {atLimit && (
         <div
           style={{
-            marginTop: 10,
-            padding: "8px 10px",
-            background: "#fdecea",
-            border: "1px solid #f3b6b0",
-            borderRadius: 4,
+            marginTop: 8,
+            padding: activeMedia.length > 0 ? "8px 10px" : "6px 8px",
+            background: "#fff1ed",
+            border: "1px solid #efb6aa",
+            borderRadius: 6,
             display: "flex",
             justifyContent: "space-between",
             alignItems: "center",
             gap: 8,
           }}
         >
-          <div style={{ fontSize: 11, color: "#7a1f1a" }}>
-            <strong>Daily limit reached.</strong> You've used all {FREE_DOWNLOAD_LIMIT} free downloads in the last 24 hours. Unlock unlimited downloads with a one-time payment of ${PRICE_USD}.
+          <div style={{ fontSize: activeMedia.length > 0 ? 11 : 10.5, color: "#7a1f1a", lineHeight: 1.25 }}>
+            <strong>Daily limit reached.</strong>{" "}
+            {activeMedia.length > 0
+              ? `You've used all ${FREE_DOWNLOAD_LIMIT} free video downloads in the last 24 hours. Get unlimited video downloads with a one-time payment of $${PRICE_USD}.`
+              : `Free video downloads reset within 24 hours.`}
           </div>
           <button
             onClick={onUpgrade}
-            title={`One-time payment of $${PRICE_USD} — no subscription`}
+            title={`One-time payment of $${PRICE_USD}, no subscription`}
             style={{
               border: "1px solid #2c5e2c",
               background: "#2c5e2c",
               color: "#fff",
-              borderRadius: 4,
-              padding: "4px 10px",
+              borderRadius: 6,
+              padding: activeMedia.length > 0 ? "4px 10px" : "3px 8px",
               cursor: "pointer",
               fontSize: 11,
               fontWeight: 600,
@@ -862,13 +1204,48 @@ function Popup() {
           </button>
         </div>
       )}
+      <div style={{ margin: "9px 0 7px", display: "flex", alignItems: "center", gap: 6 }}>
+        <ShelfTab
+          active={mediaFilter === "videos"}
+          count={visibleVideos.length}
+          label="Videos"
+          onClick={() => {
+            setMediaFilter("videos");
+            setBulkResult(null);
+          }}
+        />
+        <ShelfTab
+          active={mediaFilter === "stills"}
+          count={visibleStills.length}
+          label="Stills"
+          onClick={() => {
+            setMediaFilter("stills");
+            setBulkResult(null);
+          }}
+        />
+      </div>
+      {bulkResult ? (
+        <div
+          style={{
+            marginTop: 8,
+            padding: "6px 8px",
+            borderRadius: 6,
+            border: bulkResult.failed > 0 ? "1px solid #efb6aa" : "1px solid #bdd7c8",
+            background: bulkResult.failed > 0 ? "#fff1ed" : "#f1f7f4",
+            color: bulkResult.failed > 0 ? "#7a1f1a" : "#244f3a",
+            fontSize: 11,
+          }}
+        >
+          {bulkResultText(bulkResult)}
+        </div>
+      ) : null}
       <div style={{ marginTop: 10 }}>{renderBody()}</div>
       <footer
         style={{
           marginTop: 12,
-          color: "#999",
+          color: "#758277",
           fontSize: 10,
-          borderTop: "1px solid #eee",
+          borderTop: "1px solid #cbd8cf",
           paddingTop: 6,
         }}
       >

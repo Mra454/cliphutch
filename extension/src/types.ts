@@ -1,9 +1,10 @@
 export type VideoKind = "direct" | "hls" | "dash";
+export type MediaKind = VideoKind | "image";
 
 export type DetectedVideo = {
   id: string;
   url: string;
-  kind: VideoKind;
+  kind: MediaKind;
   detectedAt: number;
   pageUrl?: string;
   pageTitle?: string;
@@ -19,7 +20,7 @@ export type DirectJob = {
   videoId: string;
   tabId: number;
   downloadId: number;
-  kind: VideoKind;
+  kind: MediaKind;
   startedAt: number;
   status: "in_progress" | "complete" | "interrupted";
   errorMessage?: string;
@@ -35,6 +36,7 @@ export type HlsJob = {
   status: StreamJobStatus;
   progress: { done: number; total: number; bytes: number };
   downloadId?: number;
+  containerExt?: ".mp4" | ".ts";
   errorCode?: string;
   errorMessage?: string;
 };
@@ -51,6 +53,20 @@ export type DashJob = {
   // fetches them separately but we mux into one file before saving, so the
   // popup UI doesn't need the breakdown.
   progress: { done: number; total: number; bytes: number };
+  downloadId?: number;
+  errorCode?: string;
+  errorMessage?: string;
+};
+
+export type WebmTranscodeJob = {
+  jobId: string;
+  videoId: string;
+  tabId: number;
+  url: string;
+  kind: "direct";
+  startedAt: number;
+  status: StreamJobStatus;
+  progress: { ratio: number; message?: string };
   downloadId?: number;
   errorCode?: string;
   errorMessage?: string;

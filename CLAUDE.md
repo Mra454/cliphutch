@@ -29,11 +29,11 @@ Both build and audit must PASS before any CWS submission. Worker is deployed sep
 
 The marketing wedge is permission minimalism vs Video DownloadHelper:
 
-> **5 API permissions, not 14. No content scripts. No DOM access.**
+> **5 API permissions, not 14. No scripting API. Limited image-URL DOM access.**
 
 Three pinned corrections future sessions must NOT undo:
 
-1. **"5 API permissions"**, never "5 permissions". The `host_permissions` (`http://*/*`, `https://*/*`) are broad and not counted in the 5; this is disclosed explicitly in the firstrun.html footnote, PRIVACY.md, and PERMISSIONS.md. The count basis is API permissions because those determine what code an extension can run on visited pages. Codex audit (2026-04-28) correctly flagged the unqualified "5 permissions" claim as a marketing/code mismatch.
+1. **"5 API permissions"**, never "5 permissions". The `host_permissions` (`http://*/*`, `https://*/*`) are broad and not counted in the 5; this is disclosed explicitly in the firstrun.html footnote, PRIVACY.md, and PERMISSIONS.md. The count basis is API permissions because Chrome lists those separately from broad host access and manifest-declared content scripts. Codex audit (2026-04-28) correctly flagged the unqualified "5 permissions" claim as a marketing/code mismatch.
 
 2. **"Originating tab"**, not "active tab". `resolveTabInfo()` in `extension/src/background.ts` reads URL/title for any tab that fires a video-shaped webRequest, not just the foreground tab. All public copy must say "originating tab" or describe the actual scope.
 
@@ -78,7 +78,7 @@ Open work to do during/after the review window:
 - **M5** — Stale docs in `cloudflare/README.md` (mentions `licenses@cliphutch.app`; "Phase 3 stub" claim is wrong).
 - **Trader verification** — Google Payments verification submitted 2026-04-28 with Vismu LLC Articles of Organization; pending. Listing will display "non-trader" until Google approves.
 
-## Option C work-in-progress — paused 2026-05-13
+## Option C work-in-progress — resumed 2026-05-14
 
 Active branch: **`option-c-stage-1-separate-audio`** (pushed). Two PRs not yet merged.
 
@@ -90,21 +90,20 @@ Shipped on this branch (3 commits past master's last open PR `fmp4-hls-stream-la
 |---|---|---|
 | `02fb183` | **Stage 1** — separate-audio fMP4 + fMP4. `parseMasterVariants` no longer filters separate-audio variants; resolves `audioRenditionUri`. `downloadHls` accepts `audioUrl`, fetches video + audio in parallel, calls `muxFmp4(video, audio)`. New `MixedContainerAudioError` for fMP4 video + non-fMP4 audio. | Mux `tos_ismc`, modern Vimeo non-DRM |
 | `178a184` | **Stage 2A** — byte-range segment fetch. New `fetchByteRange()`. `detectFmp4Init` returns `{uri, byterange?}`. `validateVariant` drops the byterange throw. m3u8-parser already resolves implicit `EXT-X-BYTERANGE` offsets. New `ByteRangeUnsupportedError` (server returned 200 to Range), `ByteRangeOutOfBoundsError` (416). `ByteRangeError` kept for DASH's preemptive refusal. | Apple `img_bipbop_adv_example_fmp4/master.m3u8` |
+| uncommitted | **Stage 2B/2C** — `mux.js` compatibility spike succeeded; added `mux.js`, `transmuxTsAudioToFmp4()`, and the mixed fMP4-video + MPEG-TS-audio path. Real TS fixture test proves AAC audio becomes parseable audio fMP4. | Squarespace-shape separate MPEG-TS audio |
 
-Stage 1 and 2A are **unverified end-to-end.** Tests pass, build clean, audit PASS, but no real browser smoke test ran. Both rounds got committed before user-driven smoke confirmation. Combined smoke gate is at the end of Stage 2.
+Stages 1, 2A, 2B, and 2C are **unverified end-to-end.** Tests pass, build clean, audit PASS, but no real browser smoke test ran. Combined smoke gate is next.
 
 ### What's next (in order)
 
-1. **Stage 2B — mux.js compatibility spike** (~30 min). Add `mux.js` to `package.json`, attempt `import { mp2t } from 'mux.js'` in a one-off test, parse a tiny MPEG-TS fixture, confirm it produces ADTS-framed AAC + AudioSpecificConfig. Decision gate: library or hand-roll for Stage 2C.
-2. **Stage 2C — MPEG-TS audio → fMP4** (~6-8 hours). `extension/src/workers/ts-demux.ts` extracts AAC ADTS + AudioSpecificConfig from MPEG-TS PES packets. `extension/src/workers/aac-to-fmp4.ts` repackages as fMP4 audio (synthetic init + media segment) so the existing `muxFmp4(video, audio)` works unchanged. Drop the `MixedContainerAudioError` throw at `hls-downloader.ts:332`. Generate Squarespace-shape fixture locally with ffmpeg.
-3. **Smoke gate** (~30 min, requires user). Three URLs:
+1. **Smoke gate** (~30 min, requires user). Three URLs:
    - Mux `tos_ismc` (validates Stage 1)
    - Apple `img_bipbop_adv_example_fmp4` (validates Stage 1 + 2A together)
    - Real Squarespace page (validates Stage 1 + 2A + 2C together — the actual reported failure case)
    Plus regression: Cloudflare Stream, MPEG-TS embedded.
-4. **Stage 2D — privacy + permissions copy** (~1 hour). Update `PRIVACY.md`, `PERMISSIONS.md`, `extension/firstrun.html` together to mention separate-audio fetching and mixed-container muxing. Mirror to `~/projects/cliphutch-site/public/privacy.html`. Drop more `v1` framing if any remains.
-5. **Codex adversarial review** of the combined Stage 1 + 2A + 2C diff before merge. See `~/.claude/projects/-Users-mikey/memory/feedback_codex_adversarial_review_cycle.md`.
-6. **PR + merge.** Single Option C PR covering Stages 1, 2A, 2C, 2D.
+2. **Stage 2D — privacy + permissions copy** (~1 hour). Update `PRIVACY.md`, `PERMISSIONS.md`, `extension/firstrun.html` together to mention separate-audio fetching and mixed-container muxing. Mirror to `~/projects/cliphutch-site/public/privacy.html`. Drop more `v1` framing if any remains.
+3. **Codex adversarial review** of the combined Stage 1 + 2A + 2C diff before merge. See `~/.claude/projects/-Users-mikey/memory/feedback_codex_adversarial_review_cycle.md`.
+4. **PR + merge.** Single Option C PR covering Stages 1, 2A, 2C, 2D.
 
 ### Known concerns parked
 

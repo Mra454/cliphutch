@@ -1,4 +1,4 @@
-import type { DetectedVideo, VideoKind } from "../types";
+import type { DetectedVideo, MediaKind } from "../types";
 
 const RESERVED_NAMES = new Set([
   "CON", "PRN", "AUX", "NUL",
@@ -8,10 +8,11 @@ const RESERVED_NAMES = new Set([
   "LPT6", "LPT7", "LPT8", "LPT9",
 ]);
 
-const KIND_DEFAULT_EXT: Record<VideoKind, string> = {
+const KIND_DEFAULT_EXT: Record<MediaKind, string> = {
   direct: ".mp4",
   hls: ".ts",
   dash: ".mp4",
+  image: ".jpg",
 };
 
 const MAX_LEN = 200;
@@ -38,12 +39,12 @@ export function inferFilename(
     stem = "_" + stem;
   }
 
-  if (!stem) stem = fallbackStem();
+  if (!stem) stem = fallbackStem(video.kind);
 
   const fullName = stem + targetExt;
   if (fullName.length > MAX_LEN) {
     stem = stem.slice(0, MAX_LEN - targetExt.length).replace(/[. ]+$/, "");
-    if (!stem) stem = fallbackStem().slice(0, MAX_LEN - targetExt.length);
+    if (!stem) stem = fallbackStem(video.kind).slice(0, MAX_LEN - targetExt.length);
   }
 
   return stem + targetExt;
@@ -63,7 +64,7 @@ function pickRawName(video: DetectedVideo): string {
   const fromTitle = cleanTitle(video.pageTitle);
   if (fromTitle) return fromTitle;
 
-  return basename ?? fallbackStem();
+  return basename ?? fallbackStem(video.kind);
 }
 
 // Generic CDN manifest filenames that carry no signal about the video.
@@ -77,7 +78,7 @@ const GENERIC_MANIFEST_NAMES = new Set([
   "manifest.mpd",
 ]);
 
-function isManifestBasename(name: string, _kind: VideoKind): boolean {
+function isManifestBasename(name: string, _kind: MediaKind): boolean {
   return GENERIC_MANIFEST_NAMES.has(name.toLowerCase());
 }
 
@@ -121,8 +122,9 @@ function cleanTitle(title?: string): string | undefined {
   return trimmed || undefined;
 }
 
-function fallbackStem(): string {
-  return `video-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+function fallbackStem(kind: MediaKind = "direct"): string {
+  const prefix = kind === "image" ? "still" : "video";
+  return `${prefix}-${new Date().toISOString().replace(/[:.]/g, "-")}`;
 }
 
 function extensionOf(name: string): string | undefined {
