@@ -126,10 +126,21 @@ function badgeText(v: DetectedVideo): string {
 function hostname(rawUrl?: string): string | undefined {
   if (!rawUrl) return undefined;
   try {
-    return new URL(rawUrl).hostname.replace(/^www\./, "");
+    return new URL(rawUrl).hostname.toLowerCase().replace(/^www\./, "");
   } catch {
     return undefined;
   }
+}
+
+function hostMatchesFilter(host: string | undefined, filter: string): boolean {
+  if (!host) return false;
+  const normalized = host.toLowerCase().replace(/^www\./, "");
+  const normalizedFilter = filter.toLowerCase().replace(/^www\./, "");
+  return normalized === normalizedFilter || normalized.endsWith(`.${normalizedFilter}`);
+}
+
+function hostCoveredByFilters(host: string, filters: string[]): boolean {
+  return filters.some((filter) => hostMatchesFilter(host, filter));
 }
 
 function sourceLabel(v: DetectedVideo): string {
@@ -189,8 +200,8 @@ function isIgnoredBySettings(v: DetectedVideo, settings: UserSettings): boolean 
   const source = hostname(v.url);
   const page = hostname(v.pageUrl);
   return Boolean(
-    (source && settings.ignoredSourceHosts.includes(source)) ||
-      (page && settings.ignoredPageHosts.includes(page)),
+    (source && hostCoveredByFilters(source, settings.ignoredSourceHosts)) ||
+      (page && hostCoveredByFilters(page, settings.ignoredPageHosts)),
   );
 }
 
@@ -511,15 +522,19 @@ function ShelfTab({
 function VideoCard({
   v,
   alternates,
+  selectedId,
   tabId,
   settings,
+  onSelect,
   onIgnoreSource,
   onIgnorePage,
 }: {
   v: DetectedVideo;
   alternates: DetectedVideo[];
+  selectedId: string;
   tabId: number;
   settings: UserSettings;
+  onSelect: (id: string) => void;
   onIgnoreSource: (host: string) => void;
   onIgnorePage: (host: string) => void;
 }) {
@@ -533,6 +548,19 @@ function VideoCard({
     | { state: "ready"; variants: VariantOption[]; durationSec?: number; sizeCapBytes: number }
     | null
   >(null);
+  const groupedAssets = [v, ...alternates];
+  const selected = groupedAssets.find((item) => item.id === selectedId) ?? v;
+
+  useEffect(() => {
+    setJob(null);
+    setPicker(null);
+    setImmediateError(null);
+  }, [v.id]);
+
+  useEffect(() => {
+    setJob(null);
+    setDirectProgress(null);
+  }, [selected.id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -550,16 +578,16 @@ function VideoCard({
       const webms = (result[WEBM_TRANSCODE_JOBS_KEY] as Record<string, WebmTranscodeJob>) ?? {};
       const matches: AnyJob[] = [];
       for (const j of Object.values(directs)) {
-        if (j.videoId === v.id && j.tabId === tabId) matches.push({ source: "direct", ...j });
+        if (j.videoId === selected.id && j.tabId === tabId) matches.push({ source: "direct", ...j });
       }
       for (const j of Object.values(hlses)) {
-        if (j.videoId === v.id && j.tabId === tabId) matches.push({ source: "hls", ...j });
+        if (j.videoId === selected.id && j.tabId === tabId) matches.push({ source: "hls", ...j });
       }
       for (const j of Object.values(dashes)) {
-        if (j.videoId === v.id && j.tabId === tabId) matches.push({ source: "dash", ...j });
+        if (j.videoId === selected.id && j.tabId === tabId) matches.push({ source: "dash", ...j });
       }
       for (const j of Object.values(webms)) {
-        if (j.videoId === v.id && j.tabId === tabId) matches.push({ source: "webm", ...j });
+        if (j.videoId === selected.id && j.tabId === tabId) matches.push({ source: "webm", ...j });
       }
       matches.sort((a, b) => b.startedAt - a.startedAt);
       if (!cancelled) setJob(matches[0] ?? null);
@@ -586,7 +614,7 @@ function VideoCard({
       cancelled = true;
       chrome.storage.onChanged.removeListener(listener);
     };
-  }, [v.id, tabId]);
+  }, [selected.id, tabId]);
 
   useEffect(() => {
     if (!job || job.source !== "direct" || job.status !== "in_progress") {
@@ -626,7 +654,7 @@ function VideoCard({
       const res = (await chrome.runtime.sendMessage({
         type: "download",
         tabId,
-        videoId: v.id,
+        videoId: selected.id,
         variantId: variant?.id,
         audioRenditionUrl: variant?.audioRenditionUrl,
         bypassSizeCap,
@@ -639,7 +667,7 @@ function VideoCard({
 
   const onDownload = async () => {
     setImmediateError(null);
-    if (v.kind !== "hls" && v.kind !== "dash") {
+    if (selected.kind !== "hls" && selected.kind !== "dash") {
       void sendDownload();
       return;
     }
@@ -649,7 +677,7 @@ function VideoCard({
       lr = (await chrome.runtime.sendMessage({
         type: "list-variants",
         tabId,
-        videoId: v.id,
+        videoId: selected.id,
       })) as ListVariantsResponse;
     } catch (err) {
       setPicker(null);
@@ -780,7 +808,7 @@ function VideoCard({
     }
 
     if (!job) {
-      if (isWebmDirectVideo(v)) {
+      if (isWebmDirectVideo(selected)) {
         return (
           <>
             <div style={noteBoxStyle}>
@@ -820,7 +848,7 @@ function VideoCard({
         );
       }
       if (job.status === "complete") {
-        return <DownloadSuccessRow v={v} job={job} />;
+        return <DownloadSuccessRow v={selected} job={job} />;
       }
       return (
         <>
@@ -860,7 +888,7 @@ function VideoCard({
         );
       }
       if (job.status === "complete") {
-        return <DownloadSuccessRow v={v} job={job} />;
+        return <DownloadSuccessRow v={selected} job={job} />;
       }
       if (job.status === "cancelled") {
         return (
@@ -908,7 +936,7 @@ function VideoCard({
         );
       }
       if (job.status === "complete") {
-        return <DownloadSuccessRow v={v} job={job} />;
+        return <DownloadSuccessRow v={selected} job={job} />;
       }
       if (job.status === "cancelled") {
         return (
@@ -961,7 +989,7 @@ function VideoCard({
       );
     }
     if (job.status === "complete") {
-      return <DownloadSuccessRow v={v} job={job} />;
+      return <DownloadSuccessRow v={selected} job={job} />;
     }
     if (job.status === "cancelled") {
       return (
@@ -986,8 +1014,9 @@ function VideoCard({
     );
   }
 
-  const sourceHost = hostname(v.url);
-  const pageHost = pageLabel(v);
+  const sourceHost = hostname(selected.url);
+  const pageHost = pageLabel(selected);
+  const alternateOptions = groupedAssets.filter((item) => item.id !== selected.id);
 
   return (
     <div
@@ -1010,7 +1039,7 @@ function VideoCard({
             color: "#172018",
           }}
         >
-          {displayName(v)}
+          {displayName(selected)}
         </strong>
         <span
           style={{
@@ -1023,11 +1052,11 @@ function VideoCard({
             border: "1px solid #d3e0d7",
           }}
         >
-          {badgeText(v)}
+          {badgeText(selected)}
         </span>
       </div>
-      {fmtBytes(v.sizeBytes) !== undefined && (
-        <div style={{ color: "#6f7c72", fontSize: 11, marginTop: 2 }}>{fmtBytes(v.sizeBytes)}</div>
+      {fmtBytes(selected.sizeBytes) !== undefined && (
+        <div style={{ color: "#6f7c72", fontSize: 11, marginTop: 2 }}>{fmtBytes(selected.sizeBytes)}</div>
       )}
       <div
         style={{
@@ -1040,7 +1069,7 @@ function VideoCard({
           fontSize: 10,
         }}
       >
-        <span title={v.url}>source: {sourceLabel(v)}</span>
+        <span title={selected.url}>source: {sourceLabel(selected)}</span>
         {pageHost ? <span>page: {pageHost}</span> : null}
         {sourceHost ? (
           <button
@@ -1061,20 +1090,21 @@ function VideoCard({
           </button>
         ) : null}
       </div>
-      {alternates.length > 0 ? (
+      {alternateOptions.length > 0 ? (
         <div style={{ ...noteBoxStyle, background: "#f7fbf8" }}>
           <button
             onClick={() => setShowAlternates((s) => !s)}
             style={{ ...buttonStyle, padding: "2px 6px", fontSize: 10, marginRight: 6 }}
           >
-            {showAlternates ? "Hide" : "Show"} {alternates.length} alternate{alternates.length === 1 ? "" : "s"}
+            {showAlternates ? "Hide" : "Show"} {alternateOptions.length} alternate
+            {alternateOptions.length === 1 ? "" : "s"}
           </button>
           <span>
             Similar assets from this source are grouped to keep the shelf tidy.
           </span>
           {showAlternates ? (
             <div style={{ marginTop: 5 }}>
-              {alternates.map((alt) => (
+              {alternateOptions.map((alt) => (
                 <div
                   key={alt.id}
                   style={{
@@ -1095,15 +1125,14 @@ function VideoCard({
                   <span style={{ color: "#758277" }}>{fmtBytes(alt.sizeBytes) ?? badgeText(alt)}</span>
                   <button
                     onClick={() => {
-                      chrome.runtime.sendMessage({
-                        type: "download",
-                        tabId,
-                        videoId: alt.id,
-                      }).catch(() => undefined);
+                      onSelect(alt.id);
+                      setPicker(null);
+                      setImmediateError(null);
+                      setShowAlternates(false);
                     }}
                     style={{ ...buttonStyle, padding: "2px 6px", fontSize: 10 }}
                   >
-                    Download
+                    Select
                   </button>
                 </div>
               ))}
@@ -1111,11 +1140,11 @@ function VideoCard({
           ) : null}
         </div>
       ) : null}
-      <Diagnostics v={v} job={job} />
-      <VideoPreview v={v} />
-      <ImagePreview v={v} />
+      <Diagnostics v={selected} job={job} />
+      <VideoPreview v={selected} />
+      <ImagePreview v={selected} />
       <div style={{ color: "#59675d", fontSize: 10, wordBreak: "break-all", marginTop: 7 }}>
-        {urlDisplay(v.url, showFull)}{" "}
+        {urlDisplay(selected.url, showFull)}{" "}
         <button
           onClick={() => setShowFull((s) => !s)}
           style={{
@@ -1146,6 +1175,7 @@ function Popup() {
   const [licensed, setLicensed] = useState(false);
   const [downloadCount, setDownloadCount] = useState(0);
   const [bulkResult, setBulkResult] = useState<BulkResult | null>(null);
+  const [selectedByGroup, setSelectedByGroup] = useState<Record<string, string>>({});
 
   async function refreshUsage() {
     const [lic, count] = await Promise.all([isLicensed(), getDownloadCount()]);
@@ -1231,26 +1261,31 @@ function Popup() {
   }
 
   // Direct video segments that are covered by a detected manifest are
-  // hidden from the popup; see lib/manifest-coverage.ts. The full
-  // detection list stays in storage so badge counts stay accurate; only
-  // the user-facing list is filtered.
+  // hidden from the popup; see lib/manifest-coverage.ts. Domain filters
+  // are also applied here so the user-facing shelf matches badge behavior.
   const manifestFilteredMedia = filterCoveredByManifests(videos);
   const visibleMedia = manifestFilteredMedia.filter((v) => !isIgnoredBySettings(v, settings));
   const hiddenByDomainCount = manifestFilteredMedia.length - visibleMedia.length;
   const visibleVideos = visibleMedia.filter((v) => !isStillImage(v));
   const visibleStills = visibleMedia.filter(isStillImage);
-  const activeMedia = mediaFilter === "videos" ? visibleVideos : visibleStills;
-  const activeGroups = groupMedia(activeMedia);
+  const videoGroups = groupMedia(visibleVideos);
+  const stillGroups = groupMedia(visibleStills);
+  const activeGroups = mediaFilter === "videos" ? videoGroups : stillGroups;
+
+  function selectedForGroup(group: MediaGroup): DetectedVideo {
+    const selectedId = selectedByGroup[group.primary.id];
+    return [group.primary, ...group.alternates].find((item) => item.id === selectedId) ?? group.primary;
+  }
 
   async function ignoreSourceHost(host: string) {
-    if (settings.ignoredSourceHosts.includes(host)) return;
+    if (hostCoveredByFilters(host, settings.ignoredSourceHosts)) return;
     await setSettings({
       ignoredSourceHosts: [...settings.ignoredSourceHosts, host].sort(),
     });
   }
 
   async function ignorePageHost(host: string) {
-    if (settings.ignoredPageHosts.includes(host)) return;
+    if (hostCoveredByFilters(host, settings.ignoredPageHosts)) return;
     await setSettings({
       ignoredPageHosts: [...settings.ignoredPageHosts, host].sort(),
     });
@@ -1280,7 +1315,7 @@ function Popup() {
       (j) => j.tabId === tabId && isActive(j.status),
     );
 
-    for (const v of activeGroups.map((g) => g.primary)) {
+    for (const v of activeGroups.map(selectedForGroup)) {
       const matches = [
         ...Object.values(directs).filter((j) => j.videoId === v.id && j.tabId === tabId),
         ...Object.values(hlses).filter((j) => j.videoId === v.id && j.tabId === tabId),
@@ -1349,8 +1384,13 @@ function Popup() {
         key={group.primary.id}
         v={group.primary}
         alternates={group.alternates}
+        selectedId={selectedForGroup(group).id}
         tabId={tabId}
         settings={settings}
+        onSelect={(id) => {
+          setSelectedByGroup((prev) => ({ ...prev, [group.primary.id]: id }));
+          setBulkResult(null);
+        }}
         onIgnoreSource={(host) => void ignoreSourceHost(host)}
         onIgnorePage={(host) => void ignorePageHost(host)}
       />
@@ -1398,10 +1438,10 @@ function Popup() {
           {activeGroups.length > 0 && (
             <button
               onClick={() => void downloadAll()}
-              title={`Download this ${mediaFilter === "videos" ? "video" : "still"} shelf (skips in-flight and already-saved items)`}
+              title={`Download each visible ${mediaFilter === "videos" ? "video" : "still"} group's top pick. Grouped alternates are skipped in bulk.`}
               style={primaryButtonStyle}
             >
-              Download shelf
+              Download picks
             </button>
           )}
           <button
@@ -1457,7 +1497,7 @@ function Popup() {
       <div style={{ margin: "9px 0 7px", display: "flex", alignItems: "center", gap: 6 }}>
         <ShelfTab
           active={mediaFilter === "videos"}
-          count={visibleVideos.length}
+          count={videoGroups.length}
           label="Videos"
           onClick={() => {
             setMediaFilter("videos");
@@ -1466,7 +1506,7 @@ function Popup() {
         />
         <ShelfTab
           active={mediaFilter === "stills"}
-          count={visibleStills.length}
+          count={stillGroups.length}
           label="Stills"
           onClick={() => {
             setMediaFilter("stills");

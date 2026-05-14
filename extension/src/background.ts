@@ -69,18 +69,29 @@ function makeId(url: string, tabId: number): string {
 function hostname(rawUrl?: string): string | undefined {
   if (!rawUrl) return undefined;
   try {
-    return new URL(rawUrl).hostname.replace(/^www\./, "");
+    return new URL(rawUrl).hostname.toLowerCase().replace(/^www\./, "");
   } catch {
     return undefined;
   }
+}
+
+function hostMatchesFilter(host: string | undefined, filter: string): boolean {
+  if (!host) return false;
+  const normalized = host.toLowerCase().replace(/^www\./, "");
+  const normalizedFilter = filter.toLowerCase().replace(/^www\./, "");
+  return normalized === normalizedFilter || normalized.endsWith(`.${normalizedFilter}`);
+}
+
+function hostCoveredByFilters(host: string, filters: string[]): boolean {
+  return filters.some((filter) => hostMatchesFilter(host, filter));
 }
 
 function isIgnoredBySettings(v: DetectedVideo, settings: UserSettings): boolean {
   const source = hostname(v.url);
   const page = hostname(v.pageUrl);
   return Boolean(
-    (source && settings.ignoredSourceHosts.includes(source)) ||
-      (page && settings.ignoredPageHosts.includes(page)),
+    (source && hostCoveredByFilters(source, settings.ignoredSourceHosts)) ||
+      (page && hostCoveredByFilters(page, settings.ignoredPageHosts)),
   );
 }
 
