@@ -285,8 +285,8 @@ if (existsSync(thirdPartyNoticePath)) {
 if (existsSync(sourceOfferPath)) {
   const offer = readFileSync(sourceOfferPath, "utf8");
   const requiredOfferTerms = [
-    /cliphutch-v0\.1\.0-cws-submit-2026-05-14-r3/,
-    /github\.com\/Mra454\/cliphutch\/releases\/tag\/cliphutch-v0\.1\.0-cws-submit-2026-05-14-r3/,
+    /cliphutch-v0\.1\.1-cws-submit-2026-05-14/,
+    /github\.com\/Mra454\/cliphutch\/releases\/tag\/cliphutch-v0\.1\.1-cws-submit-2026-05-14/,
     /licenses@cliphutch\.com/,
     /three years/,
     /@ffmpeg\/core 0\.12\.10/,
