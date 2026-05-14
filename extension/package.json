@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite build --watch --mode development",
     "build": "NODE_ENV=production vite build",
-    "package": "cd dist && zip -r ../dist.zip . && cd ..",
+    "package": "node -e \"require('node:fs').rmSync('dist.zip',{force:true})\" && cd dist && zip -r ../dist.zip . && cd ..",
     "test": "vitest",
     "audit:dist": "node scripts/audit-dist.js"
   },

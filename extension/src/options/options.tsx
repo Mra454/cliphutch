@@ -68,6 +68,11 @@ const helpStyle: React.CSSProperties = {
   marginTop: 4,
 };
 
+const headingStyle: React.CSSProperties = {
+  margin: "0 0 0.6em",
+  fontSize: 16,
+};
+
 function Options() {
   const [settings, setLocal] = useState<UserSettings | null>(null);
   const [capInputMB, setCapInputMB] = useState<string>("");
@@ -137,6 +142,29 @@ function Options() {
     setLocal(DEFAULT_SETTINGS);
     setCapInputMB(String(bytesToMB(DEFAULT_SETTINGS.hlsSizeCapBytes)));
     setCapError(null);
+    flashSaved();
+  }
+
+  async function removeIgnoredSource(host: string) {
+    const ignoredSourceHosts = settings!.ignoredSourceHosts.filter((h) => h !== host);
+    const next = { ...settings!, ignoredSourceHosts };
+    setLocal(next);
+    await setSettings({ ignoredSourceHosts });
+    flashSaved();
+  }
+
+  async function removeIgnoredPage(host: string) {
+    const ignoredPageHosts = settings!.ignoredPageHosts.filter((h) => h !== host);
+    const next = { ...settings!, ignoredPageHosts };
+    setLocal(next);
+    await setSettings({ ignoredPageHosts });
+    flashSaved();
+  }
+
+  async function clearIgnoredDomains() {
+    const next = { ...settings!, ignoredSourceHosts: [], ignoredPageHosts: [] };
+    setLocal(next);
+    await setSettings({ ignoredSourceHosts: [], ignoredPageHosts: [] });
     flashSaved();
   }
 
@@ -342,6 +370,53 @@ function Options() {
           Default download folder is controlled by Chrome at{" "}
           <code>chrome://settings/downloads</code>.
         </p>
+      </section>
+
+      <section style={sectionStyle}>
+        <h2 style={headingStyle}>Domain filters</h2>
+        <p style={{ marginTop: 0, fontSize: 13, color: "#555" }}>
+          Sources and sites hidden from the popup shelf. Use these for ad/CDN
+          noise or pages you do not want ClipHutch to list.
+        </p>
+        {settings.ignoredSourceHosts.length === 0 && settings.ignoredPageHosts.length === 0 ? (
+          <p style={{ ...helpStyle, marginBottom: 0 }}>No domain filters yet.</p>
+        ) : (
+          <>
+            {settings.ignoredSourceHosts.length > 0 ? (
+              <div style={{ marginBottom: 8 }}>
+                <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Hidden sources</div>
+                {settings.ignoredSourceHosts.map((host) => (
+                  <button
+                    key={`source:${host}`}
+                    onClick={() => void removeIgnoredSource(host)}
+                    title={`Remove ${host}`}
+                    style={{ margin: "0 6px 6px 0", padding: "3px 7px", fontSize: 12, cursor: "pointer" }}
+                  >
+                    {host} x
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            {settings.ignoredPageHosts.length > 0 ? (
+              <div style={{ marginBottom: 8 }}>
+                <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 4 }}>Ignored sites</div>
+                {settings.ignoredPageHosts.map((host) => (
+                  <button
+                    key={`page:${host}`}
+                    onClick={() => void removeIgnoredPage(host)}
+                    title={`Remove ${host}`}
+                    style={{ margin: "0 6px 6px 0", padding: "3px 7px", fontSize: 12, cursor: "pointer" }}
+                  >
+                    {host} x
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            <button onClick={() => void clearIgnoredDomains()} style={{ padding: "5px 10px", fontSize: 12, cursor: "pointer" }}>
+              Clear domain filters
+            </button>
+          </>
+        )}
       </section>
 
       <section style={sectionStyle}>

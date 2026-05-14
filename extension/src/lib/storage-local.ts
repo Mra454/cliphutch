@@ -6,12 +6,16 @@ export type UserSettings = {
   filenameTemplate: FilenameTemplate;
   hlsSizeCapBytes: number;
   showFullUrlsByDefault: boolean;
+  ignoredSourceHosts: string[];
+  ignoredPageHosts: string[];
 };
 
 export const DEFAULT_SETTINGS: UserSettings = {
   filenameTemplate: "urlBasename",
   hlsSizeCapBytes: DEFAULT_HLS_SIZE_CAP_BYTES,
   showFullUrlsByDefault: false,
+  ignoredSourceHosts: [],
+  ignoredPageHosts: [],
 };
 
 const KEY = "settings";
@@ -19,7 +23,12 @@ const KEY = "settings";
 export async function getSettings(): Promise<UserSettings> {
   const result = await chrome.storage.local.get(KEY);
   const stored = result[KEY] as Partial<UserSettings> | undefined;
-  return { ...DEFAULT_SETTINGS, ...(stored ?? {}) };
+  return {
+    ...DEFAULT_SETTINGS,
+    ...(stored ?? {}),
+    ignoredSourceHosts: Array.isArray(stored?.ignoredSourceHosts) ? stored.ignoredSourceHosts : [],
+    ignoredPageHosts: Array.isArray(stored?.ignoredPageHosts) ? stored.ignoredPageHosts : [],
+  };
 }
 
 export async function setSettings(partial: Partial<UserSettings>): Promise<void> {

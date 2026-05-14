@@ -6,7 +6,7 @@ import {
   WEBM_TRANSCODE_SIZE_CAP_BYTES,
 } from "./lib/constants";
 import { inferFilename } from "./lib/filename";
-import { getSettings } from "./lib/storage-local";
+import { getSettings, type UserSettings } from "./lib/storage-local";
 import { isLicensed } from "./lib/license";
 import { FREE_DOWNLOAD_LIMIT, isRateLimited, recordDownload } from "./lib/rate-limit";
 import {
@@ -66,6 +66,24 @@ function makeId(url: string, tabId: number): string {
   return Math.abs(h).toString(36);
 }
 
+function hostname(rawUrl?: string): string | undefined {
+  if (!rawUrl) return undefined;
+  try {
+    return new URL(rawUrl).hostname.replace(/^www\./, "");
+  } catch {
+    return undefined;
+  }
+}
+
+function isIgnoredBySettings(v: DetectedVideo, settings: UserSettings): boolean {
+  const source = hostname(v.url);
+  const page = hostname(v.pageUrl);
+  return Boolean(
+    (source && settings.ignoredSourceHosts.includes(source)) ||
+      (page && settings.ignoredPageHosts.includes(page)),
+  );
+}
+
 function headerValue(
   headers: chrome.webRequest.HttpHeader[] | undefined,
   name: string,
@@ -88,12 +106,12 @@ async function resolveTabInfo(tabId: number): Promise<TabInfo> {
 }
 
 async function updateBadge(tabId: number): Promise<void> {
-  const videos = await getDetectedVideos(tabId);
+  const [videos, settings] = await Promise.all([getDetectedVideos(tabId), getSettings()]);
   // Match the popup's filtering — segments hidden when their parent
   // manifest is also detected — so the badge count matches what the
   // user actually sees in the popup. Without this, a 25-segment DASH
   // page reads "25" on the toolbar but "1 detected" in the popup.
-  const visible = filterCoveredByManifests(videos);
+  const visible = filterCoveredByManifests(videos).filter((v) => !isIgnoredBySettings(v, settings));
   const text = visible.length > 0 ? String(visible.length) : "";
   try {
     await chrome.action.setBadgeText({ tabId, text });
@@ -104,6 +122,15 @@ async function updateBadge(tabId: number): Promise<void> {
     // tab may have closed
   }
 }
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local" || !changes.settings) return;
+  void chrome.tabs.query({}).then((tabs) => {
+    for (const tab of tabs) {
+      if (tab.id !== undefined) void updateBadge(tab.id);
+    }
+  }).catch(() => undefined);
+});
 
 chrome.runtime.onInstalled.addListener((details) => {
   console.log("[cliphutch] background installed:", details.reason);

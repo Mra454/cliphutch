@@ -30,8 +30,13 @@ type BulkResult = {
   failed: number;
   message?: string;
 };
+
+type MediaGroup = {
+  primary: DetectedVideo;
+  alternates: DetectedVideo[];
+};
 import { getDetectedVideos } from "../lib/storage-session";
-import { DEFAULT_SETTINGS, getSettings, type UserSettings } from "../lib/storage-local";
+import { DEFAULT_SETTINGS, getSettings, setSettings, type UserSettings } from "../lib/storage-local";
 import { isLicensed, revalidateIfStale } from "../lib/license";
 import { FREE_DOWNLOAD_LIMIT, VIDEO_DOWNLOAD_HISTORY_KEY, getDownloadCount } from "../lib/rate-limit";
 import { CHECKOUT_URL, MIN_STILL_IMAGE_SIZE_BYTES, PRICE_USD } from "../lib/constants";
@@ -116,6 +121,77 @@ function badgeText(v: DetectedVideo): string {
   } catch {
     return "VIDEO";
   }
+}
+
+function hostname(rawUrl?: string): string | undefined {
+  if (!rawUrl) return undefined;
+  try {
+    return new URL(rawUrl).hostname.replace(/^www\./, "");
+  } catch {
+    return undefined;
+  }
+}
+
+function sourceLabel(v: DetectedVideo): string {
+  return hostname(v.url) ?? "unknown source";
+}
+
+function pageLabel(v: DetectedVideo): string | undefined {
+  return hostname(v.pageUrl);
+}
+
+function pathBucket(rawUrl: string): string {
+  try {
+    const u = new URL(rawUrl);
+    const parts = u.pathname.split("/").filter(Boolean);
+    return `${u.hostname}/${parts.slice(0, Math.max(0, parts.length - 1)).join("/")}`;
+  } catch {
+    return rawUrl;
+  }
+}
+
+function normalizedStem(v: DetectedVideo): string {
+  return displayName(v)
+    .toLowerCase()
+    .replace(/\.[a-z0-9]{1,5}$/i, "")
+    .replace(/\b(2160|1440|1080|720|540|480|360|240)p\b/g, "")
+    .replace(/\b(uhd|fhd|hd|sd|high|medium|low|source|main|video|audio)\b/g, "")
+    .replace(/[_\-. ]+/g, " ")
+    .trim();
+}
+
+function groupKey(v: DetectedVideo): string {
+  const page = v.pageUrl ? pathBucket(v.pageUrl) : "no-page";
+  const source = pathBucket(v.url);
+  const stem = normalizedStem(v) || source;
+  return [v.kind, page, source, stem].join("|");
+}
+
+function groupMedia(items: DetectedVideo[]): MediaGroup[] {
+  const buckets = new Map<string, DetectedVideo[]>();
+  for (const item of items) {
+    const key = item.kind === "hls" || item.kind === "dash" ? item.id : groupKey(item);
+    buckets.set(key, [...(buckets.get(key) ?? []), item]);
+  }
+  return [...buckets.values()]
+    .map((group) => {
+      const sorted = [...group].sort((a, b) => {
+        const sizeDelta = (b.sizeBytes ?? 0) - (a.sizeBytes ?? 0);
+        if (sizeDelta !== 0) return sizeDelta;
+        return b.detectedAt - a.detectedAt;
+      });
+      return { primary: sorted[0], alternates: sorted.slice(1) };
+    })
+    .sort((a, b) => b.primary.detectedAt - a.primary.detectedAt);
+}
+
+function isIgnoredBySettings(v: DetectedVideo, settings: UserSettings): boolean {
+  const source = hostname(v.url);
+  const page = hostname(v.pageUrl);
+  return Boolean(
+    (source && settings.ignoredSourceHosts.includes(source)) ||
+      (page && settings.ignoredPageHosts.includes(page)),
+  );
 }
 
 function canPreview(v: DetectedVideo): boolean {
@@ -288,6 +364,109 @@ function ImagePreview({ v }: { v: DetectedVideo }) {
   );
 }
 
+function downloadFormat(v: DetectedVideo, job: AnyJob): string {
+  if (job.source === "webm") return "MP4";
+  if (job.source === "dash") return "MP4";
+  if (job.source === "hls") return job.containerExt === ".ts" ? "TS" : "MP4";
+  return badgeText(v);
+}
+
+function DownloadSuccessRow({ v, job }: { v: DetectedVideo; job: AnyJob }) {
+  const [filename, setFilename] = useState<string | null>(null);
+  const downloadId = job.downloadId;
+
+  useEffect(() => {
+    let cancelled = false;
+    if (downloadId === undefined) {
+      setFilename(null);
+      return;
+    }
+    void chrome.downloads.search({ id: downloadId }).then((items) => {
+      if (cancelled) return;
+      const path = items[0]?.filename;
+      setFilename(path ? path.split(/[\\/]/).pop() ?? path : null);
+    }).catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [downloadId]);
+
+  return (
+    <div
+      style={{
+        marginTop: 6,
+        padding: "6px 8px",
+        border: "1px solid #bdd7c8",
+        borderRadius: 6,
+        background: "#f1f7f4",
+        display: "grid",
+        gridTemplateColumns: "1fr auto",
+        gap: 6,
+        alignItems: "center",
+      }}
+    >
+      <div style={{ minWidth: 0 }}>
+        <div style={{ color: "#244f3a", fontSize: 11, fontWeight: 650 }}>
+          Saved {downloadFormat(v, job)}
+        </div>
+        <div
+          title={filename ?? displayName(v)}
+          style={{
+            color: "#536156",
+            fontSize: 10,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {filename ?? displayName(v)}
+        </div>
+      </div>
+      {downloadId !== undefined ? (
+        <button onClick={() => chrome.downloads.show(downloadId)} style={buttonStyle}>
+          Show in folder
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+function Diagnostics({ v, job }: { v: DetectedVideo; job: AnyJob | null }) {
+  const notes: string[] = [];
+  if (isWebmDirectVideo(v)) {
+    notes.push(job?.source === "webm" && job.status === "complete" ? "WebM converted locally to MP4." : "WebM will be converted locally to MP4.");
+  }
+  if (v.kind === "dash") {
+    notes.push(job?.source === "dash" && job.status === "complete" ? "Separate audio/video merged into one MP4." : "DASH may use separate audio/video tracks.");
+  }
+  if (v.kind === "hls") {
+    if (job?.source === "hls" && job.status === "complete" && job.containerExt === ".mp4") {
+      notes.push("HLS segments merged into MP4.");
+    } else if (job?.source === "hls" && job.status === "complete" && job.containerExt === ".ts") {
+      notes.push("Saved as transport stream because this HLS layout cannot be remuxed to MP4.");
+    } else {
+      notes.push("HLS stream will be assembled locally.");
+    }
+  }
+  if (job && "errorCode" in job && job.errorCode === "ENCRYPTED") {
+    notes.push("This stream is encrypted; keys are not fetched.");
+  }
+  if (job && "errorCode" in job && job.errorCode === "DRM_PROTECTED") {
+    notes.push("This stream is DRM-protected and cannot be downloaded.");
+  }
+  if (job && "errorCode" in job && job.errorCode === "MIXED_CONTAINER_AUDIO") {
+    notes.push("This stream pairs fMP4 video with non-fMP4 audio.");
+  }
+  if (notes.length === 0) return null;
+  return (
+    <div style={{ ...noteBoxStyle, background: "#f7fbf8" }}>
+      {notes.map((note) => (
+        <div key={note}>{note}</div>
+      ))}
+    </div>
+  );
+}
+
 function bulkResultText(result: BulkResult): string {
   const parts = [
     `Started ${result.started}`,
@@ -331,14 +510,21 @@ function ShelfTab({
 
 function VideoCard({
   v,
+  alternates,
   tabId,
   settings,
+  onIgnoreSource,
+  onIgnorePage,
 }: {
   v: DetectedVideo;
+  alternates: DetectedVideo[];
   tabId: number;
   settings: UserSettings;
+  onIgnoreSource: (host: string) => void;
+  onIgnorePage: (host: string) => void;
 }) {
   const [showFull, setShowFull] = useState(settings.showFullUrlsByDefault);
+  const [showAlternates, setShowAlternates] = useState(false);
   const [job, setJob] = useState<AnyJob | null>(null);
   const [directProgress, setDirectProgress] = useState<{ received: number; total?: number } | null>(null);
   const [immediateError, setImmediateError] = useState<string | null>(null);
@@ -495,15 +681,6 @@ function VideoCard({
 
   const onCancelPicker = () => setPicker(null);
 
-  const onShowInFolder = () => {
-    if (!job) return;
-    const id =
-      job.source === "direct"
-        ? job.downloadId
-        : job.downloadId;
-    if (id !== undefined) chrome.downloads.show(id);
-  };
-
   const onCancelHls = () => {
     if (job?.source !== "hls") return;
     void chrome.runtime.sendMessage({ type: "hls-download-cancel", jobId: job.jobId }).catch(() => {});
@@ -643,14 +820,7 @@ function VideoCard({
         );
       }
       if (job.status === "complete") {
-        return (
-          <div style={{ marginTop: 6, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
-            <span style={{ color: "#2c5e2c", fontSize: 11 }}>Saved</span>
-            <button onClick={onShowInFolder} style={buttonStyle}>
-              Show in folder
-            </button>
-          </div>
-        );
+        return <DownloadSuccessRow v={v} job={job} />;
       }
       return (
         <>
@@ -690,25 +860,7 @@ function VideoCard({
         );
       }
       if (job.status === "complete") {
-        const savedNote =
-          job.containerExt === ".ts"
-            ? "Saved as .ts file."
-            : job.containerExt === ".mp4"
-              ? "Saved as MP4."
-              : "Saved.";
-        return (
-          <div style={{ marginTop: 6 }}>
-            <div style={noteBoxStyle}>
-              {savedNote}
-            </div>
-            <div style={{ marginTop: 6, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span style={{ color: "#2c5e2c", fontSize: 11 }}>Saved</span>
-              <button onClick={onShowInFolder} style={buttonStyle}>
-                Show in folder
-              </button>
-            </div>
-          </div>
-        );
+        return <DownloadSuccessRow v={v} job={job} />;
       }
       if (job.status === "cancelled") {
         return (
@@ -756,17 +908,7 @@ function VideoCard({
         );
       }
       if (job.status === "complete") {
-        return (
-          <div style={{ marginTop: 6, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
-            <span style={{ color: "#2c5e2c", fontSize: 11 }}>Saved as MP4</span>
-            <button
-              onClick={() => job.downloadId !== undefined && chrome.downloads.show(job.downloadId)}
-              style={buttonStyle}
-            >
-              Show in folder
-            </button>
-          </div>
-        );
+        return <DownloadSuccessRow v={v} job={job} />;
       }
       if (job.status === "cancelled") {
         return (
@@ -819,17 +961,7 @@ function VideoCard({
       );
     }
     if (job.status === "complete") {
-      return (
-        <div style={{ marginTop: 6, display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
-          <span style={{ color: "#2c5e2c", fontSize: 11 }}>Saved</span>
-          <button
-            onClick={() => job.downloadId !== undefined && chrome.downloads.show(job.downloadId)}
-            style={buttonStyle}
-          >
-            Show in folder
-          </button>
-        </div>
-      );
+      return <DownloadSuccessRow v={v} job={job} />;
     }
     if (job.status === "cancelled") {
       return (
@@ -853,6 +985,9 @@ function VideoCard({
       </>
     );
   }
+
+  const sourceHost = hostname(v.url);
+  const pageHost = pageLabel(v);
 
   return (
     <div
@@ -894,6 +1029,89 @@ function VideoCard({
       {fmtBytes(v.sizeBytes) !== undefined && (
         <div style={{ color: "#6f7c72", fontSize: 11, marginTop: 2 }}>{fmtBytes(v.sizeBytes)}</div>
       )}
+      <div
+        style={{
+          display: "flex",
+          gap: 5,
+          flexWrap: "wrap",
+          alignItems: "center",
+          marginTop: 5,
+          color: "#6f7c72",
+          fontSize: 10,
+        }}
+      >
+        <span title={v.url}>source: {sourceLabel(v)}</span>
+        {pageHost ? <span>page: {pageHost}</span> : null}
+        {sourceHost ? (
+          <button
+            onClick={() => onIgnoreSource(sourceHost)}
+            title={`Hide media loaded from ${sourceHost}`}
+            style={{ ...buttonStyle, padding: "1px 5px", fontSize: 10 }}
+          >
+            Hide source
+          </button>
+        ) : null}
+        {pageHost ? (
+          <button
+            onClick={() => onIgnorePage(pageHost)}
+            title={`Ignore pages on ${pageHost}`}
+            style={{ ...buttonStyle, padding: "1px 5px", fontSize: 10 }}
+          >
+            Ignore site
+          </button>
+        ) : null}
+      </div>
+      {alternates.length > 0 ? (
+        <div style={{ ...noteBoxStyle, background: "#f7fbf8" }}>
+          <button
+            onClick={() => setShowAlternates((s) => !s)}
+            style={{ ...buttonStyle, padding: "2px 6px", fontSize: 10, marginRight: 6 }}
+          >
+            {showAlternates ? "Hide" : "Show"} {alternates.length} alternate{alternates.length === 1 ? "" : "s"}
+          </button>
+          <span>
+            Similar assets from this source are grouped to keep the shelf tidy.
+          </span>
+          {showAlternates ? (
+            <div style={{ marginTop: 5 }}>
+              {alternates.map((alt) => (
+                <div
+                  key={alt.id}
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "1fr auto auto",
+                    gap: 5,
+                    alignItems: "center",
+                    padding: "3px 0",
+                    borderTop: "1px solid #dfeae3",
+                  }}
+                >
+                  <span
+                    title={alt.url}
+                    style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                  >
+                    {displayName(alt)}
+                  </span>
+                  <span style={{ color: "#758277" }}>{fmtBytes(alt.sizeBytes) ?? badgeText(alt)}</span>
+                  <button
+                    onClick={() => {
+                      chrome.runtime.sendMessage({
+                        type: "download",
+                        tabId,
+                        videoId: alt.id,
+                      }).catch(() => undefined);
+                    }}
+                    style={{ ...buttonStyle, padding: "2px 6px", fontSize: 10 }}
+                  >
+                    Download
+                  </button>
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      <Diagnostics v={v} job={job} />
       <VideoPreview v={v} />
       <ImagePreview v={v} />
       <div style={{ color: "#59675d", fontSize: 10, wordBreak: "break-all", marginTop: 7 }}>
@@ -975,6 +1193,9 @@ function Popup() {
     ) => {
       if (area !== "local") return;
       if (changes[VIDEO_DOWNLOAD_HISTORY_KEY] || changes["license"]) void refreshUsage();
+      if (changes["settings"]) {
+        void getSettings().then(setSettingsState);
+      }
     };
     chrome.storage.onChanged.addListener(listener);
     return () => chrome.storage.onChanged.removeListener(listener);
@@ -1013,10 +1234,31 @@ function Popup() {
   // hidden from the popup; see lib/manifest-coverage.ts. The full
   // detection list stays in storage so badge counts stay accurate; only
   // the user-facing list is filtered.
-  const visibleMedia = filterCoveredByManifests(videos);
+  const manifestFilteredMedia = filterCoveredByManifests(videos);
+  const visibleMedia = manifestFilteredMedia.filter((v) => !isIgnoredBySettings(v, settings));
+  const hiddenByDomainCount = manifestFilteredMedia.length - visibleMedia.length;
   const visibleVideos = visibleMedia.filter((v) => !isStillImage(v));
   const visibleStills = visibleMedia.filter(isStillImage);
   const activeMedia = mediaFilter === "videos" ? visibleVideos : visibleStills;
+  const activeGroups = groupMedia(activeMedia);
+
+  async function ignoreSourceHost(host: string) {
+    if (settings.ignoredSourceHosts.includes(host)) return;
+    await setSettings({
+      ignoredSourceHosts: [...settings.ignoredSourceHosts, host].sort(),
+    });
+  }
+
+  async function ignorePageHost(host: string) {
+    if (settings.ignoredPageHosts.includes(host)) return;
+    await setSettings({
+      ignoredPageHosts: [...settings.ignoredPageHosts, host].sort(),
+    });
+  }
+
+  async function clearDomainFilters() {
+    await setSettings({ ignoredSourceHosts: [], ignoredPageHosts: [] });
+  }
 
   async function downloadAll() {
     if (tabId === null) return;
@@ -1038,7 +1280,7 @@ function Popup() {
       (j) => j.tabId === tabId && isActive(j.status),
     );
 
-    for (const v of activeMedia) {
+    for (const v of activeGroups.map((g) => g.primary)) {
       const matches = [
         ...Object.values(directs).filter((j) => j.videoId === v.id && j.tabId === tabId),
         ...Object.values(hlses).filter((j) => j.videoId === v.id && j.tabId === tabId),
@@ -1092,7 +1334,7 @@ function Popup() {
         </p>
       );
     }
-    if (activeMedia.length === 0) {
+    if (activeGroups.length === 0) {
       if (mediaFilter === "stills") {
         return (
           <p style={{ margin: "10px 0", color: "#536156", fontSize: 10.5, lineHeight: 1.35 }}>
@@ -1102,8 +1344,16 @@ function Popup() {
       }
       return <Empty />;
     }
-    return activeMedia.map((v) => (
-      <VideoCard key={v.id} v={v} tabId={tabId} settings={settings} />
+    return activeGroups.map((group) => (
+      <VideoCard
+        key={group.primary.id}
+        v={group.primary}
+        alternates={group.alternates}
+        tabId={tabId}
+        settings={settings}
+        onIgnoreSource={(host) => void ignoreSourceHost(host)}
+        onIgnorePage={(host) => void ignorePageHost(host)}
+      />
     ));
   }
 
@@ -1145,7 +1395,7 @@ function Popup() {
           >
             {licensed ? "Licensed" : `${remaining}/${FREE_DOWNLOAD_LIMIT} left`}
           </span>
-          {activeMedia.length > 0 && (
+          {activeGroups.length > 0 && (
             <button
               onClick={() => void downloadAll()}
               title={`Download this ${mediaFilter === "videos" ? "video" : "still"} shelf (skips in-flight and already-saved items)`}
@@ -1169,7 +1419,7 @@ function Popup() {
         <div
           style={{
             marginTop: 8,
-            padding: activeMedia.length > 0 ? "8px 10px" : "6px 8px",
+            padding: activeGroups.length > 0 ? "8px 10px" : "6px 8px",
             background: "#fff1ed",
             border: "1px solid #efb6aa",
             borderRadius: 6,
@@ -1179,9 +1429,9 @@ function Popup() {
             gap: 8,
           }}
         >
-          <div style={{ fontSize: activeMedia.length > 0 ? 11 : 10.5, color: "#7a1f1a", lineHeight: 1.25 }}>
+          <div style={{ fontSize: activeGroups.length > 0 ? 11 : 10.5, color: "#7a1f1a", lineHeight: 1.25 }}>
             <strong>Daily limit reached.</strong>{" "}
-            {activeMedia.length > 0
+            {activeGroups.length > 0
               ? `You've used all ${FREE_DOWNLOAD_LIMIT} free video downloads in the last 24 hours. Get unlimited video downloads with a one-time payment of $${PRICE_USD}.`
               : `Free video downloads reset within 24 hours.`}
           </div>
@@ -1193,7 +1443,7 @@ function Popup() {
               background: "#2c5e2c",
               color: "#fff",
               borderRadius: 6,
-              padding: activeMedia.length > 0 ? "4px 10px" : "3px 8px",
+              padding: activeGroups.length > 0 ? "4px 10px" : "3px 8px",
               cursor: "pointer",
               fontSize: 11,
               fontWeight: 600,
@@ -1224,6 +1474,28 @@ function Popup() {
           }}
         />
       </div>
+      {hiddenByDomainCount > 0 ? (
+        <div
+          style={{
+            marginTop: 8,
+            padding: "6px 8px",
+            borderRadius: 6,
+            border: "1px solid #d7c8a7",
+            background: "#fffaf0",
+            color: "#6b5428",
+            fontSize: 10.5,
+            display: "flex",
+            justifyContent: "space-between",
+            gap: 8,
+            alignItems: "center",
+          }}
+        >
+          <span>{hiddenByDomainCount} item{hiddenByDomainCount === 1 ? "" : "s"} hidden by domain filters.</span>
+          <button onClick={() => void clearDomainFilters()} style={{ ...buttonStyle, padding: "2px 6px", fontSize: 10 }}>
+            Show all
+          </button>
+        </div>
+      ) : null}
       {bulkResult ? (
         <div
           style={{
