@@ -40,6 +40,8 @@ export type HlsJob = {
   // Resolution/quality label for the picked variant (e.g. "1080p"), used to
   // qualify the saved filename.
   variantLabel?: string;
+  // Set once the free-tier quota has been charged for this job's completion.
+  quotaRecorded?: boolean;
   errorCode?: string;
   errorMessage?: string;
 };
@@ -60,6 +62,8 @@ export type DashJob = {
   // Resolution/quality label for the picked variant (e.g. "1080p"), used to
   // qualify the saved filename.
   variantLabel?: string;
+  // Set once the free-tier quota has been charged for this job's completion.
+  quotaRecorded?: boolean;
   errorCode?: string;
   errorMessage?: string;
 };
@@ -74,6 +78,8 @@ export type WebmTranscodeJob = {
   status: StreamJobStatus;
   progress: { ratio: number; message?: string };
   downloadId?: number;
+  // Set once the free-tier quota has been charged for this job's completion.
+  quotaRecorded?: boolean;
   errorCode?: string;
   errorMessage?: string;
 };

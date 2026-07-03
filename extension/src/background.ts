@@ -300,6 +300,11 @@ type DownloadJob = {
   kind: MediaKind;
   startedAt: number;
   status: DownloadStatus;
+  // Whether this download counts against the free-tier quota (videos do,
+  // stills do not) and whether it has already been counted, so the quota is
+  // charged once on actual completion rather than at kickoff.
+  countsAgainstQuota?: boolean;
+  quotaRecorded?: boolean;
   errorMessage?: string;
 };
 
@@ -454,8 +459,10 @@ async function handleDownloadRequest(req: DownloadRequest): Promise<DownloadResp
       kind: video.kind,
       startedAt: Date.now(),
       status: "in_progress",
+      // Charged on actual completion (handleDownloadChange), not at kickoff, so
+      // an interrupted download does not consume a free-tier credit.
+      countsAgainstQuota: countsAgainstVideoLimit,
     });
-    if (countsAgainstVideoLimit) await recordDownload();
     return { ok: true, downloadId };
   } catch (err) {
     return {
@@ -562,13 +569,16 @@ async function applyStreamDownloadTerminal(
   downloadId: number,
   state: "complete" | "interrupted",
 ): Promise<boolean> {
+  let chargeQuota = false;
+
   const hls = Object.values(await getHlsJobs()).find((j) => j.downloadId === downloadId);
   if (hls) {
     await updateHlsJob(hls.jobId, (j) => {
       if (j.status === "complete" || j.status === "cancelled") return false;
-      applyTerminalFields(j, state);
+      chargeQuota = applyTerminalFields(j, state);
     });
     await removeHeaderReplayRule(`hls:${hls.jobId}`);
+    if (chargeQuota) await recordDownload();
     void chrome.runtime.sendMessage({ type: "hls-download-revoke", jobId: hls.jobId }).catch(() => {});
     return true;
   }
@@ -577,9 +587,10 @@ async function applyStreamDownloadTerminal(
   if (webm) {
     await updateWebmTranscodeJob(webm.jobId, (j) => {
       if (j.status === "complete" || j.status === "cancelled") return false;
-      applyTerminalFields(j, state);
+      chargeQuota = applyTerminalFields(j, state);
     });
     await removeHeaderReplayRule(`webm:${webm.jobId}`);
+    if (chargeQuota) await recordDownload();
     void chrome.runtime.sendMessage({ type: "webm-transcode-revoke", jobId: webm.jobId }).catch(() => {});
     return true;
   }
@@ -588,9 +599,10 @@ async function applyStreamDownloadTerminal(
   if (dash) {
     await updateDashJob(dash.jobId, (j) => {
       if (j.status === "complete" || j.status === "cancelled") return false;
-      applyTerminalFields(j, state);
+      chargeQuota = applyTerminalFields(j, state);
     });
     await removeHeaderReplayRule(`dash:${dash.jobId}`);
+    if (chargeQuota) await recordDownload();
     void chrome.runtime.sendMessage({ type: "dash-download-revoke", jobId: dash.jobId }).catch(() => {});
     return true;
   }
@@ -598,19 +610,27 @@ async function applyStreamDownloadTerminal(
   return false;
 }
 
+// Applies the terminal fields to a stream job and returns true when the
+// free-tier quota should be charged (first completion only). Interrupted saves
+// never charge.
 function applyTerminalFields(
-  job: { status: string; errorMessage?: string; errorCode?: string },
+  job: { status: string; errorMessage?: string; errorCode?: string; quotaRecorded?: boolean },
   state: "complete" | "interrupted",
-): void {
+): boolean {
   if (state === "complete") {
     job.status = "complete";
     delete job.errorMessage;
     delete job.errorCode;
-  } else {
-    job.status = "error";
-    job.errorMessage = DIRECT_DOWNLOAD_FAILURE_MESSAGE;
-    job.errorCode = "SAVE_INTERRUPTED";
+    if (!job.quotaRecorded) {
+      job.quotaRecorded = true;
+      return true;
+    }
+    return false;
   }
+  job.status = "error";
+  job.errorMessage = DIRECT_DOWNLOAD_FAILURE_MESSAGE;
+  job.errorCode = "SAVE_INTERRUPTED";
+  return false;
 }
 
 // The Chrome download for a just-saved stream blob can finish before
@@ -634,15 +654,21 @@ async function handleDownloadChange(delta: chrome.downloads.DownloadDelta): Prom
 
   const jobs = await getDownloadJobs();
   if (jobs[String(delta.id)]) {
+    let chargeQuota = false;
     await updateJobRecord<DownloadJob>(DOWNLOAD_JOBS_KEY, String(delta.id), (job) => {
       if (state === "complete") {
         job.status = "complete";
         delete job.errorMessage;
+        if (job.countsAgainstQuota && !job.quotaRecorded) {
+          job.quotaRecorded = true;
+          chargeQuota = true;
+        }
       } else {
         job.status = "interrupted";
         job.errorMessage = DIRECT_DOWNLOAD_FAILURE_MESSAGE;
       }
     });
+    if (chargeQuota) await recordDownload();
     return;
   }
 
@@ -868,7 +894,6 @@ async function handleHlsBlobReady(msg: {
       j.containerExt = msg.containerExt;
       j.status = "saving";
     });
-    await recordDownload();
     await reconcileStreamSave(downloadId);
   } catch (err) {
     await updateHlsJob(msg.jobId, (j) => {
@@ -946,7 +971,6 @@ async function handleWebmTranscodeBlobReady(msg: {
       j.downloadId = downloadId;
       j.status = "saving";
     });
-    await recordDownload();
     await reconcileStreamSave(downloadId);
   } catch (err) {
     await updateWebmTranscodeJob(msg.jobId, (j) => {
@@ -1122,7 +1146,6 @@ async function handleDashBlobReady(msg: {
       j.downloadId = downloadId;
       j.status = "saving";
     });
-    await recordDownload();
     await reconcileStreamSave(downloadId);
   } catch (err) {
     await updateDashJob(msg.jobId, (j) => {
