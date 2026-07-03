@@ -521,6 +521,10 @@ function VideoCard({
     | { state: "ready"; variants: VariantOption[]; durationSec?: number; sizeCapBytes: number }
     | null
   >(null);
+  // The variant last handed to sendDownload, so a SIZE_CAP failure can be
+  // retried with the cap bypassed without re-picking. HLS size estimates are
+  // unknown up front, so the cap is only hit mid-fetch.
+  const [lastVariant, setLastVariant] = useState<VariantOption | undefined>(undefined);
   const groupedAssets = [v, ...alternates];
   const selected = groupedAssets.find((item) => item.id === selectedId) ?? v;
 
@@ -528,6 +532,7 @@ function VideoCard({
     setJob(null);
     setPicker(null);
     setImmediateError(null);
+    setLastVariant(undefined);
   }, [v.id]);
 
   useEffect(() => {
@@ -623,6 +628,7 @@ function VideoCard({
 
   const sendDownload = async (variant?: VariantOption, bypassSizeCap?: boolean) => {
     setPicker(null);
+    setLastVariant(variant);
     try {
       const res = (await chrome.runtime.sendMessage({
         type: "download",
@@ -682,6 +688,32 @@ function VideoCard({
   };
 
   const onCancelPicker = () => setPicker(null);
+
+  // Shared error UI for HLS/DASH jobs. On a SIZE_CAP failure, offer a one-click
+  // retry that bypasses the cap with the same variant, since the size is only
+  // known once the download exceeds it mid-fetch.
+  const renderStreamError = (
+    failed: { errorMessage?: string; errorCode?: string },
+    fallbackMsg: string,
+  ) => (
+    <>
+      <div style={errorBoxStyle}>
+        {failed.errorMessage ?? fallbackMsg}
+        {failed.errorCode ? <span style={{ opacity: 0.6 }}> [{failed.errorCode}]</span> : null}
+      </div>
+      {failed.errorCode === "SIZE_CAP" ? (
+        <button
+          onClick={() => void sendDownload(lastVariant, true)}
+          style={{ ...primaryButtonStyle, marginTop: 6 }}
+        >
+          Download anyway (over the size cap)
+        </button>
+      ) : null}
+      <button onClick={onDownload} style={{ ...buttonStyle, marginTop: 6 }}>
+        Retry
+      </button>
+    </>
+  );
 
   const onCancelHls = () => {
     if (job?.source !== "hls") return;
@@ -874,17 +906,7 @@ function VideoCard({
           </>
         );
       }
-      return (
-        <>
-          <div style={errorBoxStyle}>
-            {job.errorMessage ?? "Download failed."}
-            {job.errorCode ? <span style={{ opacity: 0.6 }}> [{job.errorCode}]</span> : null}
-          </div>
-          <button onClick={onDownload} style={{ ...buttonStyle, marginTop: 6 }}>
-            Retry
-          </button>
-        </>
-      );
+      return renderStreamError(job, "Download failed.");
     }
 
     if (job.source === "webm") {
@@ -975,17 +997,7 @@ function VideoCard({
         </>
       );
     }
-    return (
-      <>
-        <div style={errorBoxStyle}>
-          {job.errorMessage ?? "Download failed."}
-          {job.errorCode ? <span style={{ opacity: 0.6 }}> [{job.errorCode}]</span> : null}
-        </div>
-        <button onClick={onDownload} style={{ ...buttonStyle, marginTop: 6 }}>
-          Retry
-        </button>
-      </>
-    );
+    return renderStreamError(job, "Download failed.");
   }
 
   const sourceHost = hostname(selected.url);
