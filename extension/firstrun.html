@@ -86,9 +86,11 @@
       list videos and still images it can detect. Click the toolbar icon to see
       what's been detected on the current tab, including direct-media previews
       loaded from the original source URL; click <strong>Download</strong>
-      to save a file via Chrome's download manager or locally convert a WebM
-      file to MP4 before saving. Detection, preview display, conversion,
-      and downloading happen on your device. The free tier never contacts a
+      to save a file via Chrome's download manager, assemble an HLS or DASH
+      stream into one MP4, or locally convert a WebM file to MP4 before saving.
+      For streams that deliver audio and video separately, the extension fetches
+      both and combines them into one MP4 on your device. Detection, preview
+      display, conversion, and downloading happen on your device. The free tier never contacts a
       ClipHutch server. If you activate a license, the extension contacts the
       ClipHutch license-validation endpoint to verify your key, and no other
       server.
@@ -108,8 +110,10 @@
         <tr>
           <th><code>webRequest</code></th>
           <td>
-            Observes network requests so the extension can detect media URLs as
-            the page loads them. All processing happens on your device.
+            Observes network requests, including the request headers the page
+            sent, so the extension can detect media URLs as the page loads them
+            and later replay those headers on its own download fetches. All
+            processing happens on your device.
           </td>
         </tr>
         <tr>
@@ -126,8 +130,10 @@
         <tr>
           <th><code>offscreen</code></th>
           <td>
-            Used briefly to assemble HLS or DASH video segments or locally
-            convert WebM direct files into downloadable MP4 files.
+            Used briefly to assemble HLS or DASH audio and video segments,
+            combine separate audio and video tracks, repackage MPEG-TS
+            segments into MP4, or locally convert WebM direct files into
+            downloadable MP4 files.
           </td>
         </tr>
         <tr>
@@ -136,7 +142,8 @@
             When you click Download on an HLS or DASH stream that requires
             specific request headers (such as a Referer the page sent), a
             temporary, session-scoped browser rule attaches those captured
-            headers to the extension's own segment fetches. The rule is
+            headers to the extension's own fetches: the video segments, the
+            separate audio rendition, and any byte-range requests. The rule is
             removed when the download completes, fails, or the tab closes.
             This is the strictly-weakest declarative-net-request variant:
             it cannot block or redirect requests, only modify headers, and
