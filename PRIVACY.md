@@ -48,7 +48,7 @@ The use of information received from Google APIs will adhere to the Chrome Web S
 
 ## 6. Open-source notices
 
-ClipHutch includes @ffmpeg/core for local WebM conversion. @ffmpeg/core is licensed under GPL-2.0-or-later. The extension package includes the GPL license text, third-party notices, and a source-code offer. Corresponding source for this release is published at <https://github.com/Mra454/cliphutch/releases/tag/cliphutch-v0.1.1-cws-submit-2026-05-14>. You can also request the source by emailing <licenses@cliphutch.com>.
+ClipHutch includes @ffmpeg/core for local WebM conversion. @ffmpeg/core is licensed under GPL-2.0-or-later. The extension package includes the GPL license text, third-party notices, and a source-code offer. Corresponding source for this release is published at <https://github.com/Mra454/cliphutch/releases/tag/cliphutch-v0.1.2-cws-submit-2026-07-03>. You can also request the source by emailing <licenses@cliphutch.com>.
 
 ## 7. Permissions explained
 
