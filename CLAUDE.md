@@ -78,32 +78,32 @@ Open work to do during/after the review window:
 - **M5** — Stale docs in `cloudflare/README.md` (mentions `licenses@cliphutch.app`; "Phase 3 stub" claim is wrong).
 - **Trader verification** — Google Payments verification submitted 2026-04-28 with Vismu LLC Articles of Organization; pending. Listing will display "non-trader" until Google approves.
 
-## Option C work-in-progress — resumed 2026-05-14
+## Option C + product-improvement work — branch not yet merged
 
-Active branch: **`option-c-stage-1-separate-audio`** (pushed). Two PRs not yet merged.
+Active branch: **`option-c-stage-1-separate-audio`** (pushed, ~21 commits ahead of master, **no PRs open**). Goal was: download a single playable MP4 containing the selected video variant plus the default audio rendition for separate-audio HLS (Squarespace, Apple advanced fMP4, modern Vimeo non-DRM, Wistia). That shipped, then a larger product-improvement pass (2026-07-02/03) landed on the same branch off a 4-agent audit + Codex-reviewed plan.
 
-Goal: download a single playable MP4 containing the selected video variant plus the default audio rendition for separate-audio HLS (Squarespace, Apple advanced fMP4, modern Vimeo non-DRM, Wistia, etc.).
+**Shipped (all committed, 295 tests pass, build + audit clean):**
 
-Shipped on this branch (3 commits past master's last open PR `fmp4-hls-stream-labels`):
-
-| Commit | What | Sites unlocked |
+| Area | Commits | What |
 |---|---|---|
-| `02fb183` | **Stage 1** — separate-audio fMP4 + fMP4. `parseMasterVariants` no longer filters separate-audio variants; resolves `audioRenditionUri`. `downloadHls` accepts `audioUrl`, fetches video + audio in parallel, calls `muxFmp4(video, audio)`. New `MixedContainerAudioError` for fMP4 video + non-fMP4 audio. | Mux `tos_ismc`, modern Vimeo non-DRM |
-| `178a184` | **Stage 2A** — byte-range segment fetch. New `fetchByteRange()`. `detectFmp4Init` returns `{uri, byterange?}`. `validateVariant` drops the byterange throw. m3u8-parser already resolves implicit `EXT-X-BYTERANGE` offsets. New `ByteRangeUnsupportedError` (server returned 200 to Range), `ByteRangeOutOfBoundsError` (416). `ByteRangeError` kept for DASH's preemptive refusal. | Apple `img_bipbop_adv_example_fmp4/master.m3u8` |
-| uncommitted | **Stage 2B/2C** — `mux.js` compatibility spike succeeded; added `mux.js`, `transmuxTsAudioToFmp4()`, and the mixed fMP4-video + MPEG-TS-audio path. Real TS fixture test proves AAC audio becomes parseable audio fMP4. | Squarespace-shape separate MPEG-TS audio |
+| Stage 1 / 2A | `02fb183`, `178a184` | separate-audio fMP4 + fMP4 (`muxFmp4`, `MixedContainerAudioError`); byte-range segment fetch (`fetchByteRange`, `ByteRange*Error`) |
+| Stage 2B/2C | inside `cbd2b1e` (5/14 v0.1.1 resubmission) | `mux.js`, `transmuxTsAudioToFmp4()`, mixed fMP4-video + MPEG-TS-audio path |
+| Naming (Track A) | `6be9b5d`, `d96df5d` | machine-noise demotion in `lib/filename.ts` (hashes/UUIDs/camera/`hash_res`/generic-manifest stems lose to page title); `"auto"` FilenameTemplate default; honors the Options filenameTemplate setting; host+date fallback; resolution qualifier; popup preview = saved name |
+| Reliability (Track C) | `315fddc`, `ce9505c`, `8cf6493` | `lib/session-jobs` serialized job writes + terminal guards (stuck-"running" fix); segment pools abort siblings on first failure; lost-completion reconcile; quota charged once on completion, not kickoff |
+| Recovery (B2) | `b36b85c`, `2d180a0`, `e31e447`, `60bbfd6` | redirect-resolved URL classification; per-tab `addOrUpdateVideo` mutex; `RawAacAudioError` ADTS sniff; WebM DNR header replay; SIZE_CAP "Download anyway"; captured headers persisted to `chrome.storage.session` (`lib/captured-headers`) + deterministic FNV-1a rule IDs surviving SW restart |
+| Disclosure (Stage 2D) | `782125f` (+ `fa33894` in cliphutch-site, **not deployed**) | PRIVACY/PERMISSIONS/firstrun + site privacy.html cover separate-audio fetch, byte-range, MPEG-TS repackaging, header-replay scope, captured-header storage; GPL tag → v0.1.1 |
+| Upgrade UX | `699df43` | "Already have a key?" link in the at-limit banner |
 
-Stages 1, 2A, 2B, and 2C are **unverified end-to-end.** Tests pass, build clean, audit PASS, but no real browser smoke test ran. Combined smoke gate is next.
+**Smoke gate: declined by Mikey 2026-07-03; proceeding as if cleared.** Pre-flight only: Mux `tos_ismc` and Apple `img_bipbop_adv_example_fmp4` manifests fetched via browser, confirmed live and exactly the Stage 1 / Stage 1+2A shapes. Browser automation can't load the unpacked ext, drive the popup, or hear audio, so these paths are **logic-verified + unit-tested but NOT browser-smoked** — say so if it matters.
 
-### What's next (in order)
+Checkout verified live 2026-07-03: `CHECKOUT_URL` (`buy.stripe.com/8x29ATcsIdsW3V31wUfw400`) → real Stripe page, Vismu LLC, "ClipHutch License $35 one-time, up to 5 devices" — matches in-extension copy.
 
-1. **Smoke gate** (~30 min, requires user). Three URLs:
-   - Mux `tos_ismc` (validates Stage 1)
-   - Apple `img_bipbop_adv_example_fmp4` (validates Stage 1 + 2A together)
-   - Real Squarespace page (validates Stage 1 + 2A + 2C together — the actual reported failure case)
-   Plus regression: Cloudflare Stream, MPEG-TS embedded.
-2. **Stage 2D — privacy + permissions copy** (~1 hour). Update `PRIVACY.md`, `PERMISSIONS.md`, `extension/firstrun.html` together to mention separate-audio fetching and mixed-container muxing. Mirror to `~/projects/cliphutch-site/public/privacy.html`. Drop more `v1` framing if any remains.
-3. **Codex adversarial review** of the combined Stage 1 + 2A + 2C diff before merge. See `~/.claude/projects/-Users-mikey/memory/feedback_codex_adversarial_review_cycle.md`.
-4. **PR + merge.** Single Option C PR covering Stages 1, 2A, 2C, 2D.
+### What's next (needs Mikey or deferred)
+
+1. **Merge** — needs go-ahead (no push/PR without it). Single PR for the whole branch.
+2. **Deploy site privacy** — `fa33894` in cliphutch-site is local only; `npx wrangler pages deploy public --project-name cliphutch-site`.
+3. **Track D worker fixes** (deferred by Mikey — Stripe/worker side): device-lockout `POST /deactivate` + stale-eviction (the checkout promises "5 devices" but reinstalls burn slots permanently), partial-refund guard, `[observability]`, route-aware CORS. Separate branch off master; needs `@cloudflare/vitest-pool-workers` install + deploy OK.
+4. **Optional:** B3 stills (video posters, CSS bg-images); full raw-ADTS→fMP4 muxing (currently accurate error only); UX batch (direct-download cancel, rate-limit reset time, host-aware empty state); AES-128 spike (post-0.1.2); CI/typecheck gate (M3 — `tsc` has ~35 pre-existing DOM-lib errors, needs tsconfig split first).
 
 ### Known concerns parked
 
