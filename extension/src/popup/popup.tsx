@@ -1459,7 +1459,24 @@ function Popup() {
             <strong>Daily limit reached.</strong>{" "}
             {activeGroups.length > 0
               ? `You've used all ${FREE_DOWNLOAD_LIMIT} free video downloads in the last 24 hours. Get unlimited video downloads with a one-time payment of $${PRICE_USD}.`
-              : `Free video downloads reset within 24 hours.`}
+              : `Free video downloads reset within 24 hours.`}{" "}
+            <button
+              type="button"
+              onClick={() => chrome.runtime.openOptionsPage()}
+              style={{
+                background: "none",
+                border: "none",
+                padding: 0,
+                margin: 0,
+                color: "#7a1f1a",
+                textDecoration: "underline",
+                fontSize: "inherit",
+                fontWeight: 600,
+                cursor: "pointer",
+              }}
+            >
+              Already have a key?
+            </button>
           </div>
           <button
             onClick={onUpgrade}
