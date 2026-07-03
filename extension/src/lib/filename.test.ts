@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { inferFilename, parseContentDisposition } from "./filename";
+import { inferFilename, parseContentDisposition, looksLikeMachineName } from "./filename";
 import type { DetectedVideo } from "../types";
 
 const mk = (partial: Partial<DetectedVideo>): DetectedVideo => ({
@@ -10,7 +10,9 @@ const mk = (partial: Partial<DetectedVideo>): DetectedVideo => ({
   ...partial,
 });
 
-describe("inferFilename — priority chain", () => {
+const DATE = /\d{4}-\d{2}-\d{2}/;
+
+describe("inferFilename — priority chain (auto)", () => {
   it("uses Content-Disposition filename when present", () => {
     expect(
       inferFilename(mk({ contentDisposition: 'attachment; filename="server-named.mp4"' })),
@@ -21,17 +23,17 @@ describe("inferFilename — priority chain", () => {
     expect(inferFilename(mk({ url: "https://a/v/movie.mp4" }))).toBe("movie.mp4");
   });
 
-  it("falls back to fallback name when URL has no path", () => {
+  it("falls back to host+date when URL has no path", () => {
     const out = inferFilename(mk({ url: "https://a.example" }));
-    expect(out).toMatch(/^video-.*\.mp4$/);
+    expect(out).toMatch(new RegExp(`^a-example-${DATE.source}\\.mp4$`));
   });
 
-  it("uses still fallback name and extension for images with no basename", () => {
+  it("uses host+date and image extension for images with no basename", () => {
     const out = inferFilename(mk({ kind: "image", url: "https://a.example" }));
-    expect(out).toMatch(/^still-.*\.jpg$/);
+    expect(out).toMatch(new RegExp(`^a-example-${DATE.source}\\.jpg$`));
   });
 
-  it("hls: prefers pageTitle over manifest-shaped basename", () => {
+  it("hls: prefers pageTitle over manifest-shaped basename, mp4 container", () => {
     expect(
       inferFilename(
         mk({
@@ -40,7 +42,7 @@ describe("inferFilename — priority chain", () => {
           pageTitle: "Michael Alexander Reel",
         }),
       ),
-    ).toBe("Michael Alexander Reel.ts");
+    ).toBe("Michael Alexander Reel.mp4");
   });
 
   it("dash: prefers pageTitle over manifest-shaped basename", () => {
@@ -55,15 +57,12 @@ describe("inferFilename — priority chain", () => {
     ).toBe("Behind the Scenes.mp4");
   });
 
-  it("hls: falls back to manifest basename when no pageTitle", () => {
-    // Disk save path forces `.ts` via forcedExtension; this test exercises
-    // the no-forcedExt branch and asserts the chain falls through to basename.
-    expect(
-      inferFilename(mk({ kind: "hls", url: "https://cdn/v/abc/playlist.m3u8" })),
-    ).toBe("playlist.m3u8");
+  it("hls: falls back to host+date when no pageTitle and basename is a manifest", () => {
+    const out = inferFilename(mk({ kind: "hls", url: "https://cdn/v/abc/playlist.m3u8" }));
+    expect(out).toMatch(new RegExp(`^cdn-${DATE.source}\\.mp4$`));
   });
 
-  it("hls: keeps named .m3u8 basename even when pageTitle is set", () => {
+  it("hls: keeps a named .m3u8 basename but saves as mp4", () => {
     expect(
       inferFilename(
         mk({
@@ -72,22 +71,10 @@ describe("inferFilename — priority chain", () => {
           pageTitle: "Page Title",
         }),
       ),
-    ).toBe("movie-clip.m3u8");
+    ).toBe("movie-clip.mp4");
   });
 
-  it("hls: master.m3u8 basename also defers to pageTitle", () => {
-    expect(
-      inferFilename(
-        mk({
-          kind: "hls",
-          url: "https://cdn/v/master.m3u8",
-          pageTitle: "Demo Reel",
-        }),
-      ),
-    ).toBe("Demo Reel.ts");
-  });
-
-  it("hls: video.m3u8 basename (Cloudflare Stream) defers to pageTitle", () => {
+  it("hls: Cloudflare Stream video.m3u8 defers to pageTitle", () => {
     expect(
       inferFilename(
         mk({
@@ -96,7 +83,138 @@ describe("inferFilename — priority chain", () => {
           pageTitle: "Cloudflare Demo",
         }),
       ),
-    ).toBe("Cloudflare Demo.ts");
+    ).toBe("Cloudflare Demo.mp4");
+  });
+});
+
+describe("inferFilename — machine-noise demotion (auto)", () => {
+  it("demotes a hash basename in favor of the page title", () => {
+    expect(
+      inferFilename(mk({ url: "https://cdn/8f3a2b1c.mp4", pageTitle: "Kitchen Tour" })),
+    ).toBe("Kitchen Tour.mp4");
+  });
+
+  it("demotes hash_resolution CDN shape in favor of the page title", () => {
+    expect(
+      inferFilename(mk({ url: "https://cdn/b3f9c2a1_720.mp4", pageTitle: "Kitchen Tour" })),
+    ).toBe("Kitchen Tour.mp4");
+  });
+
+  it("demotes bare-number basename", () => {
+    expect(
+      inferFilename(mk({ url: "https://cdn/4423897.mp4", pageTitle: "Kitchen Tour" })),
+    ).toBe("Kitchen Tour.mp4");
+  });
+
+  it("demotes camera-default basename", () => {
+    expect(
+      inferFilename(mk({ kind: "image", url: "https://s/IMG_2039.jpg", pageTitle: "Beach Day" })),
+    ).toBe("Beach Day.jpg");
+  });
+
+  it("keeps a real word-structured slug over the page title", () => {
+    expect(
+      inferFilename(mk({ url: "https://cdn/kitchen-tour-final.mp4", pageTitle: "Home Page" })),
+    ).toBe("kitchen-tour-final.mp4");
+  });
+
+  it("keeps a slug that mixes words and a resolution token", () => {
+    expect(
+      inferFilename(mk({ url: "https://cdn/my-video-1080.mp4", pageTitle: "Home Page" })),
+    ).toBe("my-video-1080.mp4");
+  });
+
+  it("demotes a noisy Content-Disposition stem to the page title", () => {
+    expect(
+      inferFilename(
+        mk({
+          url: "https://cdn/9a8b7c6d5e.mp4",
+          contentDisposition: 'filename="a1b2c3d4e5.mp4"',
+          pageTitle: "Real Title",
+        }),
+      ),
+    ).toBe("Real Title.mp4");
+  });
+});
+
+describe("looksLikeMachineName", () => {
+  it.each([
+    "8f3a2b1c",
+    "b3f9c2a1_720",
+    "4423897",
+    "550e8400-e29b-41d4-a716-446655440000",
+    "IMG_2039",
+    "playlist",
+    "chunk",
+  ])("flags %s as machine-generated", (s) => {
+    expect(looksLikeMachineName(s)).toBe(true);
+  });
+
+  it.each([
+    "kitchen-tour",
+    "kitchen-tour-final",
+    "my-video-1080",
+    "Behind the Scenes",
+    "interview",
+  ])("keeps %s as a human name", (s) => {
+    expect(looksLikeMachineName(s)).toBe(false);
+  });
+});
+
+describe("inferFilename — page-title cleanup", () => {
+  it("strips a trailing site-name suffix separated by a pipe", () => {
+    expect(
+      inferFilename(mk({ url: "https://cdn/8f3a2b1c.mp4", pageTitle: "Kitchen Tour | Vimeo" })),
+    ).toBe("Kitchen Tour.mp4");
+  });
+
+  it("strips a trailing site-name suffix separated by a dash", () => {
+    expect(
+      inferFilename(mk({ url: "https://cdn/8f3a2b1c.mp4", pageTitle: "Kitchen Tour - YouTube" })),
+    ).toBe("Kitchen Tour.mp4");
+  });
+});
+
+describe("inferFilename — variant label", () => {
+  it("appends a resolution label to the stem", () => {
+    expect(
+      inferFilename(
+        mk({ kind: "hls", url: "https://cdn/master.m3u8", pageTitle: "Demo Reel" }),
+        { forcedExtension: ".mp4", variantLabel: "1080p" },
+      ),
+    ).toBe("Demo Reel 1080p.mp4");
+  });
+
+  it("does not duplicate a label already present in the stem", () => {
+    expect(
+      inferFilename(mk({ url: "https://cdn/clip-1080p.mp4" }), { variantLabel: "1080p" }),
+    ).toBe("clip-1080p.mp4");
+  });
+});
+
+describe("inferFilename — template overrides", () => {
+  const v = mk({
+    url: "https://cdn/v/movie.mp4",
+    pageTitle: "Page Title",
+    contentDisposition: 'filename="server-named.mp4"',
+  });
+
+  it("pageTitle forces the page title source", () => {
+    expect(inferFilename(v, { template: "pageTitle" })).toBe("Page Title.mp4");
+  });
+
+  it("urlBasename forces the basename source", () => {
+    expect(inferFilename(v, { template: "urlBasename" })).toBe("movie.mp4");
+  });
+
+  it("timestamp forces a host+date name", () => {
+    expect(inferFilename(v, { template: "timestamp" })).toMatch(
+      new RegExp(`^cdn-${DATE.source}\\.mp4$`),
+    );
+  });
+
+  it("auto trusts the server Content-Disposition name", () => {
+    expect(inferFilename(v, { template: "auto" })).toBe("server-named.mp4");
   });
 });
 
@@ -162,7 +280,7 @@ describe("inferFilename — Windows reserved names", () => {
 
 describe("inferFilename — Unicode", () => {
   it("normalizes NFC form", () => {
-    const decomposed = "café.mp4";
+    const decomposed = "café.mp4";
     const composed = "café.mp4";
     expect(
       inferFilename(mk({ contentDisposition: `filename="${decomposed}"` })),
@@ -199,8 +317,14 @@ describe("inferFilename — extension handling", () => {
     expect(inferFilename(mk({ url: "https://a/stream" }))).toBe("stream.mp4");
   });
 
-  it("hls kind defaults to .ts when no extension elsewhere", () => {
-    expect(inferFilename(mk({ kind: "hls", url: "https://a/stream" }))).toBe("stream.ts");
+  it("hls kind defaults to .mp4 (muxed container) when no extension elsewhere", () => {
+    expect(inferFilename(mk({ kind: "hls", url: "https://a/stream" }))).toBe("stream.mp4");
+  });
+
+  it("ignores a manifest extension when choosing the container", () => {
+    expect(
+      inferFilename(mk({ kind: "hls", url: "https://cdn/named-clip.m3u8" })),
+    ).toBe("named-clip.mp4");
   });
 });
 
@@ -221,14 +345,14 @@ describe("inferFilename — length truncation", () => {
 });
 
 describe("inferFilename — empty / fallback", () => {
-  it("empty Content-Disposition + no URL path → fallback name", () => {
+  it("empty Content-Disposition + no URL path → host+date fallback", () => {
     const out = inferFilename(mk({ contentDisposition: 'filename=""', url: "https://a" }));
-    expect(out).toMatch(/^video-.*\.mp4$/);
+    expect(out).toMatch(new RegExp(`^a-${DATE.source}\\.mp4$`));
   });
 
   it("fallback name uses kind default extension", () => {
     const out = inferFilename(mk({ kind: "hls", url: "https://a" }));
-    expect(out).toMatch(/^video-.*\.ts$/);
+    expect(out).toMatch(new RegExp(`^a-${DATE.source}\\.mp4$`));
   });
 });
 

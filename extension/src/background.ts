@@ -357,6 +357,9 @@ type DownloadRequest = {
   // variant. When set, downloadHls fetches it in parallel with the video and
   // muxes both into a single MP4.
   audioRenditionUrl?: string;
+  // Resolution/quality label for the picked variant (e.g. "1080p"), threaded
+  // through to the saved filename.
+  variantLabel?: string;
   bypassSizeCap?: boolean;
 };
 type DownloadResponse =
@@ -419,10 +422,11 @@ async function handleDownloadRequest(req: DownloadRequest): Promise<DownloadResp
   // is no MV3-supported way to inject Referer / Authorization on a
   // chrome.downloads.download fetch. Direct files relying on cookies still
   // work because the browser attaches them automatically.
+  const directSettings = await getSettings();
   try {
     const downloadId = await chrome.downloads.download({
       url: video.url,
-      filename: inferFilename(video),
+      filename: inferFilename(video, { template: directSettings.filenameTemplate }),
       conflictAction: "uniquify",
       saveAs: false,
     });
@@ -675,6 +679,7 @@ async function startHlsDownload(
     startedAt: Date.now(),
     status: "running",
     progress: { done: 0, total: 0, bytes: 0 },
+    variantLabel: req.variantLabel,
   });
 
   try {
@@ -787,9 +792,14 @@ async function handleHlsBlobReady(msg: {
   }
 
   try {
+    const { filenameTemplate } = await getSettings();
     const downloadId = await chrome.downloads.download({
       url: msg.blobUrl,
-      filename: inferFilename(video, { forcedExtension: msg.containerExt }),
+      filename: inferFilename(video, {
+        forcedExtension: msg.containerExt,
+        template: filenameTemplate,
+        variantLabel: job.variantLabel,
+      }),
       conflictAction: "uniquify",
       saveAs: false,
     });
@@ -855,9 +865,13 @@ async function handleWebmTranscodeBlobReady(msg: {
   }
 
   try {
+    const { filenameTemplate } = await getSettings();
     const downloadId = await chrome.downloads.download({
       url: msg.blobUrl,
-      filename: inferFilename(video, { forcedExtension: ".mp4" }),
+      filename: inferFilename(video, {
+        forcedExtension: ".mp4",
+        template: filenameTemplate,
+      }),
       conflictAction: "uniquify",
       saveAs: false,
     });
@@ -945,6 +959,7 @@ async function startDashDownload(
     startedAt: Date.now(),
     status: "running",
     progress: { done: 0, total: 0, bytes: 0 },
+    variantLabel: req.variantLabel,
   });
 
   try {
@@ -1013,9 +1028,14 @@ async function handleDashBlobReady(msg: {
   }
 
   try {
+    const { filenameTemplate } = await getSettings();
     const downloadId = await chrome.downloads.download({
       url: msg.blobUrl,
-      filename: inferFilename(video, { forcedExtension: ".mp4" }),
+      filename: inferFilename(video, {
+        forcedExtension: ".mp4",
+        template: filenameTemplate,
+        variantLabel: job.variantLabel,
+      }),
       conflictAction: "uniquify",
       saveAs: false,
     });

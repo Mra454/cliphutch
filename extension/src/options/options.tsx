@@ -32,9 +32,14 @@ function mbToBytes(mb: number): number {
 
 const FILENAME_OPTIONS: { value: FilenameTemplate; label: string; help: string }[] = [
   {
+    value: "auto",
+    label: "Automatic",
+    help: "Pick the most readable name available: a real filename when the URL has one, otherwise the page title. Skips random CDN ids and hashes.",
+  },
+  {
     value: "urlBasename",
     label: "URL basename",
-    help: "Use the last path segment of the video URL (e.g., movie.mp4).",
+    help: "Always use the last path segment of the video URL (e.g., movie.mp4).",
   },
   {
     value: "pageTitle",
@@ -43,8 +48,8 @@ const FILENAME_OPTIONS: { value: FilenameTemplate; label: string; help: string }
   },
   {
     value: "timestamp",
-    label: "Timestamp",
-    help: "Use the date and time the video was detected.",
+    label: "Site and date",
+    help: "Use the source site host and the download date (e.g., example-com-2026-07-03.mp4).",
   },
 ];
 

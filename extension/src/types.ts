@@ -37,6 +37,9 @@ export type HlsJob = {
   progress: { done: number; total: number; bytes: number };
   downloadId?: number;
   containerExt?: ".mp4" | ".ts";
+  // Resolution/quality label for the picked variant (e.g. "1080p"), used to
+  // qualify the saved filename.
+  variantLabel?: string;
   errorCode?: string;
   errorMessage?: string;
 };
@@ -54,6 +57,9 @@ export type DashJob = {
   // popup UI doesn't need the breakdown.
   progress: { done: number; total: number; bytes: number };
   downloadId?: number;
+  // Resolution/quality label for the picked variant (e.g. "1080p"), used to
+  // qualify the saved filename.
+  variantLabel?: string;
   errorCode?: string;
   errorMessage?: string;
 };

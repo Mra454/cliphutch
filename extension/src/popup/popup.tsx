@@ -2,6 +2,7 @@ import { StrictMode, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { DashJob, DetectedVideo, DirectJob, HlsJob, WebmTranscodeJob } from "../types";
 import { filterCoveredByManifests } from "../lib/manifest-coverage";
+import { inferFilename } from "../lib/filename";
 
 type VariantOption = {
   id: string;
@@ -53,46 +54,18 @@ type AnyJob =
   | ({ source: "dash" } & DashJob)
   | ({ source: "webm" } & WebmTranscodeJob);
 
-function basename(rawUrl: string): string {
-  try {
-    const u = new URL(rawUrl);
-    const last = u.pathname.split("/").filter(Boolean).pop();
-    return last || u.hostname;
-  } catch {
-    return rawUrl.slice(0, 60);
-  }
-}
-
-function dispositionFilename(cd?: string): string | undefined {
-  if (!cd) return undefined;
-  const star = cd.match(/filename\*\s*=\s*[A-Za-z0-9-]+'[A-Za-z-]*'([^;]+)/);
-  if (star) {
-    try {
-      return decodeURIComponent(star[1].trim());
-    } catch {
-      // fall through
-    }
-  }
-  const plain = cd.match(/filename\s*=\s*"?([^";]+)"?/i);
-  return plain ? plain[1].trim() : undefined;
-}
-
-const GENERIC_MANIFEST_NAMES = new Set([
-  "playlist.m3u8",
-  "master.m3u8",
-  "index.m3u8",
-  "chunklist.m3u8",
-  "video.m3u8",
-  "manifest.mpd",
-]);
-
+// The name shown in the popup is the exact name the file will save under, so
+// the shelf and the download match. Extension is stripped for display.
 function displayName(v: DetectedVideo): string {
-  const disp = dispositionFilename(v.contentDisposition);
-  if (disp) return disp;
-  const base = basename(v.url);
-  const title = v.pageTitle?.trim();
-  if (title && GENERIC_MANIFEST_NAMES.has(base.toLowerCase())) return title;
-  return base;
+  const name = inferFilename(v);
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(0, dot) : name;
+}
+
+function variantFilenameLabel(variant: VariantOption): string | undefined {
+  if (variant.height && variant.height > 0) return `${variant.height}p`;
+  if (variant.width && variant.width > 0) return `${variant.width}w`;
+  return undefined;
 }
 
 const KIND_BADGE: Record<string, string> = {
@@ -657,6 +630,7 @@ function VideoCard({
         videoId: selected.id,
         variantId: variant?.id,
         audioRenditionUrl: variant?.audioRenditionUrl,
+        variantLabel: variant ? variantFilenameLabel(variant) : undefined,
         bypassSizeCap,
       })) as { ok: true; downloadId?: number; jobId?: string } | { ok: false; error: string };
       if (res && !res.ok) setImmediateError(res.error);

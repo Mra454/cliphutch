@@ -1,6 +1,6 @@
 import { DEFAULT_HLS_SIZE_CAP_BYTES } from "./constants";
 
-export type FilenameTemplate = "pageTitle" | "urlBasename" | "timestamp";
+export type FilenameTemplate = "auto" | "pageTitle" | "urlBasename" | "timestamp";
 
 export type UserSettings = {
   filenameTemplate: FilenameTemplate;
@@ -11,7 +11,7 @@ export type UserSettings = {
 };
 
 export const DEFAULT_SETTINGS: UserSettings = {
-  filenameTemplate: "urlBasename",
+  filenameTemplate: "auto",
   hlsSizeCapBytes: DEFAULT_HLS_SIZE_CAP_BYTES,
   showFullUrlsByDefault: false,
   ignoredSourceHosts: [],
