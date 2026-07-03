@@ -16,6 +16,11 @@ import {
   hasReplayableHeaders,
   type CapturedHeaders,
 } from "./lib/header-capture";
+import {
+  clearCapturedHeadersForTab,
+  getCapturedHeaders,
+  saveCapturedHeaders,
+} from "./lib/captured-headers";
 import { filterCoveredByManifests } from "./lib/manifest-coverage";
 import { isStillImage, isWebmDirectVideo } from "./lib/media-format";
 import type {
@@ -50,13 +55,6 @@ type DomImagesDetectedMessage = {
 };
 
 const pendingByRequestId = new Map<string, Pending>();
-
-// Captured headers from the page's original request, keyed by videoId.
-// Used at download time to install a session DNR rule that replays them on
-// extension-initiated fetches. In-memory only; lost on service-worker
-// eviction (graceful degradation: download proceeds without replay).
-const headersByVideoId = new Map<string, CapturedHeaders>();
-const headersVideoIdsByTabId = new Map<number, Set<string>>();
 
 function makeId(url: string, tabId: number): string {
   const input = `${tabId}:${url}`;
@@ -225,24 +223,11 @@ async function handleHeadersReceived(
   };
 
   if (pending.capturedHeaders && hasReplayableHeaders(pending.capturedHeaders)) {
-    headersByVideoId.set(video.id, pending.capturedHeaders);
-    let ids = headersVideoIdsByTabId.get(pending.tabId);
-    if (!ids) {
-      ids = new Set();
-      headersVideoIdsByTabId.set(pending.tabId, ids);
-    }
-    ids.add(video.id);
+    await saveCapturedHeaders(video.id, pending.tabId, pending.capturedHeaders);
   }
 
   await addOrUpdateVideo(pending.tabId, video);
   await updateBadge(pending.tabId);
-}
-
-function clearCapturedHeadersForTab(tabId: number): void {
-  const ids = headersVideoIdsByTabId.get(tabId);
-  if (!ids) return;
-  for (const id of ids) headersByVideoId.delete(id);
-  headersVideoIdsByTabId.delete(tabId);
 }
 
 chrome.webRequest.onHeadersReceived.addListener(
@@ -280,13 +265,13 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-  clearCapturedHeadersForTab(tabId);
+  void clearCapturedHeadersForTab(tabId);
   void clearTab(tabId);
 });
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === "loading" && changeInfo.url) {
-    clearCapturedHeadersForTab(tabId);
+    void clearCapturedHeadersForTab(tabId);
     void clearTab(tabId).then(() => updateBadge(tabId));
   }
 });
@@ -308,8 +293,22 @@ type DownloadJob = {
   errorMessage?: string;
 };
 
-let nextRuleId = 1;
-const ruleIdsByJobKey = new Map<string, number>();
+// DNR session rules persist for the whole browser session, but the previous
+// in-memory nextRuleId counter and jobKey->ruleId map did not survive a
+// service-worker restart: after eviction removeHeaderReplayRule no-op'd
+// (leaking rules) and a reset counter collided with existing rule IDs. Derive
+// the rule ID deterministically from the jobKey so both install and remove
+// agree across restarts, and remove-then-add so a stale rule with the same ID
+// is replaced rather than rejected.
+function ruleIdForJobKey(jobKey: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < jobKey.length; i++) {
+    h ^= jobKey.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  // DNR rule IDs must be positive integers; keep well within the safe range.
+  return (h >>> 0) % 1_000_000_000 + 1;
+}
 
 async function installHeaderReplayRule(
   jobKey: string,
@@ -317,10 +316,10 @@ async function installHeaderReplayRule(
   url: string,
   kind: "hls" | "dash" | "direct",
 ): Promise<void> {
-  const captured = headersByVideoId.get(videoId);
+  const captured = await getCapturedHeaders(videoId);
   if (!captured || !hasReplayableHeaders(captured)) return;
 
-  const ruleId = nextRuleId++;
+  const ruleId = ruleIdForJobKey(jobKey);
   const rule = buildSessionRule({
     ruleId,
     url,
@@ -329,19 +328,20 @@ async function installHeaderReplayRule(
     extensionId: chrome.runtime.id,
   });
   try {
-    await chrome.declarativeNetRequest.updateSessionRules({ addRules: [rule] });
-    ruleIdsByJobKey.set(jobKey, ruleId);
+    await chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: [ruleId],
+      addRules: [rule],
+    });
   } catch {
     // If rule install fails, the download still proceeds without replay.
   }
 }
 
 async function removeHeaderReplayRule(jobKey: string): Promise<void> {
-  const ruleId = ruleIdsByJobKey.get(jobKey);
-  if (ruleId === undefined) return;
-  ruleIdsByJobKey.delete(jobKey);
   try {
-    await chrome.declarativeNetRequest.updateSessionRules({ removeRuleIds: [ruleId] });
+    await chrome.declarativeNetRequest.updateSessionRules({
+      removeRuleIds: [ruleIdForJobKey(jobKey)],
+    });
   } catch {
     // Rule may already be gone if the session was cleared.
   }
