@@ -129,6 +129,29 @@ describe("clearTab", () => {
   });
 });
 
+describe("addOrUpdateVideo — concurrency", () => {
+  it("does not lose detections when many adds race on one tab", async () => {
+    // Each get resolves on a microtask before any set runs, so without
+    // serialization every concurrent add reads the same snapshot and all but
+    // one are lost. Under the cap, all must survive.
+    await Promise.all(
+      Array.from({ length: 20 }, (_, i) => addOrUpdateVideo(1, mk(`https://a/v${i}.mp4`))),
+    );
+    const list = await getDetectedVideos(1);
+    expect(list).toHaveLength(20);
+    expect(new Set(list.map((v) => v.url)).size).toBe(20);
+  });
+
+  it("does not lose a concurrent add on a different tab", async () => {
+    await Promise.all([
+      addOrUpdateVideo(1, mk("https://a/x.mp4")),
+      addOrUpdateVideo(2, mk("https://a/y.mp4")),
+    ]);
+    expect(await getDetectedVideos(1)).toHaveLength(1);
+    expect(await getDetectedVideos(2)).toHaveLength(1);
+  });
+});
+
 describe("getDetectedVideos", () => {
   it("returns [] for unknown tab", async () => {
     expect(await getDetectedVideos(999)).toEqual([]);

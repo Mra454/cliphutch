@@ -176,12 +176,27 @@ chrome.webRequest.onBeforeSendHeaders.addListener(
   ["requestHeaders", "extraHeaders"],
 );
 
+// 3xx statuses that carry a Location and are followed on the same requestId.
+const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
+
 async function handleHeadersReceived(
   details: chrome.webRequest.WebResponseHeadersDetails,
 ): Promise<void> {
   const pending = pendingByRequestId.get(details.requestId);
   if (!pending) return;
+
+  // A redirect hop is not the media response. Keep the pending entry so the
+  // final hop (same requestId, resolved URL) is the one classified; deleting
+  // here would drop CDN-signed media that 302s to an extensionless URL.
+  if (typeof details.statusCode === "number" && REDIRECT_STATUS.has(details.statusCode)) {
+    return;
+  }
   pendingByRequestId.delete(details.requestId);
+
+  // details.url is the resolved URL after any redirects; pending.url is the
+  // originally requested one. Classify and store the resolved URL so the file
+  // saved (and any header-replay rule) targets what actually served the media.
+  const mediaUrl = details.url;
 
   const headers = details.responseHeaders;
   const contentType = headerValue(headers, "content-type");
@@ -189,7 +204,7 @@ async function handleHeadersReceived(
   const contentLengthRaw = headerValue(headers, "content-length");
   const sizeBytes = contentLengthRaw ? Number.parseInt(contentLengthRaw, 10) : undefined;
 
-  const recl = classifyUrl(pending.url, contentType);
+  const recl = classifyUrl(mediaUrl, contentType);
   if (recl.kind === "unknown" || recl.kind === "segment") return;
   const kind: MediaKind = recl.kind;
   const normalizedSize = sizeBytes !== undefined && Number.isFinite(sizeBytes) ? sizeBytes : undefined;
@@ -198,8 +213,8 @@ async function handleHeadersReceived(
   const { pageUrl, pageTitle } = await pending.tabInfo;
 
   const video: DetectedVideo = {
-    id: makeId(pending.url, pending.tabId),
-    url: pending.url,
+    id: makeId(mediaUrl, pending.tabId),
+    url: mediaUrl,
     kind,
     detectedAt: Date.now(),
     pageUrl,
