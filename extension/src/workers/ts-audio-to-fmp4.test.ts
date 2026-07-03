@@ -4,7 +4,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createFile, MP4BoxBuffer } from "mp4box";
 import { transmuxTsAudioToFmp4, transmuxTsToMp4 } from "./ts-audio-to-fmp4";
-import { UnsupportedTsCodecError } from "../lib/errors";
+import { RawAacAudioError, UnsupportedTsCodecError } from "../lib/errors";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TS_SEGMENT = resolve(
@@ -58,6 +58,12 @@ describe("transmuxTsAudioToFmp4", () => {
     expect(() => transmuxTsAudioToFmp4([new Uint8Array([1, 2, 3])])).toThrow(
       UnsupportedTsCodecError,
     );
+  });
+
+  it("reports raw ADTS audio with an accurate error, not a TS-codec error", () => {
+    // ADTS syncword 0xFFF: first byte 0xFF, top nibble of the second byte set.
+    const adts = new Uint8Array([0xff, 0xf1, 0x50, 0x80, 0x00, 0x1f, 0xfc]);
+    expect(() => transmuxTsAudioToFmp4([adts])).toThrow(RawAacAudioError);
   });
 });
 

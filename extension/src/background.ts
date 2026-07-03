@@ -579,6 +579,7 @@ async function applyStreamDownloadTerminal(
       if (j.status === "complete" || j.status === "cancelled") return false;
       applyTerminalFields(j, state);
     });
+    await removeHeaderReplayRule(`webm:${webm.jobId}`);
     void chrome.runtime.sendMessage({ type: "webm-transcode-revoke", jobId: webm.jobId }).catch(() => {});
     return true;
   }
@@ -794,6 +795,11 @@ async function startWebmTranscode(
     return { ok: false, error: job?.errorMessage ?? "Could not start offscreen document." };
   }
 
+  // The transcoder fetches video.url from the offscreen document, which is an
+  // extension-initiated request, so captured request headers can be replayed
+  // via DNR just like the HLS/DASH segment fetches.
+  await installHeaderReplayRule(`webm:${jobId}`, video.id, video.url, "direct");
+
   void chrome.runtime
     .sendMessage({
       type: "webm-transcode-start",
@@ -919,6 +925,7 @@ async function handleWebmTranscodeBlobReady(msg: {
       j.errorMessage = "Video missing when saving WebM transcode.";
       j.errorCode = "VIDEO_MISSING";
     });
+    await removeHeaderReplayRule(`webm:${msg.jobId}`);
     void chrome.runtime.sendMessage({ type: "webm-transcode-revoke", jobId: msg.jobId }).catch(() => {});
     return;
   }
@@ -948,6 +955,7 @@ async function handleWebmTranscodeBlobReady(msg: {
       j.errorMessage = err instanceof Error ? err.message : "Could not save transcoded MP4.";
       j.errorCode = "SAVE_FAILED";
     });
+    await removeHeaderReplayRule(`webm:${msg.jobId}`);
     void chrome.runtime.sendMessage({ type: "webm-transcode-revoke", jobId: msg.jobId }).catch(() => {});
   }
 }
@@ -963,6 +971,7 @@ async function handleWebmTranscodeError(msg: {
     job.errorCode = msg.code;
     job.errorMessage = msg.userMessage;
   });
+  await removeHeaderReplayRule(`webm:${msg.jobId}`);
 }
 
 chrome.runtime.onMessage.addListener((message: unknown) => {

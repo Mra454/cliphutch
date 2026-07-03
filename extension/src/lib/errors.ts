@@ -29,6 +29,16 @@ export class UnsupportedTsCodecError extends HlsDownloadError {
   }
 }
 
+export class RawAacAudioError extends HlsDownloadError {
+  constructor() {
+    super(
+      "RAW_AAC_AUDIO",
+      "This stream serves its audio as raw AAC (ADTS) rather than MPEG-TS. ClipHutch does not yet repackage raw AAC audio.",
+    );
+    this.name = "RawAacAudioError";
+  }
+}
+
 export class EncryptedStreamError extends HlsDownloadError {
   constructor() {
     super(
