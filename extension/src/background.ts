@@ -6,6 +6,7 @@ import {
   WEBM_TRANSCODE_SIZE_CAP_BYTES,
 } from "./lib/constants";
 import { inferFilename } from "./lib/filename";
+import { putJobRecord, updateJobRecord } from "./lib/session-jobs";
 import { getSettings, type UserSettings } from "./lib/storage-local";
 import { isLicensed } from "./lib/license";
 import { FREE_DOWNLOAD_LIMIT, isRateLimited, recordDownload } from "./lib/rate-limit";
@@ -338,9 +339,7 @@ async function getDownloadJobs(): Promise<Record<string, DownloadJob>> {
 }
 
 async function setDownloadJob(job: DownloadJob): Promise<void> {
-  const jobs = await getDownloadJobs();
-  jobs[String(job.downloadId)] = job;
-  await chrome.storage.session.set({ [DOWNLOAD_JOBS_KEY]: jobs });
+  await putJobRecord(DOWNLOAD_JOBS_KEY, String(job.downloadId), job);
 }
 
 async function findVideo(tabId: number, videoId: string): Promise<DetectedVideo | undefined> {
@@ -624,9 +623,16 @@ async function getHlsJobs(): Promise<Record<string, HlsJob>> {
 }
 
 async function setHlsJob(job: HlsJob): Promise<void> {
-  const jobs = await getHlsJobs();
-  jobs[job.jobId] = job;
-  await chrome.storage.session.set({ [HLS_JOBS_KEY]: jobs });
+  await putJobRecord(HLS_JOBS_KEY, job.jobId, job);
+}
+
+// Atomic read-modify-write of one HLS job. `mutate` sees the current stored job
+// so a status guard cannot be defeated by a stale snapshot.
+async function updateHlsJob(
+  jobId: string,
+  mutate: (job: HlsJob) => boolean | void,
+): Promise<void> {
+  await updateJobRecord(HLS_JOBS_KEY, jobId, mutate);
 }
 
 const WEBM_TRANSCODE_JOBS_KEY = "webm-transcode-jobs";
@@ -638,9 +644,14 @@ async function getWebmTranscodeJobs(): Promise<Record<string, WebmTranscodeJob>>
 }
 
 async function setWebmTranscodeJob(job: WebmTranscodeJob): Promise<void> {
-  const jobs = await getWebmTranscodeJobs();
-  jobs[job.jobId] = job;
-  await chrome.storage.session.set({ [WEBM_TRANSCODE_JOBS_KEY]: jobs });
+  await putJobRecord(WEBM_TRANSCODE_JOBS_KEY, job.jobId, job);
+}
+
+async function updateWebmTranscodeJob(
+  jobId: string,
+  mutate: (job: WebmTranscodeJob) => boolean | void,
+): Promise<void> {
+  await updateJobRecord(WEBM_TRANSCODE_JOBS_KEY, jobId, mutate);
 }
 
 async function ensureOffscreenDocument(): Promise<void> {
@@ -763,11 +774,12 @@ async function handleHlsProgress(msg: {
   total: number;
   bytes: number;
 }): Promise<void> {
-  const jobs = await getHlsJobs();
-  const job = jobs[msg.jobId];
-  if (!job) return;
-  job.progress = { done: msg.done, total: msg.total, bytes: msg.bytes };
-  await setHlsJob(job);
+  await updateHlsJob(msg.jobId, (job) => {
+    // A progress message that arrives after the job failed or finished must
+    // never revert it to "running".
+    if (job.status !== "running") return false;
+    job.progress = { done: msg.done, total: msg.total, bytes: msg.bytes };
+  });
 }
 
 async function handleHlsBlobReady(msg: {
@@ -782,10 +794,12 @@ async function handleHlsBlobReady(msg: {
 
   const video = await findVideo(job.tabId, job.videoId);
   if (!video) {
-    job.status = "error";
-    job.errorMessage = "Video missing when saving HLS download.";
-    job.errorCode = "VIDEO_MISSING";
-    await setHlsJob(job);
+    await updateHlsJob(msg.jobId, (j) => {
+      if (j.status !== "running") return false;
+      j.status = "error";
+      j.errorMessage = "Video missing when saving HLS download.";
+      j.errorCode = "VIDEO_MISSING";
+    });
     await removeHeaderReplayRule(`hls:${msg.jobId}`);
     void chrome.runtime.sendMessage({ type: "hls-download-revoke", jobId: msg.jobId }).catch(() => {});
     return;
@@ -803,16 +817,21 @@ async function handleHlsBlobReady(msg: {
       conflictAction: "uniquify",
       saveAs: false,
     });
-    job.downloadId = downloadId;
-    job.containerExt = msg.containerExt;
-    job.status = "saving";
-    await setHlsJob(job);
+    await updateHlsJob(msg.jobId, (j) => {
+      // The job could have been cancelled during the save-initiation window.
+      if (j.status !== "running") return false;
+      j.downloadId = downloadId;
+      j.containerExt = msg.containerExt;
+      j.status = "saving";
+    });
     await recordDownload();
   } catch (err) {
-    job.status = "error";
-    job.errorMessage = err instanceof Error ? err.message : "Could not save HLS file.";
-    job.errorCode = "SAVE_FAILED";
-    await setHlsJob(job);
+    await updateHlsJob(msg.jobId, (j) => {
+      if (j.status === "complete" || j.status === "cancelled") return false;
+      j.status = "error";
+      j.errorMessage = err instanceof Error ? err.message : "Could not save HLS file.";
+      j.errorCode = "SAVE_FAILED";
+    });
     await removeHeaderReplayRule(`hls:${msg.jobId}`);
     void chrome.runtime.sendMessage({ type: "hls-download-revoke", jobId: msg.jobId }).catch(() => {});
   }
@@ -823,13 +842,13 @@ async function handleHlsError(msg: {
   code: string;
   userMessage: string;
 }): Promise<void> {
-  const jobs = await getHlsJobs();
-  const job = jobs[msg.jobId];
-  if (!job) return;
-  job.status = msg.code === "CANCELLED" ? "cancelled" : "error";
-  job.errorCode = msg.code;
-  job.errorMessage = msg.userMessage;
-  await setHlsJob(job);
+  await updateHlsJob(msg.jobId, (job) => {
+    // Do not overwrite a job that already saved successfully.
+    if (job.status === "complete") return false;
+    job.status = msg.code === "CANCELLED" ? "cancelled" : "error";
+    job.errorCode = msg.code;
+    job.errorMessage = msg.userMessage;
+  });
   await removeHeaderReplayRule(`hls:${msg.jobId}`);
 }
 
@@ -838,11 +857,10 @@ async function handleWebmTranscodeProgress(msg: {
   ratio: number;
   message?: string;
 }): Promise<void> {
-  const jobs = await getWebmTranscodeJobs();
-  const job = jobs[msg.jobId];
-  if (!job) return;
-  job.progress = { ratio: msg.ratio, message: msg.message ?? job.progress.message };
-  await setWebmTranscodeJob(job);
+  await updateWebmTranscodeJob(msg.jobId, (job) => {
+    if (job.status !== "running") return false;
+    job.progress = { ratio: msg.ratio, message: msg.message ?? job.progress.message };
+  });
 }
 
 async function handleWebmTranscodeBlobReady(msg: {
@@ -856,10 +874,12 @@ async function handleWebmTranscodeBlobReady(msg: {
 
   const video = await findVideo(job.tabId, job.videoId);
   if (!video) {
-    job.status = "error";
-    job.errorMessage = "Video missing when saving WebM transcode.";
-    job.errorCode = "VIDEO_MISSING";
-    await setWebmTranscodeJob(job);
+    await updateWebmTranscodeJob(msg.jobId, (j) => {
+      if (j.status !== "running") return false;
+      j.status = "error";
+      j.errorMessage = "Video missing when saving WebM transcode.";
+      j.errorCode = "VIDEO_MISSING";
+    });
     void chrome.runtime.sendMessage({ type: "webm-transcode-revoke", jobId: msg.jobId }).catch(() => {});
     return;
   }
@@ -875,15 +895,19 @@ async function handleWebmTranscodeBlobReady(msg: {
       conflictAction: "uniquify",
       saveAs: false,
     });
-    job.downloadId = downloadId;
-    job.status = "saving";
-    await setWebmTranscodeJob(job);
+    await updateWebmTranscodeJob(msg.jobId, (j) => {
+      if (j.status !== "running") return false;
+      j.downloadId = downloadId;
+      j.status = "saving";
+    });
     await recordDownload();
   } catch (err) {
-    job.status = "error";
-    job.errorMessage = err instanceof Error ? err.message : "Could not save transcoded MP4.";
-    job.errorCode = "SAVE_FAILED";
-    await setWebmTranscodeJob(job);
+    await updateWebmTranscodeJob(msg.jobId, (j) => {
+      if (j.status === "complete" || j.status === "cancelled") return false;
+      j.status = "error";
+      j.errorMessage = err instanceof Error ? err.message : "Could not save transcoded MP4.";
+      j.errorCode = "SAVE_FAILED";
+    });
     void chrome.runtime.sendMessage({ type: "webm-transcode-revoke", jobId: msg.jobId }).catch(() => {});
   }
 }
@@ -893,13 +917,12 @@ async function handleWebmTranscodeError(msg: {
   code: string;
   userMessage: string;
 }): Promise<void> {
-  const jobs = await getWebmTranscodeJobs();
-  const job = jobs[msg.jobId];
-  if (!job) return;
-  job.status = msg.code === "CANCELLED" ? "cancelled" : "error";
-  job.errorCode = msg.code;
-  job.errorMessage = msg.userMessage;
-  await setWebmTranscodeJob(job);
+  await updateWebmTranscodeJob(msg.jobId, (job) => {
+    if (job.status === "complete") return false;
+    job.status = msg.code === "CANCELLED" ? "cancelled" : "error";
+    job.errorCode = msg.code;
+    job.errorMessage = msg.userMessage;
+  });
 }
 
 chrome.runtime.onMessage.addListener((message: unknown) => {
@@ -936,9 +959,14 @@ async function getDashJobs(): Promise<Record<string, DashJob>> {
 }
 
 async function setDashJob(job: DashJob): Promise<void> {
-  const jobs = await getDashJobs();
-  jobs[job.jobId] = job;
-  await chrome.storage.session.set({ [DASH_JOBS_KEY]: jobs });
+  await putJobRecord(DASH_JOBS_KEY, job.jobId, job);
+}
+
+async function updateDashJob(
+  jobId: string,
+  mutate: (job: DashJob) => boolean | void,
+): Promise<void> {
+  await updateJobRecord(DASH_JOBS_KEY, jobId, mutate);
 }
 
 async function startDashDownload(
@@ -1000,11 +1028,10 @@ async function handleDashProgress(msg: {
   total: number;
   bytes: number;
 }): Promise<void> {
-  const jobs = await getDashJobs();
-  const job = jobs[msg.jobId];
-  if (!job) return;
-  job.progress = { done: msg.done, total: msg.total, bytes: msg.bytes };
-  await setDashJob(job);
+  await updateDashJob(msg.jobId, (job) => {
+    if (job.status !== "running") return false;
+    job.progress = { done: msg.done, total: msg.total, bytes: msg.bytes };
+  });
 }
 
 async function handleDashBlobReady(msg: {
@@ -1018,10 +1045,12 @@ async function handleDashBlobReady(msg: {
 
   const video = await findVideo(job.tabId, job.videoId);
   if (!video) {
-    job.status = "error";
-    job.errorMessage = "Video missing when saving DASH download.";
-    job.errorCode = "VIDEO_MISSING";
-    await setDashJob(job);
+    await updateDashJob(msg.jobId, (j) => {
+      if (j.status !== "running") return false;
+      j.status = "error";
+      j.errorMessage = "Video missing when saving DASH download.";
+      j.errorCode = "VIDEO_MISSING";
+    });
     await removeHeaderReplayRule(`dash:${msg.jobId}`);
     void chrome.runtime.sendMessage({ type: "dash-download-revoke", jobId: msg.jobId }).catch(() => {});
     return;
@@ -1039,15 +1068,19 @@ async function handleDashBlobReady(msg: {
       conflictAction: "uniquify",
       saveAs: false,
     });
-    job.downloadId = downloadId;
-    job.status = "saving";
-    await setDashJob(job);
+    await updateDashJob(msg.jobId, (j) => {
+      if (j.status !== "running") return false;
+      j.downloadId = downloadId;
+      j.status = "saving";
+    });
     await recordDownload();
   } catch (err) {
-    job.status = "error";
-    job.errorMessage = err instanceof Error ? err.message : "Could not save DASH file.";
-    job.errorCode = "SAVE_FAILED";
-    await setDashJob(job);
+    await updateDashJob(msg.jobId, (j) => {
+      if (j.status === "complete" || j.status === "cancelled") return false;
+      j.status = "error";
+      j.errorMessage = err instanceof Error ? err.message : "Could not save DASH file.";
+      j.errorCode = "SAVE_FAILED";
+    });
     await removeHeaderReplayRule(`dash:${msg.jobId}`);
     void chrome.runtime.sendMessage({ type: "dash-download-revoke", jobId: msg.jobId }).catch(() => {});
   }
@@ -1058,12 +1091,11 @@ async function handleDashError(msg: {
   code: string;
   userMessage: string;
 }): Promise<void> {
-  const jobs = await getDashJobs();
-  const job = jobs[msg.jobId];
-  if (!job) return;
-  job.status = msg.code === "CANCELLED" ? "cancelled" : "error";
-  job.errorCode = msg.code;
-  job.errorMessage = msg.userMessage;
-  await setDashJob(job);
+  await updateDashJob(msg.jobId, (job) => {
+    if (job.status === "complete") return false;
+    job.status = msg.code === "CANCELLED" ? "cancelled" : "error";
+    job.errorCode = msg.code;
+    job.errorMessage = msg.userMessage;
+  });
   await removeHeaderReplayRule(`dash:${msg.jobId}`);
 }

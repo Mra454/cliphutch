@@ -84,20 +84,36 @@ async function fetchSegmentsConcurrent(
   const buffers: Uint8Array[] = new Array(total);
   let nextIndex = 0;
 
+  // Abort every worker the instant one fails, so a mid-stream error stops the
+  // whole fetch instead of downloading every remaining segment into memory.
+  const pool = new AbortController();
+  const relayAbort = () => pool.abort();
+  if (signal.aborted) pool.abort();
+  else signal.addEventListener("abort", relayAbort, { once: true });
+
   async function worker(): Promise<void> {
     while (true) {
-      if (signal.aborted) throw new CancelledError();
+      if (pool.signal.aborted) throw new CancelledError();
       const idx = nextIndex++;
       if (idx >= total) return;
-      const bytes = await fetchBytes(urls[idx], signal, fetchImpl);
-      buffers[idx] = bytes;
-      onSegmentDone(idx, bytes.length);
+      try {
+        const bytes = await fetchBytes(urls[idx], pool.signal, fetchImpl);
+        buffers[idx] = bytes;
+        onSegmentDone(idx, bytes.length);
+      } catch (err) {
+        pool.abort();
+        throw err;
+      }
     }
   }
 
-  const concurrency = Math.min(HLS_SEGMENT_FETCH_CONCURRENCY, Math.max(total, 1));
-  await Promise.all(Array.from({ length: concurrency }, () => worker()));
-  return buffers;
+  try {
+    const concurrency = Math.min(HLS_SEGMENT_FETCH_CONCURRENCY, Math.max(total, 1));
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+    return buffers;
+  } finally {
+    signal.removeEventListener("abort", relayAbort);
+  }
 }
 
 function concat(buffers: Uint8Array[]): Uint8Array {

@@ -173,6 +173,7 @@ async function runHlsJob(msg: HlsStartMessage): Promise<void> {
         userMessage: err instanceof Error ? err.message : "Unknown error",
       });
     }
+    controller.abort();
     activeJobs.delete(msg.jobId);
   }
 }
@@ -233,6 +234,7 @@ async function runDashJob(msg: DashStartMessage): Promise<void> {
         userMessage: err instanceof Error ? err.message : "Unknown error",
       });
     }
+    controller.abort();
     activeJobs.delete(msg.jobId);
   }
 }
@@ -291,6 +293,7 @@ async function runWebmTranscodeJob(msg: WebmTranscodeStartMessage): Promise<void
         userMessage: err instanceof Error ? err.message : "WebM transcode failed.",
       });
     }
+    controller.abort();
     activeJobs.delete(msg.jobId);
   }
 }

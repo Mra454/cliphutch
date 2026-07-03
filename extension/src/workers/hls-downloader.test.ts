@@ -16,6 +16,7 @@ vi.mock("./ts-audio-to-fmp4", () => ({
 }));
 
 import { downloadHls } from "./hls-downloader";
+import { HLS_SEGMENT_FETCH_CONCURRENCY } from "../lib/constants";
 import { transmuxTsAudioToFmp4, transmuxTsToMp4 } from "./ts-audio-to-fmp4";
 import {
   AccessDeniedError,
@@ -163,6 +164,47 @@ const SEG_BYTES = new Uint8Array([0x47, 0x40, 0x00, 0x10]);
 const noProgress = () => undefined;
 const noSignal = new AbortController().signal;
 const cap = 100 * 1024 * 1024;
+
+describe("downloadHls — failure aborts the segment pool", () => {
+  it("stops fetching remaining segments once one fails", async () => {
+    const SEG_COUNT = 12;
+    let playlist =
+      "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-PLAYLIST-TYPE:VOD\n#EXT-X-TARGETDURATION:2\n";
+    const map: Record<string, FetchEntry> = {};
+    for (let i = 0; i < SEG_COUNT; i++) {
+      playlist += `#EXTINF:2.0,\nseg${i}.ts\n`;
+      // seg0 fails immediately; the rest are slow so, without a pool abort,
+      // sibling workers would keep pulling and fetching all of them.
+      map[`https://a/seg${i}.ts`] =
+        i === 0 ? { body: "", status: 500 } : { body: SEG_BYTES, delayMs: 20 };
+    }
+    playlist += "#EXT-X-ENDLIST\n";
+    map["https://a/p.m3u8"] = { body: playlist };
+
+    let started = 0;
+    const base = makeFetch(map);
+    const counting = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (/seg\d+\.ts$/.test(url)) started++;
+      return base(input, init);
+    }) as typeof fetch;
+
+    await expect(
+      downloadHls("https://a/p.m3u8", {
+        onProgress: noProgress,
+        signal: new AbortController().signal,
+        sizeCapBytes: cap,
+        fetchImpl: counting,
+      }),
+    ).rejects.toBeInstanceOf(NetworkError);
+
+    // Let any un-aborted siblings keep pulling indices. With the pool abort
+    // only the initial concurrent batch ever starts; without it this reaches
+    // SEG_COUNT.
+    await new Promise((r) => setTimeout(r, 150));
+    expect(started).toBeLessThanOrEqual(HLS_SEGMENT_FETCH_CONCURRENCY);
+  });
+});
 
 describe("downloadHls — happy path", () => {
   it("simple VOD: fetches segments, transmuxes MPEG-TS, returns MP4 Blob", async () => {
