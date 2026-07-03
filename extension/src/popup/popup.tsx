@@ -37,7 +37,7 @@ type MediaGroup = {
   alternates: DetectedVideo[];
 };
 import { getDetectedVideos } from "../lib/storage-session";
-import { DEFAULT_SETTINGS, getSettings, setSettings, type UserSettings } from "../lib/storage-local";
+import { DEFAULT_SETTINGS, getSettings, setSettings, type UserSettings, type FilenameTemplate } from "../lib/storage-local";
 import { isLicensed, revalidateIfStale } from "../lib/license";
 import { FREE_DOWNLOAD_LIMIT, VIDEO_DOWNLOAD_HISTORY_KEY, getDownloadCount } from "../lib/rate-limit";
 import { CHECKOUT_URL, MIN_STILL_IMAGE_SIZE_BYTES, PRICE_USD } from "../lib/constants";
@@ -56,8 +56,8 @@ type AnyJob =
 
 // The name shown in the popup is the exact name the file will save under, so
 // the shelf and the download match. Extension is stripped for display.
-function displayName(v: DetectedVideo): string {
-  const name = inferFilename(v);
+function displayName(v: DetectedVideo, template?: FilenameTemplate): string {
+  const name = inferFilename(v, { template });
   const dot = name.lastIndexOf(".");
   return dot > 0 ? name.slice(0, dot) : name;
 }
@@ -1013,7 +1013,7 @@ function VideoCard({
             color: "#172018",
           }}
         >
-          {displayName(selected)}
+          {displayName(selected, settings.filenameTemplate)}
         </strong>
         <span
           style={{
@@ -1094,7 +1094,7 @@ function VideoCard({
                     title={alt.url}
                     style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
                   >
-                    {displayName(alt)}
+                    {displayName(alt, settings.filenameTemplate)}
                   </span>
                   <span style={{ color: "#758277" }}>{fmtBytes(alt.sizeBytes) ?? badgeText(alt)}</span>
                   <button

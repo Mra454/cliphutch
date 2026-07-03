@@ -156,8 +156,58 @@ describe("looksLikeMachineName", () => {
     "my-video-1080",
     "Behind the Scenes",
     "interview",
+    "BigBuckBunny1080p", // CamelCase real name, not a random token
   ])("keeps %s as a human name", (s) => {
     expect(looksLikeMachineName(s)).toBe(false);
+  });
+});
+
+describe("inferFilename — generic manifest variant stems (Codex #3)", () => {
+  it.each([
+    "https://cdn/video_1080p.m3u8",
+    "https://cdn/hls_720.m3u8",
+    "https://cdn/playlist_high.m3u8",
+    "https://cdn/master-1080p.m3u8",
+    "https://cdn/stream_2.mpd",
+  ])("defers %s to the page title", (url) => {
+    const kind = url.endsWith(".mpd") ? "dash" : "hls";
+    expect(inferFilename(mk({ kind, url, pageTitle: "Company Launch" }))).toBe(
+      "Company Launch.mp4",
+    );
+  });
+
+  it("still keeps a descriptive manifest stem", () => {
+    expect(
+      inferFilename(mk({ kind: "hls", url: "https://cdn/kitchen-tour.m3u8", pageTitle: "Home" })),
+    ).toBe("kitchen-tour.mp4");
+  });
+});
+
+describe("inferFilename — CamelCase basename kept (Codex #4)", () => {
+  it("keeps a long CamelCase basename over a generic page title", () => {
+    expect(
+      inferFilename(mk({ url: "https://cdn/BigBuckBunny1080p.mp4", pageTitle: "Home Page" })),
+    ).toBe("BigBuckBunny1080p.mp4");
+  });
+});
+
+describe("inferFilename — title suffix stripping (Codex #5)", () => {
+  it("keeps a dash-separated subtitle that is not a platform", () => {
+    expect(
+      inferFilename(mk({ url: "https://cdn/8f3a2b1c.mp4", pageTitle: "Summer Recap - Behind the Scenes" })),
+    ).toBe("Summer Recap - Behind the Scenes.mp4");
+  });
+
+  it("strips a dash-separated known platform suffix", () => {
+    expect(
+      inferFilename(mk({ url: "https://cdn/8f3a2b1c.mp4", pageTitle: "Kitchen Tour - YouTube" })),
+    ).toBe("Kitchen Tour.mp4");
+  });
+
+  it("strips a pipe-separated site brand", () => {
+    expect(
+      inferFilename(mk({ url: "https://cdn/8f3a2b1c.mp4", pageTitle: "Kitchen Tour | Some Site" })),
+    ).toBe("Kitchen Tour.mp4");
   });
 });
 

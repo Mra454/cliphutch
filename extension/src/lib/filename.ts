@@ -136,8 +136,17 @@ function isMachineToken(t: string): boolean {
   if (UUID_RE.test(t)) return true;
   if (/^\d{3,}$/.test(t)) return true; // bare number / resolution (720, 4423897)
   if (HEX_BLOB.test(t) && /\d/.test(t)) return true; // hex hash containing a digit
-  // Long unbroken alphanumeric mixing letters and digits: random token.
-  if (LONG_ALNUM_BLOB.test(t) && /\d/.test(t) && /[A-Za-z]/.test(t)) return true;
+  // Long unbroken alphanumeric mixing letters and digits with NO readable word
+  // run: a random token (b3f9c2a17k2mq0x8). A 4+ letter run means a real name
+  // like "BigBuckBunny1080p", so that is kept.
+  if (
+    LONG_ALNUM_BLOB.test(t) &&
+    /\d/.test(t) &&
+    /[A-Za-z]/.test(t) &&
+    !/[A-Za-z]{4,}/.test(t)
+  ) {
+    return true;
+  }
   return false;
 }
 
@@ -216,20 +225,56 @@ const GENERIC_MANIFEST_NAMES = new Set([
   "manifest.mpd",
 ]);
 
+// Generic manifest stems, optionally suffixed with a quality/resolution token:
+// video, playlist_high, hls_720, master-1080p, stream_2. These carry no signal.
+const GENERIC_MANIFEST_STEM =
+  /^(video|audio|stream|hls|dash|playlist|master|index|manifest|chunklist|chunk|media|prog|out|output|rendition|variant)([-_. ]?(hd|sd|hi|lo|high|low|main|src|source|\d{1,4}p?|\d+k))*$/i;
+
 function isManifestBasename(name: string, _kind: MediaKind): boolean {
-  return GENERIC_MANIFEST_NAMES.has(name.toLowerCase());
+  const lower = name.toLowerCase();
+  if (GENERIC_MANIFEST_NAMES.has(lower)) return true;
+  const ext = extensionOf(lower);
+  if (ext && STREAM_EXTS.has(ext)) {
+    return GENERIC_MANIFEST_STEM.test(stripExtension(name));
+  }
+  return false;
 }
+
+// Video platforms whose name commonly trails a page title after a dash.
+const PLATFORM_SUFFIXES = new Set([
+  "youtube", "vimeo", "dailymotion", "twitch", "facebook", "tiktok",
+  "twitter", "x", "instagram", "reddit", "wistia", "streamable", "rumble",
+  "bitchute", "odysee", "loom", "vidyard", "brightcove", "jwplayer",
+]);
 
 function cleanTitle(title?: string): string | undefined {
   if (!title) return undefined;
-  let t = title.trim();
+  const t = title.trim();
   if (!t) return undefined;
-  // Drop a trailing site-name suffix: "Clip Name | Site", "Clip Name - Site".
-  // Only strip when the left side keeps real content, so "A - B" style titles
-  // that are themselves the name are preserved.
-  const m = t.match(/^(.*\S)\s+[|–—-]\s+[^|–—-]+$/);
-  if (m && m[1].trim().length >= 3) t = m[1].trim();
-  return t || undefined;
+
+  // A pipe almost always separates the title from a site brand: "Clip | Site".
+  // Strip when the left side keeps real content and the right side is short.
+  const pipe = t.match(/^(.*\S)\s+\|\s+([^|]{1,40})$/);
+  if (pipe && pipe[1].trim().length >= 3 && wordCount(pipe[2]) <= 5) {
+    return pipe[1].trim();
+  }
+
+  // A dash is ambiguous ("Title - Subtitle" vs "Title - Site"), so only strip
+  // it when the right side is a known video platform.
+  const dash = t.match(/^(.*\S)\s+[-–—]\s+([^-–—]+)$/);
+  if (
+    dash &&
+    dash[1].trim().length >= 3 &&
+    PLATFORM_SUFFIXES.has(dash[2].trim().toLowerCase())
+  ) {
+    return dash[1].trim();
+  }
+
+  return t;
+}
+
+function wordCount(s: string): number {
+  return s.trim().split(/\s+/).filter(Boolean).length;
 }
 
 function hostSlug(rawUrl?: string): string | undefined {
