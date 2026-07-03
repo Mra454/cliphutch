@@ -538,76 +538,99 @@ async function handleListVariantsRequest(
   }
 }
 
-async function handleDownloadChange(delta: chrome.downloads.DownloadDelta): Promise<void> {
-  if (!delta.state) return;
-  const jobs = await getDownloadJobs();
-  const job = jobs[String(delta.id)];
-  if (job) {
-    if (delta.state.current === "complete") {
-      job.status = "complete";
-      delete job.errorMessage;
-      await setDownloadJob(job);
-    } else if (delta.state.current === "interrupted") {
-      job.status = "interrupted";
-      job.errorMessage = DIRECT_DOWNLOAD_FAILURE_MESSAGE;
-      await setDownloadJob(job);
-    }
-    return;
-  }
-
-  const hlsJobs = await getHlsJobs();
-  const hls = Object.values(hlsJobs).find((j) => j.downloadId === delta.id);
+// Drive a stream job (HLS/DASH/WebM) to its terminal state from the Chrome
+// download's final state. Idempotent and guarded so a duplicate or late signal
+// cannot revert a job that already completed or was cancelled. Returns true if
+// a matching stream job was found. Correlates by downloadId, which the
+// blob-ready handler persists after chrome.downloads.download resolves.
+async function applyStreamDownloadTerminal(
+  downloadId: number,
+  state: "complete" | "interrupted",
+): Promise<boolean> {
+  const hls = Object.values(await getHlsJobs()).find((j) => j.downloadId === downloadId);
   if (hls) {
-    if (delta.state.current === "complete") {
-      hls.status = "complete";
-      await setHlsJob(hls);
-      await removeHeaderReplayRule(`hls:${hls.jobId}`);
-      void chrome.runtime.sendMessage({ type: "hls-download-revoke", jobId: hls.jobId }).catch(() => {});
-    } else if (delta.state.current === "interrupted") {
-      hls.status = "error";
-      hls.errorMessage = DIRECT_DOWNLOAD_FAILURE_MESSAGE;
-      hls.errorCode = "SAVE_INTERRUPTED";
-      await setHlsJob(hls);
-      await removeHeaderReplayRule(`hls:${hls.jobId}`);
-      void chrome.runtime.sendMessage({ type: "hls-download-revoke", jobId: hls.jobId }).catch(() => {});
-    }
-    return;
+    await updateHlsJob(hls.jobId, (j) => {
+      if (j.status === "complete" || j.status === "cancelled") return false;
+      applyTerminalFields(j, state);
+    });
+    await removeHeaderReplayRule(`hls:${hls.jobId}`);
+    void chrome.runtime.sendMessage({ type: "hls-download-revoke", jobId: hls.jobId }).catch(() => {});
+    return true;
   }
 
-  const webmJobs = await getWebmTranscodeJobs();
-  const webm = Object.values(webmJobs).find((j) => j.downloadId === delta.id);
+  const webm = Object.values(await getWebmTranscodeJobs()).find((j) => j.downloadId === downloadId);
   if (webm) {
-    if (delta.state.current === "complete") {
-      webm.status = "complete";
-      await setWebmTranscodeJob(webm);
-      void chrome.runtime.sendMessage({ type: "webm-transcode-revoke", jobId: webm.jobId }).catch(() => {});
-    } else if (delta.state.current === "interrupted") {
-      webm.status = "error";
-      webm.errorMessage = DIRECT_DOWNLOAD_FAILURE_MESSAGE;
-      webm.errorCode = "SAVE_INTERRUPTED";
-      await setWebmTranscodeJob(webm);
-      void chrome.runtime.sendMessage({ type: "webm-transcode-revoke", jobId: webm.jobId }).catch(() => {});
+    await updateWebmTranscodeJob(webm.jobId, (j) => {
+      if (j.status === "complete" || j.status === "cancelled") return false;
+      applyTerminalFields(j, state);
+    });
+    void chrome.runtime.sendMessage({ type: "webm-transcode-revoke", jobId: webm.jobId }).catch(() => {});
+    return true;
+  }
+
+  const dash = Object.values(await getDashJobs()).find((j) => j.downloadId === downloadId);
+  if (dash) {
+    await updateDashJob(dash.jobId, (j) => {
+      if (j.status === "complete" || j.status === "cancelled") return false;
+      applyTerminalFields(j, state);
+    });
+    await removeHeaderReplayRule(`dash:${dash.jobId}`);
+    void chrome.runtime.sendMessage({ type: "dash-download-revoke", jobId: dash.jobId }).catch(() => {});
+    return true;
+  }
+
+  return false;
+}
+
+function applyTerminalFields(
+  job: { status: string; errorMessage?: string; errorCode?: string },
+  state: "complete" | "interrupted",
+): void {
+  if (state === "complete") {
+    job.status = "complete";
+    delete job.errorMessage;
+    delete job.errorCode;
+  } else {
+    job.status = "error";
+    job.errorMessage = DIRECT_DOWNLOAD_FAILURE_MESSAGE;
+    job.errorCode = "SAVE_INTERRUPTED";
+  }
+}
+
+// The Chrome download for a just-saved stream blob can finish before
+// blob-ready persists its downloadId, so onChanged fires with no job to match
+// and the transition is lost. After persisting, reconcile against the download
+// record to catch a completion that beat the write.
+async function reconcileStreamSave(downloadId: number): Promise<void> {
+  try {
+    const [item] = await chrome.downloads.search({ id: downloadId });
+    if (item && (item.state === "complete" || item.state === "interrupted")) {
+      await applyStreamDownloadTerminal(downloadId, item.state);
     }
+  } catch {
+    // Best effort; onChanged remains the primary path.
+  }
+}
+
+async function handleDownloadChange(delta: chrome.downloads.DownloadDelta): Promise<void> {
+  const state = delta.state?.current;
+  if (state !== "complete" && state !== "interrupted") return;
+
+  const jobs = await getDownloadJobs();
+  if (jobs[String(delta.id)]) {
+    await updateJobRecord<DownloadJob>(DOWNLOAD_JOBS_KEY, String(delta.id), (job) => {
+      if (state === "complete") {
+        job.status = "complete";
+        delete job.errorMessage;
+      } else {
+        job.status = "interrupted";
+        job.errorMessage = DIRECT_DOWNLOAD_FAILURE_MESSAGE;
+      }
+    });
     return;
   }
 
-  const dashJobs = await getDashJobs();
-  const dash = Object.values(dashJobs).find((j) => j.downloadId === delta.id);
-  if (!dash) return;
-
-  if (delta.state.current === "complete") {
-    dash.status = "complete";
-    await setDashJob(dash);
-    await removeHeaderReplayRule(`dash:${dash.jobId}`);
-    void chrome.runtime.sendMessage({ type: "dash-download-revoke", jobId: dash.jobId }).catch(() => {});
-  } else if (delta.state.current === "interrupted") {
-    dash.status = "error";
-    dash.errorMessage = DIRECT_DOWNLOAD_FAILURE_MESSAGE;
-    dash.errorCode = "SAVE_INTERRUPTED";
-    await setDashJob(dash);
-    await removeHeaderReplayRule(`dash:${dash.jobId}`);
-    void chrome.runtime.sendMessage({ type: "dash-download-revoke", jobId: dash.jobId }).catch(() => {});
-  }
+  await applyStreamDownloadTerminal(delta.id, state);
 }
 
 chrome.downloads.onChanged.addListener((delta) => {
@@ -825,6 +848,7 @@ async function handleHlsBlobReady(msg: {
       j.status = "saving";
     });
     await recordDownload();
+    await reconcileStreamSave(downloadId);
   } catch (err) {
     await updateHlsJob(msg.jobId, (j) => {
       if (j.status === "complete" || j.status === "cancelled") return false;
@@ -901,6 +925,7 @@ async function handleWebmTranscodeBlobReady(msg: {
       j.status = "saving";
     });
     await recordDownload();
+    await reconcileStreamSave(downloadId);
   } catch (err) {
     await updateWebmTranscodeJob(msg.jobId, (j) => {
       if (j.status === "complete" || j.status === "cancelled") return false;
@@ -1074,6 +1099,7 @@ async function handleDashBlobReady(msg: {
       j.status = "saving";
     });
     await recordDownload();
+    await reconcileStreamSave(downloadId);
   } catch (err) {
     await updateDashJob(msg.jobId, (j) => {
       if (j.status === "complete" || j.status === "cancelled") return false;
