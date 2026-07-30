@@ -28,7 +28,7 @@ Freemium calibration is roughly right in all three products and is NOT the const
 
 - [x] 1. **Commit + push production state** in cliphutch, styleproof, cliphutch-site. (S) — done 2026-07-30, this session
 - [x] 2. **Recoup: enable missing live Stripe webhook events** — done 2026-07-30 via dashboard: endpoint `we_1Tqz5aGQjeGFY4e5eijIxhtq` now listens to 5 events (completed, refunded, dispute.created, dispute.closed, async_payment_succeeded). Residual: secret-value verification (chrome-web-store-update.md:226) folds into action 3's E2E
-- [ ] 3. **Recoup: real $30 E2E** — purchase → entitlement → refund → revoke → clean-profile restore. (M) — zero live purchases ever; flow unproven
+- [ ] 3. **Recoup: real $30 E2E** — purchase → activation → **clean-profile restore → THEN refund** → authoritative revoke on both profiles. (M) — zero live purchases ever; flow unproven. Order matters: restore lookup only matches purchases with status `paid` (worker/src/index.js:170), so refunding first makes the restore test fail by design; repo checklist agrees (chrome-web-store-update.md:235-236)
 - [ ] 4. **Recoup: fix CWS listing over-claims** — "Sync across devices and custom reminder timing" vs code reality (entitlement-only restore, fixed 7/3/1 offsets). Drop the copy or build the features. (S)
 - [x] 5. **Worker: alert/retry on Resend failure** — done 2026-07-30: `email_sent_at` (migration 0002 applied to prod, 4/4 rows backfilled) + 500-on-failure so Stripe webhook redelivery retries the email; deployed as cliphutch-api version dd889c50, live /computedkit/validate smoke passed
 - [ ] 6. **Pricing on funnel tops** — $35 on cliphutch.com + in ClipHutch CWS listing; Pro/$29 in ComputedKit CWS listing. (S)
