@@ -257,6 +257,14 @@ const primaryButtonStyle: React.CSSProperties = {
   fontWeight: 650,
 };
 
+const disabledButtonStyle: React.CSSProperties = {
+  ...buttonStyle,
+  cursor: "not-allowed",
+  background: "#edf2ee",
+  color: "#7a847d",
+  border: "1px solid #cbd8cf",
+};
+
 const shelfLineStyle: React.CSSProperties = {
   height: 3,
   borderRadius: 999,
@@ -1235,6 +1243,7 @@ function Popup() {
   const version = chrome.runtime.getManifest().version;
   const remaining = Math.max(0, FREE_DOWNLOAD_LIMIT - downloadCount);
   const atLimit = !licensed && remaining === 0;
+  const bulkDownloadDisabled = mediaFilter === "videos" && atLimit;
 
   function onUpgrade() {
     if (CHECKOUT_URL.startsWith("http")) {
@@ -1424,8 +1433,13 @@ function Popup() {
           {activeGroups.length > 0 && (
             <button
               onClick={() => void downloadAll()}
-              title={`Download each visible ${mediaFilter === "videos" ? "video" : "still"} group's top pick. Grouped alternates are skipped in bulk.`}
-              style={primaryButtonStyle}
+              disabled={bulkDownloadDisabled}
+              title={
+                bulkDownloadDisabled
+                  ? `Free tier: ${FREE_DOWNLOAD_LIMIT} video downloads used in the last 24h`
+                  : `Download each visible ${mediaFilter === "videos" ? "video" : "still"} group's top pick. Grouped alternates are skipped in bulk.`
+              }
+              style={bulkDownloadDisabled ? disabledButtonStyle : primaryButtonStyle}
             >
               Download picks
             </button>

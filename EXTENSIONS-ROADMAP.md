@@ -1,0 +1,52 @@
+# Extensions Monetization Roadmap
+
+Source: full code + live-browser audit 2026-07-30 (ClipHutch, ComputedKit, Recoup Radar).
+Scope: this file tracks the cross-product monetization work. ClipHutch + ComputedKit worker/site actions land in this repo, `~/projects/styleproof`, and `~/projects/cliphutch-site`; Recoup Radar actions land in `~/deadline-guard`.
+
+## Audit verdict (2026-07-30)
+
+Checkout works everywhere — both Stripe payment links live (HTTP 200), ComputedKit live checkout session verified in-browser, ClipHutch checkout verified 2026-07-03. Revenue is blocked by:
+
+1. **Distribution** — ComputedKit and Recoup Radar have ~2 users each; ClipHutch has 1,000.
+2. **Uncommitted production** — CWS builds, the shared worker, and the live site all ran from dirty working trees (being fixed in this pass).
+3. **Invisible pricing** — every buyer discovers the price only at the gate; sites/listings are silent.
+
+Freemium calibration is roughly right in all three products and is NOT the constraint.
+
+## Per-product state
+
+| | ClipHutch | ComputedKit | Recoup Radar |
+|---|---|---|---|
+| CWS | v0.1.3 live 7/22, 1,000 users, 4.0★ | v0.2.0 live ~7/18, 2 users | v1.0.1 live ~7/18, 2 users |
+| Price | $35 one-time, 5 devices | $29 one-time, 3 activations, 14-day refund | $30 one-time (never say "lifetime") |
+| Free tier | 4 video downloads / rolling 24h; stills + all features free | entire inspector unlimited; Pro = Baselines & Compare only | 3 subs/trials/bills + 5 returns |
+| Purchases to date | yes (only product with revenue) | 0 | 0 |
+| Checkout | live Payment Link | live Checkout session via worker | live Payment Link; webhook missing refund/dispute events |
+| Key funnel gap | site + listing never mention $35 | listing never mentions Pro; free tier has no Pro teaser | content-widget at-limit prompt has no upgrade link; listing over-claims sync/timing |
+
+## TOP 10 actions
+
+- [x] 1. **Commit + push production state** in cliphutch, styleproof, cliphutch-site. (S) — done 2026-07-30, this session
+- [ ] 2. **Recoup: enable missing live Stripe webhook events** (`charge.refunded`, `charge.dispute.created/closed`, `checkout.session.async_payment_succeeded`) + verify worker secrets. (S) — revocation cannot fire today
+- [ ] 3. **Recoup: real $30 E2E** — purchase → entitlement → refund → revoke → clean-profile restore. (M) — zero live purchases ever; flow unproven
+- [ ] 4. **Recoup: fix CWS listing over-claims** — "Sync across devices and custom reminder timing" vs code reality (entitlement-only restore, fixed 7/3/1 offsets). Drop the copy or build the features. (S)
+- [ ] 5. **Worker: alert/retry on Resend failure** (ClipHutch + ComputedKit license emails) — today a paid customer silently gets no key until manual `resend-license.mjs`. (M)
+- [ ] 6. **Pricing on funnel tops** — $35 on cliphutch.com + in ClipHutch CWS listing; Pro/$29 in ComputedKit CWS listing. (S)
+- [ ] 7. **Recoup: real upgrade link in the content-widget capped prompt** (currently Dismiss-only at the highest-intent moment; content.js:203-217). (S)
+- [ ] 8. **ComputedKit: 1 free baseline slot** (Pro = 20) so free users experience Compare before the $29 ask. (M)
+- [ ] 9. **`/deactivate` endpoint to free device slots** (both licensed products); until then fix the ComputedKit terms page, which promises deactivation that doesn't exist. (M; terms fix S)
+- [ ] 10. **Minimal conversion counting** — worker `/go/checkout` 302 redirects (count-only, no IDs) + local gate-hit counters; purchases from Stripe, installs from CWS dashboard. Disclose in privacy pages. (M)
+
+## Below top-10 (polish)
+
+- ClipHutch privacy GPL source-offer links tag `cliphutch-v0.1.2-cws-submit-2026-07-03` while 0.1.3 is live — tag 0.1.3 + retarget the offer chain.
+- ClipHutch dead `window.alert` fallback branches in buy buttons (options.tsx:209, popup.tsx:1252) — would silently no-op in the embedded options page if ever reached.
+- Recoup popup `window.confirm` in delete flows (popup.js:1280, 1297) → inline confirms (MV3 reliability).
+- Recoup site/popup em-dash sweep (still outstanding).
+- ComputedKit docs doctrine (AGENTS.md exclusions, ROADMAP gates, "keep beta free") overtaken by the live launch — reconcile against COMMERCIAL-DECISION-0.2.0.md.
+
+## Freemium calibration decisions (recommended, not yet ratified)
+
+- **ClipHutch: keep 4/day.** It converts; don't touch the gate until telemetry (action 10) can measure a change.
+- **ComputedKit: keep core inspector free (doctrine); add 1 free baseline slot** as the Pro teaser (action 8).
+- **Recoup Radar: keep 3+5 caps.** Calibration isn't the constraint at 2 users; fix plumbing + claims first.

@@ -23,6 +23,11 @@ export type DirectJob = {
   kind: MediaKind;
   startedAt: number;
   status: "in_progress" | "complete" | "interrupted";
+  // Reserved when a free-tier video download starts. Released if the download
+  // fails before completion.
+  quotaReservationId?: string;
+  countsAgainstQuota?: boolean;
+  quotaRecorded?: boolean;
   errorMessage?: string;
 };
 
@@ -40,7 +45,11 @@ export type HlsJob = {
   // Resolution/quality label for the picked variant (e.g. "1080p"), used to
   // qualify the saved filename.
   variantLabel?: string;
-  // Set once the free-tier quota has been charged for this job's completion.
+  // Reserved when a free-tier video download starts. Released if the download
+  // fails before completion.
+  quotaReservationId?: string;
+  countsAgainstQuota?: boolean;
+  // Set once the free-tier quota has been charged or reserved.
   quotaRecorded?: boolean;
   errorCode?: string;
   errorMessage?: string;
@@ -62,7 +71,11 @@ export type DashJob = {
   // Resolution/quality label for the picked variant (e.g. "1080p"), used to
   // qualify the saved filename.
   variantLabel?: string;
-  // Set once the free-tier quota has been charged for this job's completion.
+  // Reserved when a free-tier video download starts. Released if the download
+  // fails before completion.
+  quotaReservationId?: string;
+  countsAgainstQuota?: boolean;
+  // Set once the free-tier quota has been charged or reserved.
   quotaRecorded?: boolean;
   errorCode?: string;
   errorMessage?: string;
@@ -78,7 +91,11 @@ export type WebmTranscodeJob = {
   status: StreamJobStatus;
   progress: { ratio: number; message?: string };
   downloadId?: number;
-  // Set once the free-tier quota has been charged for this job's completion.
+  // Reserved when a free-tier video download starts. Released if the download
+  // fails before completion.
+  quotaReservationId?: string;
+  countsAgainstQuota?: boolean;
+  // Set once the free-tier quota has been charged or reserved.
   quotaRecorded?: boolean;
   errorCode?: string;
   errorMessage?: string;

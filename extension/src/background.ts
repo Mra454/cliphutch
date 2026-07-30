@@ -9,7 +9,12 @@ import { inferFilename } from "./lib/filename";
 import { putJobRecord, updateJobRecord } from "./lib/session-jobs";
 import { getSettings, type UserSettings } from "./lib/storage-local";
 import { isLicensed } from "./lib/license";
-import { FREE_DOWNLOAD_LIMIT, isRateLimited, recordDownload } from "./lib/rate-limit";
+import {
+  FREE_DOWNLOAD_LIMIT,
+  recordDownload,
+  releaseDownloadReservation,
+  reserveDownload,
+} from "./lib/rate-limit";
 import {
   buildSessionRule,
   extractCapturedHeaders,
@@ -286,10 +291,10 @@ type DownloadJob = {
   startedAt: number;
   status: DownloadStatus;
   // Whether this download counts against the free-tier quota (videos do,
-  // stills do not) and whether it has already been counted, so the quota is
-  // charged once on actual completion rather than at kickoff.
+  // stills do not) and whether it has already been counted or reserved.
   countsAgainstQuota?: boolean;
   quotaRecorded?: boolean;
+  quotaReservationId?: string;
   errorMessage?: string;
 };
 
@@ -412,27 +417,37 @@ async function handleDownloadRequest(req: DownloadRequest): Promise<DownloadResp
   if (!video) return { ok: false, error: "Media not found in this tab." };
 
   const countsAgainstVideoLimit = !isStillImage(video);
+  let quotaReservationId: string | undefined;
 
-  if (countsAgainstVideoLimit && !(await isLicensed()) && (await isRateLimited())) {
-    return {
-      ok: false,
-      code: "RATE_LIMITED",
-      error: `You've used all ${FREE_DOWNLOAD_LIMIT} free video downloads in the last 24 hours. Upgrade for unlimited video downloads.`,
-    };
+  if (countsAgainstVideoLimit && !(await isLicensed())) {
+    const reservation = await reserveDownload();
+    if (!reservation) {
+      return {
+        ok: false,
+        code: "RATE_LIMITED",
+        error: `You've used all ${FREE_DOWNLOAD_LIMIT} free video downloads in the last 24 hours. Upgrade for unlimited video downloads.`,
+      };
+    }
+    quotaReservationId = reservation.id;
   }
 
   if (video.kind === "hls") {
-    // recordDownload fires from handleHlsBlobReady on actual save success,
-    // not on kickoff — failed downloads must not consume the free-tier quota.
-    return startHlsDownload(req, video, req.variantId, req.audioRenditionUrl, req.bypassSizeCap);
+    return startHlsDownload(
+      req,
+      video,
+      req.variantId,
+      req.audioRenditionUrl,
+      req.bypassSizeCap,
+      quotaReservationId,
+    );
   }
 
   if (video.kind === "dash") {
-    return startDashDownload(req, video, req.variantId, req.bypassSizeCap);
+    return startDashDownload(req, video, req.variantId, req.bypassSizeCap, quotaReservationId);
   }
 
   if (isWebmDirectVideo(video)) {
-    return startWebmTranscode(req, video);
+    return startWebmTranscode(req, video, quotaReservationId);
   }
 
   // Header replay does NOT apply to chrome.downloads.download — those fetches
@@ -459,12 +474,13 @@ async function handleDownloadRequest(req: DownloadRequest): Promise<DownloadResp
       kind: video.kind,
       startedAt: Date.now(),
       status: "in_progress",
-      // Charged on actual completion (handleDownloadChange), not at kickoff, so
-      // an interrupted download does not consume a free-tier credit.
-      countsAgainstQuota: countsAgainstVideoLimit,
+      countsAgainstQuota: Boolean(quotaReservationId),
+      quotaRecorded: Boolean(quotaReservationId),
+      quotaReservationId,
     });
     return { ok: true, downloadId };
   } catch (err) {
+    await releaseDownloadReservation(quotaReservationId);
     return {
       ok: false,
       error: err instanceof Error && err.message ? err.message : DIRECT_DOWNLOAD_FAILURE_MESSAGE,
@@ -570,15 +586,19 @@ async function applyStreamDownloadTerminal(
   state: "complete" | "interrupted",
 ): Promise<boolean> {
   let chargeQuota = false;
+  let quotaReservationToRelease: string | undefined;
 
   const hls = Object.values(await getHlsJobs()).find((j) => j.downloadId === downloadId);
   if (hls) {
     await updateHlsJob(hls.jobId, (j) => {
       if (j.status === "complete" || j.status === "cancelled") return false;
-      chargeQuota = applyTerminalFields(j, state);
+      const result = applyTerminalFields(j, state);
+      chargeQuota = result.chargeQuota;
+      quotaReservationToRelease = result.quotaReservationToRelease;
     });
     await removeHeaderReplayRule(`hls:${hls.jobId}`);
     if (chargeQuota) await recordDownload();
+    await releaseDownloadReservation(quotaReservationToRelease);
     void chrome.runtime.sendMessage({ type: "hls-download-revoke", jobId: hls.jobId }).catch(() => {});
     return true;
   }
@@ -587,10 +607,13 @@ async function applyStreamDownloadTerminal(
   if (webm) {
     await updateWebmTranscodeJob(webm.jobId, (j) => {
       if (j.status === "complete" || j.status === "cancelled") return false;
-      chargeQuota = applyTerminalFields(j, state);
+      const result = applyTerminalFields(j, state);
+      chargeQuota = result.chargeQuota;
+      quotaReservationToRelease = result.quotaReservationToRelease;
     });
     await removeHeaderReplayRule(`webm:${webm.jobId}`);
     if (chargeQuota) await recordDownload();
+    await releaseDownloadReservation(quotaReservationToRelease);
     void chrome.runtime.sendMessage({ type: "webm-transcode-revoke", jobId: webm.jobId }).catch(() => {});
     return true;
   }
@@ -599,10 +622,13 @@ async function applyStreamDownloadTerminal(
   if (dash) {
     await updateDashJob(dash.jobId, (j) => {
       if (j.status === "complete" || j.status === "cancelled") return false;
-      chargeQuota = applyTerminalFields(j, state);
+      const result = applyTerminalFields(j, state);
+      chargeQuota = result.chargeQuota;
+      quotaReservationToRelease = result.quotaReservationToRelease;
     });
     await removeHeaderReplayRule(`dash:${dash.jobId}`);
     if (chargeQuota) await recordDownload();
+    await releaseDownloadReservation(quotaReservationToRelease);
     void chrome.runtime.sendMessage({ type: "dash-download-revoke", jobId: dash.jobId }).catch(() => {});
     return true;
   }
@@ -610,27 +636,36 @@ async function applyStreamDownloadTerminal(
   return false;
 }
 
-// Applies the terminal fields to a stream job and returns true when the
-// free-tier quota should be charged (first completion only). Interrupted saves
-// never charge.
+// Applies the terminal fields to a stream job. New jobs reserve quota at
+// kickoff; legacy jobs without a reservation are charged on first completion.
+// Interrupted saves release an unused reservation.
 function applyTerminalFields(
-  job: { status: string; errorMessage?: string; errorCode?: string; quotaRecorded?: boolean },
+  job: {
+    status: string;
+    errorMessage?: string;
+    errorCode?: string;
+    countsAgainstQuota?: boolean;
+    quotaRecorded?: boolean;
+    quotaReservationId?: string;
+  },
   state: "complete" | "interrupted",
-): boolean {
+): { chargeQuota: boolean; quotaReservationToRelease?: string } {
   if (state === "complete") {
     job.status = "complete";
     delete job.errorMessage;
     delete job.errorCode;
-    if (!job.quotaRecorded) {
+    if (job.countsAgainstQuota !== false && !job.quotaRecorded) {
       job.quotaRecorded = true;
-      return true;
+      return { chargeQuota: true };
     }
-    return false;
+    return { chargeQuota: false };
   }
   job.status = "error";
   job.errorMessage = DIRECT_DOWNLOAD_FAILURE_MESSAGE;
   job.errorCode = "SAVE_INTERRUPTED";
-  return false;
+  const quotaReservationToRelease = job.quotaReservationId;
+  delete job.quotaReservationId;
+  return { chargeQuota: false, quotaReservationToRelease };
 }
 
 // The Chrome download for a just-saved stream blob can finish before
@@ -655,20 +690,24 @@ async function handleDownloadChange(delta: chrome.downloads.DownloadDelta): Prom
   const jobs = await getDownloadJobs();
   if (jobs[String(delta.id)]) {
     let chargeQuota = false;
+    let quotaReservationToRelease: string | undefined;
     await updateJobRecord<DownloadJob>(DOWNLOAD_JOBS_KEY, String(delta.id), (job) => {
       if (state === "complete") {
         job.status = "complete";
         delete job.errorMessage;
-        if (job.countsAgainstQuota && !job.quotaRecorded) {
+        if (job.countsAgainstQuota !== false && !job.quotaRecorded) {
           job.quotaRecorded = true;
           chargeQuota = true;
         }
       } else {
         job.status = "interrupted";
         job.errorMessage = DIRECT_DOWNLOAD_FAILURE_MESSAGE;
+        quotaReservationToRelease = job.quotaReservationId;
+        delete job.quotaReservationId;
       }
     });
     if (chargeQuota) await recordDownload();
+    await releaseDownloadReservation(quotaReservationToRelease);
     return;
   }
 
@@ -742,6 +781,7 @@ async function startHlsDownload(
   variantId: string | undefined,
   audioRenditionUrl: string | undefined,
   bypassSizeCap: boolean | undefined,
+  quotaReservationId: string | undefined,
 ): Promise<DownloadResponse> {
   const settings = await getSettings();
   const jobId = `hls-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -756,6 +796,9 @@ async function startHlsDownload(
     status: "running",
     progress: { done: 0, total: 0, bytes: 0 },
     variantLabel: req.variantLabel,
+    countsAgainstQuota: Boolean(quotaReservationId),
+    quotaRecorded: Boolean(quotaReservationId),
+    quotaReservationId,
   });
 
   try {
@@ -768,6 +811,7 @@ async function startHlsDownload(
       job.errorMessage = err instanceof Error ? err.message : "Could not start offscreen document.";
       await setHlsJob(job);
     }
+    await releaseDownloadReservation(quotaReservationId);
     return { ok: false, error: job?.errorMessage ?? "Could not start offscreen document." };
   }
 
@@ -794,6 +838,7 @@ async function startHlsDownload(
 async function startWebmTranscode(
   req: DownloadRequest,
   video: DetectedVideo,
+  quotaReservationId: string | undefined,
 ): Promise<DownloadResponse> {
   const jobId = `webm-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
@@ -806,6 +851,9 @@ async function startWebmTranscode(
     startedAt: Date.now(),
     status: "running",
     progress: { ratio: 0, message: "Starting WebM to MP4 transcode" },
+    countsAgainstQuota: Boolean(quotaReservationId),
+    quotaRecorded: Boolean(quotaReservationId),
+    quotaReservationId,
   });
 
   try {
@@ -818,6 +866,7 @@ async function startWebmTranscode(
       job.errorMessage = err instanceof Error ? err.message : "Could not start offscreen document.";
       await setWebmTranscodeJob(job);
     }
+    await releaseDownloadReservation(quotaReservationId);
     return { ok: false, error: job?.errorMessage ?? "Could not start offscreen document." };
   }
 
@@ -864,12 +913,16 @@ async function handleHlsBlobReady(msg: {
 
   const video = await findVideo(job.tabId, job.videoId);
   if (!video) {
+    let quotaReservationToRelease: string | undefined;
     await updateHlsJob(msg.jobId, (j) => {
       if (j.status !== "running") return false;
       j.status = "error";
       j.errorMessage = "Video missing when saving HLS download.";
       j.errorCode = "VIDEO_MISSING";
+      quotaReservationToRelease = j.quotaReservationId;
+      delete j.quotaReservationId;
     });
+    await releaseDownloadReservation(quotaReservationToRelease);
     await removeHeaderReplayRule(`hls:${msg.jobId}`);
     void chrome.runtime.sendMessage({ type: "hls-download-revoke", jobId: msg.jobId }).catch(() => {});
     return;
@@ -896,12 +949,16 @@ async function handleHlsBlobReady(msg: {
     });
     await reconcileStreamSave(downloadId);
   } catch (err) {
+    let quotaReservationToRelease: string | undefined;
     await updateHlsJob(msg.jobId, (j) => {
       if (j.status === "complete" || j.status === "cancelled") return false;
       j.status = "error";
       j.errorMessage = err instanceof Error ? err.message : "Could not save HLS file.";
       j.errorCode = "SAVE_FAILED";
+      quotaReservationToRelease = j.quotaReservationId;
+      delete j.quotaReservationId;
     });
+    await releaseDownloadReservation(quotaReservationToRelease);
     await removeHeaderReplayRule(`hls:${msg.jobId}`);
     void chrome.runtime.sendMessage({ type: "hls-download-revoke", jobId: msg.jobId }).catch(() => {});
   }
@@ -912,13 +969,17 @@ async function handleHlsError(msg: {
   code: string;
   userMessage: string;
 }): Promise<void> {
+  let quotaReservationToRelease: string | undefined;
   await updateHlsJob(msg.jobId, (job) => {
     // Do not overwrite a job that already saved successfully.
     if (job.status === "complete") return false;
     job.status = msg.code === "CANCELLED" ? "cancelled" : "error";
     job.errorCode = msg.code;
     job.errorMessage = msg.userMessage;
+    quotaReservationToRelease = job.quotaReservationId;
+    delete job.quotaReservationId;
   });
+  await releaseDownloadReservation(quotaReservationToRelease);
   await removeHeaderReplayRule(`hls:${msg.jobId}`);
 }
 
@@ -944,12 +1005,16 @@ async function handleWebmTranscodeBlobReady(msg: {
 
   const video = await findVideo(job.tabId, job.videoId);
   if (!video) {
+    let quotaReservationToRelease: string | undefined;
     await updateWebmTranscodeJob(msg.jobId, (j) => {
       if (j.status !== "running") return false;
       j.status = "error";
       j.errorMessage = "Video missing when saving WebM transcode.";
       j.errorCode = "VIDEO_MISSING";
+      quotaReservationToRelease = j.quotaReservationId;
+      delete j.quotaReservationId;
     });
+    await releaseDownloadReservation(quotaReservationToRelease);
     await removeHeaderReplayRule(`webm:${msg.jobId}`);
     void chrome.runtime.sendMessage({ type: "webm-transcode-revoke", jobId: msg.jobId }).catch(() => {});
     return;
@@ -973,12 +1038,16 @@ async function handleWebmTranscodeBlobReady(msg: {
     });
     await reconcileStreamSave(downloadId);
   } catch (err) {
+    let quotaReservationToRelease: string | undefined;
     await updateWebmTranscodeJob(msg.jobId, (j) => {
       if (j.status === "complete" || j.status === "cancelled") return false;
       j.status = "error";
       j.errorMessage = err instanceof Error ? err.message : "Could not save transcoded MP4.";
       j.errorCode = "SAVE_FAILED";
+      quotaReservationToRelease = j.quotaReservationId;
+      delete j.quotaReservationId;
     });
+    await releaseDownloadReservation(quotaReservationToRelease);
     await removeHeaderReplayRule(`webm:${msg.jobId}`);
     void chrome.runtime.sendMessage({ type: "webm-transcode-revoke", jobId: msg.jobId }).catch(() => {});
   }
@@ -989,12 +1058,16 @@ async function handleWebmTranscodeError(msg: {
   code: string;
   userMessage: string;
 }): Promise<void> {
+  let quotaReservationToRelease: string | undefined;
   await updateWebmTranscodeJob(msg.jobId, (job) => {
     if (job.status === "complete") return false;
     job.status = msg.code === "CANCELLED" ? "cancelled" : "error";
     job.errorCode = msg.code;
     job.errorMessage = msg.userMessage;
+    quotaReservationToRelease = job.quotaReservationId;
+    delete job.quotaReservationId;
   });
+  await releaseDownloadReservation(quotaReservationToRelease);
   await removeHeaderReplayRule(`webm:${msg.jobId}`);
 }
 
@@ -1047,6 +1120,7 @@ async function startDashDownload(
   video: DetectedVideo,
   variantId: string | undefined,
   bypassSizeCap: boolean | undefined,
+  quotaReservationId: string | undefined,
 ): Promise<DownloadResponse> {
   const settings = await getSettings();
   const jobId = `dash-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -1061,6 +1135,9 @@ async function startDashDownload(
     status: "running",
     progress: { done: 0, total: 0, bytes: 0 },
     variantLabel: req.variantLabel,
+    countsAgainstQuota: Boolean(quotaReservationId),
+    quotaRecorded: Boolean(quotaReservationId),
+    quotaReservationId,
   });
 
   try {
@@ -1073,6 +1150,7 @@ async function startDashDownload(
       job.errorMessage = err instanceof Error ? err.message : "Could not start offscreen document.";
       await setDashJob(job);
     }
+    await releaseDownloadReservation(quotaReservationId);
     return { ok: false, error: job?.errorMessage ?? "Could not start offscreen document." };
   }
 
@@ -1118,12 +1196,16 @@ async function handleDashBlobReady(msg: {
 
   const video = await findVideo(job.tabId, job.videoId);
   if (!video) {
+    let quotaReservationToRelease: string | undefined;
     await updateDashJob(msg.jobId, (j) => {
       if (j.status !== "running") return false;
       j.status = "error";
       j.errorMessage = "Video missing when saving DASH download.";
       j.errorCode = "VIDEO_MISSING";
+      quotaReservationToRelease = j.quotaReservationId;
+      delete j.quotaReservationId;
     });
+    await releaseDownloadReservation(quotaReservationToRelease);
     await removeHeaderReplayRule(`dash:${msg.jobId}`);
     void chrome.runtime.sendMessage({ type: "dash-download-revoke", jobId: msg.jobId }).catch(() => {});
     return;
@@ -1148,12 +1230,16 @@ async function handleDashBlobReady(msg: {
     });
     await reconcileStreamSave(downloadId);
   } catch (err) {
+    let quotaReservationToRelease: string | undefined;
     await updateDashJob(msg.jobId, (j) => {
       if (j.status === "complete" || j.status === "cancelled") return false;
       j.status = "error";
       j.errorMessage = err instanceof Error ? err.message : "Could not save DASH file.";
       j.errorCode = "SAVE_FAILED";
+      quotaReservationToRelease = j.quotaReservationId;
+      delete j.quotaReservationId;
     });
+    await releaseDownloadReservation(quotaReservationToRelease);
     await removeHeaderReplayRule(`dash:${msg.jobId}`);
     void chrome.runtime.sendMessage({ type: "dash-download-revoke", jobId: msg.jobId }).catch(() => {});
   }
@@ -1164,11 +1250,15 @@ async function handleDashError(msg: {
   code: string;
   userMessage: string;
 }): Promise<void> {
+  let quotaReservationToRelease: string | undefined;
   await updateDashJob(msg.jobId, (job) => {
     if (job.status === "complete") return false;
     job.status = msg.code === "CANCELLED" ? "cancelled" : "error";
     job.errorCode = msg.code;
     job.errorMessage = msg.userMessage;
+    quotaReservationToRelease = job.quotaReservationId;
+    delete job.quotaReservationId;
   });
+  await releaseDownloadReservation(quotaReservationToRelease);
   await removeHeaderReplayRule(`dash:${msg.jobId}`);
 }

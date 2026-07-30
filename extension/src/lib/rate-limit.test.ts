@@ -4,6 +4,8 @@ import {
   getDownloadCount,
   isRateLimited,
   recordDownload,
+  releaseDownloadReservation,
+  reserveDownload,
   resetHistory,
 } from "./rate-limit";
 
@@ -96,5 +98,35 @@ describe("rate-limit", () => {
     await recordDownload(2000);
     await resetHistory();
     expect(await getDownloadCount(3000)).toBe(0);
+  });
+
+  it("reserveDownload counts a started download immediately", async () => {
+    const reservation = await reserveDownload(1000);
+    expect(reservation).not.toBeNull();
+    expect(await getDownloadCount(1000)).toBe(1);
+  });
+
+  it("reserveDownload refuses reservations at the free limit", async () => {
+    const now = 100_000;
+    for (let i = 0; i < FREE_DOWNLOAD_LIMIT; i++) {
+      expect(await reserveDownload(now + i)).not.toBeNull();
+    }
+    expect(await reserveDownload(now + FREE_DOWNLOAD_LIMIT)).toBeNull();
+  });
+
+  it("releaseDownloadReservation frees a reserved slot after failure", async () => {
+    const now = 100_000;
+    const reservation = await reserveDownload(now);
+    expect(reservation).not.toBeNull();
+    await releaseDownloadReservation(reservation ?? undefined, now + 1);
+    expect(await getDownloadCount(now + 2)).toBe(0);
+  });
+
+  it("serializes concurrent reservations so a bulk start cannot exceed the limit", async () => {
+    const attempts = await Promise.all(
+      Array.from({ length: FREE_DOWNLOAD_LIMIT + 3 }, (_, i) => reserveDownload(1000 + i)),
+    );
+    expect(attempts.filter(Boolean)).toHaveLength(FREE_DOWNLOAD_LIMIT);
+    expect(await getDownloadCount(2000)).toBe(FREE_DOWNLOAD_LIMIT);
   });
 });
