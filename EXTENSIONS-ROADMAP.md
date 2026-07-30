@@ -30,7 +30,7 @@ Freemium calibration is roughly right in all three products and is NOT the const
 - [ ] 2. **Recoup: enable missing live Stripe webhook events** (`charge.refunded`, `charge.dispute.created/closed`, `checkout.session.async_payment_succeeded`) + verify worker secrets. (S) — revocation cannot fire today
 - [ ] 3. **Recoup: real $30 E2E** — purchase → entitlement → refund → revoke → clean-profile restore. (M) — zero live purchases ever; flow unproven
 - [ ] 4. **Recoup: fix CWS listing over-claims** — "Sync across devices and custom reminder timing" vs code reality (entitlement-only restore, fixed 7/3/1 offsets). Drop the copy or build the features. (S)
-- [ ] 5. **Worker: alert/retry on Resend failure** (ClipHutch + ComputedKit license emails) — today a paid customer silently gets no key until manual `resend-license.mjs`. (M)
+- [ ] 5. **Worker: alert/retry on Resend failure** (ClipHutch + ComputedKit license emails). (M) — code landed 2026-07-30 (`email_sent_at` + 500-on-failure so Stripe webhook redelivery retries the email); DEPLOY PENDING: `wrangler d1 migrations apply cliphutch-licenses --remote` (0002) then `wrangler deploy` from `cloudflare/` — needs Mikey go-ahead
 - [ ] 6. **Pricing on funnel tops** — $35 on cliphutch.com + in ClipHutch CWS listing; Pro/$29 in ComputedKit CWS listing. (S)
 - [ ] 7. **Recoup: real upgrade link in the content-widget capped prompt** (currently Dismiss-only at the highest-intent moment; content.js:203-217). (S)
 - [ ] 8. **ComputedKit: 1 free baseline slot** (Pro = 20) so free users experience Compare before the $29 ask. (M)

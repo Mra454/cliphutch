@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS licenses (
   product             TEXT NOT NULL DEFAULT 'cliphutch', -- 'cliphutch' | 'computedkit'
   status              TEXT NOT NULL DEFAULT 'active',  -- 'active' | 'refunded' | 'revoked'
   created_at          INTEGER NOT NULL,                -- ms since epoch
-  refunded_at         INTEGER
+  refunded_at         INTEGER,
+  email_sent_at       INTEGER                          -- ms since epoch; NULL until the license email is delivered
 );
 
 CREATE INDEX IF NOT EXISTS idx_licenses_email ON licenses(email);

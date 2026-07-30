@@ -230,14 +230,17 @@ async function issueLicenseFromCheckout(event: StripeEvent, env: Env): Promise<R
     typeof session.payment_intent === "string" ? session.payment_intent : null;
 
   // Idempotency: Stripe may retry webhooks. If we already issued a license
-  // for this session, return the existing key (don't double-send email).
+  // for this session, re-attempt email delivery only if it never went out.
   const existing = await env.DB.prepare(
-    "SELECT key FROM licenses WHERE stripe_session_id = ?",
+    "SELECT key, email, product, email_sent_at FROM licenses WHERE stripe_session_id = ?",
   )
     .bind(sessionId)
-    .first<{ key: string }>();
+    .first<{ key: string; email: string; product: LicenseProduct; email_sent_at: number | null }>();
 
   if (existing) {
+    if (existing.email_sent_at === null) {
+      return await deliverLicenseEmail(existing.key, existing.email, existing.product, env);
+    }
     return json({ ok: true, key: existing.key, alreadyIssued: true });
   }
 
@@ -249,13 +252,28 @@ async function issueLicenseFromCheckout(event: StripeEvent, env: Env): Promise<R
     .bind(key, email, sessionId, paymentIntentId, product, Date.now())
     .run();
 
+  return await deliverLicenseEmail(key, email, product, env);
+}
+
+// On failure this returns 500 so Stripe redelivers the webhook; the
+// idempotent branch in issueLicenseFromCheckout re-attempts delivery for an
+// issued license whose email never went out. Retry exhaustion surfaces as a
+// failing webhook endpoint in the Stripe dashboard.
+async function deliverLicenseEmail(
+  key: string,
+  email: string,
+  product: LicenseProduct,
+  env: Env,
+): Promise<Response> {
   try {
     await sendLicenseEmail(email, key, env.RESEND_API_KEY, env.RESEND_FROM_EMAIL, product);
   } catch (err) {
-    // License is in DB; email can be retried by the operator. Surface in logs.
-    console.error("Resend send failed:", err);
+    console.error("Resend send failed; returning 500 for Stripe retry:", err);
+    return new Response("License issued, email delivery pending", { status: 500 });
   }
-
+  await env.DB.prepare("UPDATE licenses SET email_sent_at = ? WHERE key = ?")
+    .bind(Date.now(), key)
+    .run();
   return json({ ok: true, key });
 }
 
