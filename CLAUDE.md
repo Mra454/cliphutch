@@ -74,7 +74,7 @@ Open work to do during/after the review window:
 - **B6** — License entry UI tests (extension/src/options/options.tsx:134): no component coverage. Touched in last 30 days.
 - **M2** — CORS on validation API is `*`. CWS extension ID is now known (`pdpcameeghhppjbhecolnhdepceeldhl`); restrict CORS to `chrome-extension://pdpcameeghhppjbhecolnhdepceeldhl` plus any controlled admin/test origins.
 - **M3** — Wire `audit:dist` and tests into pre-commit/CI.
-- **M4** — FIXED in code 2026-07-30: `email_sent_at` on licenses (migration 0002, backfilled) + webhook returns 500 on send failure so Stripe redelivery retries the email; idempotent path re-sends when `email_sent_at` IS NULL. **Deploy pending: `npx wrangler d1 migrations apply cliphutch-licenses --remote` BEFORE `wrangler deploy`** (the SELECT references the new column).
+- **M4** — RESOLVED 2026-07-30: `email_sent_at` on licenses (migration 0002, applied to prod + backfilled 4/4) + webhook returns 500 on send failure so Stripe redelivery retries the email; idempotent path re-sends when `email_sent_at` IS NULL. Deployed as cliphutch-api version dd889c50.
 - **M5** — Stale docs in `cloudflare/README.md` (mentions `licenses@cliphutch.app`; "Phase 3 stub" claim is wrong).
 - **Trader verification** — Google Payments verification submitted 2026-04-28 with Vismu LLC Articles of Organization; pending. Listing will display "non-trader" until Google approves.
 
