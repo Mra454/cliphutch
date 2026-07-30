@@ -11,8 +11,13 @@ database_name = "cliphutch-licenses"
 database_id = "dc85e41b-4f1b-487d-b46e-5789e6fd0ca1"
 
 # Public env vars (non-secret). Secrets are set via `wrangler secret put`:
+#   STRIPE_SECRET_KEY
 #   STRIPE_WEBHOOK_SECRET
 #   RESEND_API_KEY
 #   RESEND_FROM_EMAIL
 [vars]
 MAX_DEVICES_PER_LICENSE = "5"
+COMPUTEDKIT_MAX_DEVICES_PER_LICENSE = "3"
+COMPUTEDKIT_STRIPE_PRICE_ID = "price_1TuHE6GQjeGFY4e5VButw8L0"
+COMPUTEDKIT_SUCCESS_URL = "https://cliphutch.com/computedkit/thanks/"
+COMPUTEDKIT_CANCEL_URL = "https://cliphutch.com/computedkit/#pro"

@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS licenses (
   email               TEXT NOT NULL,
   stripe_session_id   TEXT NOT NULL UNIQUE,
   payment_intent_id   TEXT,
+  product             TEXT NOT NULL DEFAULT 'cliphutch', -- 'cliphutch' | 'computedkit'
   status              TEXT NOT NULL DEFAULT 'active',  -- 'active' | 'refunded' | 'revoked'
   created_at          INTEGER NOT NULL,                -- ms since epoch
   refunded_at         INTEGER
@@ -16,6 +17,7 @@ CREATE TABLE IF NOT EXISTS licenses (
 
 CREATE INDEX IF NOT EXISTS idx_licenses_email ON licenses(email);
 CREATE INDEX IF NOT EXISTS idx_licenses_payment_intent ON licenses(payment_intent_id);
+CREATE INDEX IF NOT EXISTS idx_licenses_product ON licenses(product);
 
 CREATE TABLE IF NOT EXISTS activations (
   license_key         TEXT NOT NULL,

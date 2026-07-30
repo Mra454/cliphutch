@@ -6,14 +6,17 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
     "db:init:remote": "wrangler d1 execute cliphutch-licenses --remote --file=schema.sql",
     "db:init:local": "wrangler d1 execute cliphutch-licenses --local --file=schema.sql",
+    "db:migrations:list": "wrangler d1 migrations list cliphutch-licenses --remote",
+    "db:migrations:apply": "wrangler d1 migrations apply cliphutch-licenses --remote",
     "tail": "wrangler tail",
     "test:resend": "node scripts/resend-license.mjs mra454@gmail.com CH-TEST-AAAA-BBBB-CCCC"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20240419.0",
+    "@cloudflare/workers-types": "^5.20260717.1",
     "typescript": "^5.4.0",
-    "wrangler": "^3.50.0"
+    "wrangler": "^4.112.0"
   }
 }

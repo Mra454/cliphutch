@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Operator tool: send (or re-send) the ClipHutch license-key email for a
+// Operator tool: send (or re-send) a ClipHutch or ComputedKit license-key email for a
 // customer. Use when Resend was unavailable during the original webhook
 // fire (the worker swallows email failures and logs them; the license still
 // lands in D1).
@@ -21,6 +21,20 @@ if (!toEmail || !licenseKey) {
 
 const apiKey = process.env.RESEND_API_KEY;
 const fromAddress = process.env.RESEND_FROM_EMAIL;
+const isComputedKit = licenseKey.trim().toUpperCase().startsWith("CK-");
+const productName = isComputedKit ? "ComputedKit Pro" : "ClipHutch";
+const maxDevices = isComputedKit ? 3 : 5;
+const activationSteps = isComputedKit
+  ? [
+      "Open ComputedKit from Chrome's toolbar.",
+      "In the ComputedKit Pro Baselines & Compare card, paste this key.",
+      "Select Activate Pro."
+    ]
+  : [
+      "Open ClipHutch's options page from the toolbar icon (right-click → Options).",
+      "Paste this key into the License section.",
+      "Click Activate."
+    ];
 
 if (!apiKey || !fromAddress) {
   console.error("RESEND_API_KEY and RESEND_FROM_EMAIL must be set in env.");
@@ -28,32 +42,28 @@ if (!apiKey || !fromAddress) {
 }
 
 const text = [
-  "Thanks for purchasing ClipHutch.",
+  `Thanks for purchasing ${productName}.`,
   "",
   `Your license key:  ${licenseKey}`,
   "",
   "To activate:",
-  "  1. Open ClipHutch's options page from the toolbar icon",
-  "  2. Paste this key into the License section",
-  "  3. Click Activate",
+  ...activationSteps.map((step, index) => `  ${index + 1}. ${step}`),
   "",
-  "The license works on up to 5 devices. Save this email for reactivation.",
+  `The license works on up to ${maxDevices} browser installations. Save this email for reactivation.`,
 ].join("\n");
 
 const html = `
-  <p>Thanks for purchasing ClipHutch.</p>
+  <p>Thanks for purchasing ${productName}.</p>
   <p>Your license key:</p>
   <p style="font-family: ui-monospace, Menlo, monospace; font-size: 18px; padding: 12px 14px; background: #f4f4f0; border-radius: 4px; border: 1px solid #ddd; letter-spacing: 0.5px;">
     ${licenseKey}
   </p>
   <p>To activate:</p>
   <ol>
-    <li>Open ClipHutch's options page from the toolbar icon (right-click &rarr; Options).</li>
-    <li>Paste this key into the License section.</li>
-    <li>Click Activate.</li>
+    ${activationSteps.map((step) => `<li>${step}</li>`).join("")}
   </ol>
   <p style="color: #666; font-size: 13px;">
-    The license works on up to 5 devices. Save this email so you can reactivate later.
+    The license works on up to ${maxDevices} browser installations. Save this email so you can reactivate later.
   </p>
 `;
 
@@ -66,7 +76,7 @@ const response = await fetch("https://api.resend.com/emails", {
   body: JSON.stringify({
     from: fromAddress,
     to: toEmail,
-    subject: "Your ClipHutch license key",
+    subject: `Your ${productName} license key`,
     text,
     html,
   }),

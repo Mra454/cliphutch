@@ -2,5 +2,7 @@
 # Production secrets are set via `wrangler secret put <NAME>`.
 
 STRIPE_WEBHOOK_SECRET=whsec_test_replace_me
+STRIPE_SECRET_KEY=sk_test_replace_me
 RESEND_API_KEY=re_test_replace_me
 RESEND_FROM_EMAIL=licenses@cliphutch.example
+COMPUTEDKIT_STRIPE_PRICE_ID=price_test_replace_me
