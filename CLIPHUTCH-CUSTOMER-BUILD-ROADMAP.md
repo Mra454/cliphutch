@@ -40,9 +40,9 @@ remain incomplete.
 
 ## 1. Outcome and release decision
 
-Hold the next full ClipHutch Chrome Web Store submission until the Train B Safety Release gate passes. The sole exception is a narrowly scoped emergency Containment Release that passes the dedicated B2 gate below and has an explicit residual-risk publish decision; otherwise the current package is withdrawn or its continued exposure is time-bound and owned. The current branch and existing `dist.zip` should not be submitted as-is because the packaged GPL source offer is stale, stream jobs can be lost on tab lifecycle changes, offscreen dispatch can falsely report success, active header-replay rules can outlive the public tab-close promise, the size-cap bypass is not a real hard ceiling, and the build has no green type-check gate.
+Hold the next full ClipHutch Chrome Web Store submission until the Train B Safety Release gate passes. The sole exception is a narrowly scoped emergency Containment Release that passes the dedicated B2 gate below and has an explicit residual-risk publish decision. The legacy `dist.zip` must not be submitted because its GPL source offer is stale. The 0.1.4 candidate corrected the original stream-lifecycle, offscreen-dispatch, header-lease, size-cap, and type-check findings, but it still must not be distributed until the backend-first, exact-package, browser, accessibility, and product gates in the execution update pass.
 
-The Worker partial-refund defect is independent and should be tested and deployed first as a small hotfix. A partial Stripe refund currently revokes the entire license at [`cloudflare/src/index.ts:280`](cloudflare/src/index.ts#L280).
+The customer-live Worker still predates the candidate partial-refund correction. Promote a narrow refund-safe hotfix and known-good rollback point before the broader Worker candidate; the implementation and tests are checkpointed at `9059b19`, but no production deployment has occurred.
 
 The program is split into five release trains:
 
