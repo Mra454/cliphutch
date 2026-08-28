@@ -43,7 +43,7 @@ export class EncryptedStreamError extends HlsDownloadError {
   constructor() {
     super(
       "ENCRYPTED",
-      "This HLS stream is encrypted with AES-128 transport encryption. ClipHutch does not fetch encryption keys.",
+      "This HLS stream is encrypted. ClipHutch does not fetch encryption keys or decrypt media.",
     );
     this.name = "EncryptedStreamError";
   }
@@ -59,6 +59,26 @@ export class DrmProtectedError extends HlsDownloadError {
     );
     this.name = "DrmProtectedError";
     this.scheme = scheme;
+  }
+}
+
+export class UnsupportedMediaShapeError extends HlsDownloadError {
+  constructor(detail: string) {
+    super(
+      "UNSUPPORTED_MEDIA_SHAPE",
+      `This stream uses a media layout ClipHutch does not support yet: ${detail}.`,
+    );
+    this.name = "UnsupportedMediaShapeError";
+  }
+}
+
+export class VariantStaleError extends HlsDownloadError {
+  constructor() {
+    super(
+      "VARIANT_STALE",
+      "The selected quality is no longer available. Refresh the video list and choose again.",
+    );
+    this.name = "VariantStaleError";
   }
 }
 
@@ -99,7 +119,7 @@ export class EmptyManifestError extends HlsDownloadError {
   constructor() {
     super(
       "EMPTY",
-      "The manifest contained no usable video representations.",
+      "The manifest contained no usable downloadable media.",
     );
     this.name = "EmptyManifestError";
   }
@@ -142,7 +162,7 @@ export class NetworkError extends HlsDownloadError {
 
 export class ParseError extends HlsDownloadError {
   constructor() {
-    super("PARSE", "Could not parse the HLS playlist.");
+    super("PARSE", "Could not parse the stream manifest.");
     this.name = "ParseError";
   }
 }

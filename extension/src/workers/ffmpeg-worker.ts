@@ -2,6 +2,8 @@
 /// <reference lib="esnext" />
 /// <reference lib="webworker" />
 
+export {};
+
 type LoadConfig = { coreURL: string; wasmURL: string };
 type RequestMessage = { id: number; type: string; data: unknown };
 
@@ -32,17 +34,19 @@ function send(id: number, type: string, data: unknown, transfer: Transferable[] 
 async function load(config: LoadConfig): Promise<boolean> {
   const first = !ffmpeg;
   const mod = await import(/* @vite-ignore */ config.coreURL);
-  self.createFFmpegCore = mod.default;
-  if (!self.createFFmpegCore) throw new Error("Could not load ffmpeg core");
+  const createFFmpegCore = mod.default as typeof self.createFFmpegCore;
+  if (!createFFmpegCore) throw new Error("Could not load ffmpeg core");
+  self.createFFmpegCore = createFFmpegCore;
 
-  ffmpeg = await self.createFFmpegCore({
+  const loadedFfmpeg = await createFFmpegCore({
     mainScriptUrlOrBlob: `${config.coreURL}#${btoa(JSON.stringify({
       wasmURL: config.wasmURL,
       workerURL: config.coreURL.replace(/.js$/g, ".worker.js"),
     }))}`,
   });
-  ffmpeg.setLogger((data) => self.postMessage({ type: "LOG", data }));
-  ffmpeg.setProgress((data) => self.postMessage({ type: "PROGRESS", data }));
+  loadedFfmpeg.setLogger((data) => self.postMessage({ type: "LOG", data }));
+  loadedFfmpeg.setProgress((data) => self.postMessage({ type: "PROGRESS", data }));
+  ffmpeg = loadedFfmpeg;
   return first;
 }
 

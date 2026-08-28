@@ -1,7 +1,9 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   clearCapturedHeadersForTab,
+  getCapturedHeaderEntry,
   getCapturedHeaders,
+  getCapturedHeadersForTab,
   saveCapturedHeaders,
 } from "./captured-headers";
 import type { CapturedHeaders } from "./header-capture";
@@ -32,6 +34,12 @@ describe("captured-headers persistence", () => {
   it("round-trips headers by videoId", async () => {
     await saveCapturedHeaders("v1", 7, hdrs("https://a"));
     expect(await getCapturedHeaders("v1")).toEqual(hdrs("https://a"));
+    expect(await getCapturedHeaderEntry("v1")).toEqual({
+      tabId: 7,
+      headers: hdrs("https://a"),
+    });
+    expect(await getCapturedHeadersForTab("v1", 7)).toEqual(hdrs("https://a"));
+    expect(await getCapturedHeadersForTab("v1", 8)).toBeUndefined();
   });
 
   it("returns undefined for an unknown videoId", async () => {
@@ -66,5 +74,27 @@ describe("captured-headers persistence", () => {
     expect(await getCapturedHeaders("v1")).toBeDefined();
     expect(await getCapturedHeaders("v2")).toBeDefined();
     expect(await getCapturedHeaders("v3")).toBeDefined();
+  });
+
+  it("returns isolated copies and ignores malformed stored entries", async () => {
+    await saveCapturedHeaders("v1", 7, {
+      authorization: "Bearer secret",
+      custom: { "x-token": "secret" },
+    });
+    const first = await getCapturedHeaderEntry("v1");
+    if (!first) throw new Error("Expected captured header entry");
+    first.headers.authorization = "changed";
+    if (first.headers.custom) first.headers.custom["x-token"] = "changed";
+    expect(await getCapturedHeadersForTab("v1", 7)).toEqual({
+      authorization: "Bearer secret",
+      custom: { "x-token": "secret" },
+    });
+
+    store["captured-headers"] = {
+      bad: { tabId: "7", headers: { authorization: "secret" } },
+      badHeader: { tabId: 7, headers: { custom: { "x-token": 4 } } },
+    };
+    expect(await getCapturedHeaderEntry("bad")).toBeUndefined();
+    expect(await getCapturedHeaderEntry("badHeader")).toBeUndefined();
   });
 });

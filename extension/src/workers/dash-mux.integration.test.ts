@@ -16,7 +16,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createFile, MP4BoxBuffer } from "mp4box";
-import { muxFmp4 } from "./dash-mux";
+import { inspectFmp4Init, muxFmp4 } from "./dash-mux";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURES_DIR = resolve(__dirname, "..", "..", "fixtures", "dash-test");
@@ -83,10 +83,50 @@ function parseToFile(bytes: Uint8Array): {
   );
   iso.appendBuffer(buf);
   iso.flush();
-  if (!info) throw new Error("Parse produced no Movie info");
+  const parsedInfo = info as ParsedFile | null;
+  if (!parsedInfo) throw new Error("Parse produced no Movie info");
   // Splice in the moov reference for downstream avcC / esds inspection.
-  return { info: { ...info, moov: iso.moov }, sampleCount };
+  return { info: { ...parsedInfo, moov: iso.moov }, sampleCount };
 }
+
+function makeSyntheticInit(types: Array<"avc1" | "mp4a" | "encv">): Uint8Array {
+  const iso = createFile() as unknown as {
+    addTrack: (opts: Record<string, unknown>) => number | undefined;
+    getBuffer: () => { buffer: ArrayBuffer };
+  };
+  for (const [index, type] of types.entries()) {
+    const isAudio = type === "mp4a";
+    const id = iso.addTrack({
+      id: index + 1,
+      type,
+      timescale: 48_000,
+      duration: 0,
+      hdlr: isAudio ? "soun" : "vide",
+      width: isAudio ? undefined : 16,
+      height: isAudio ? undefined : 16,
+      channel_count: isAudio ? 2 : undefined,
+      samplerate: isAudio ? 48_000 : undefined,
+      samplesize: isAudio ? 16 : undefined,
+    });
+    if (id === undefined) throw new Error(`Could not synthesize ${type} track`);
+  }
+  return new Uint8Array(iso.getBuffer().buffer);
+}
+
+describe("inspectFmp4Init", () => {
+  it("reports embedded multi-track init metadata without extracting samples", () => {
+    const result = inspectFmp4Init(makeSyntheticInit(["avc1", "mp4a"]));
+    expect(result.trackCount).toBe(2);
+    expect(result.trackTypes).toEqual(["video", "audio"]);
+    expect(result.encrypted).toBe(false);
+  });
+
+  it("detects an encrypted video sample entry", () => {
+    const result = inspectFmp4Init(makeSyntheticInit(["encv"]));
+    expect(result.trackCount).toBe(1);
+    expect(result.encrypted).toBe(true);
+  });
+});
 
 describe("dash-mux integration (real fMP4 fixtures)", () => {
   if (!fixturesPresent) {

@@ -79,6 +79,23 @@ async function waitForExtension(browser) {
   return extension;
 }
 
+async function waitForExtensionPage(extension, pageName, timeoutMs = 6_000) {
+  const suffix = `/${pageName}`;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const page = (await extension.pages()).find((candidate) => {
+      try {
+        return new URL(candidate.url()).pathname === suffix;
+      } catch {
+        return false;
+      }
+    });
+    if (page) return page;
+    await new Promise((resolveWait) => setTimeout(resolveWait, 50));
+  }
+  throw new Error(`Timed out waiting for the real ${pageName} extension surface`);
+}
+
 await mkdir(outputDirectory, { recursive: true });
 console.log("Preparing the local ClipHutch site…");
 const server = await staticSite();
@@ -141,52 +158,85 @@ try {
           sizeBytes: 88_000_000,
           contentType: "video/x-matroska",
         },
+        {
+          id: "demo-still",
+          url: "https://media.example.test/archive/editorial-cover.jpg",
+          kind: "image",
+          detectedAt: Date.now() - 3_000,
+          pageUrl: "https://example.test/cliphutch-demo",
+          pageTitle: "ClipHutch demo page",
+          sizeBytes: 2_400_000,
+          contentType: "image/jpeg",
+          width: 2400,
+          height: 1600,
+          provenance: ["rendered-image"],
+        },
       ],
     });
   });
 
-  console.log("Opening the real extension popup…");
-  // Chrome's headless action trigger can wait indefinitely for a toolbar surface.
-  // Loading the packaged popup directly still renders the production UI. Because a
-  // popup opened this way is its own active tab, seed its demo tab record and reload.
-  const popup = await browser.newPage();
-  console.log("Loading the packaged popup page…");
-  await popup.setViewport({ width: 420, height: 800, deviceScaleFactor: 1 });
-  await popup.goto(`chrome-extension://${extension.id}/popup.html`, { waitUntil: "load" });
-  console.log("Resolving the popup tab identity…");
-  const popupTabs = await worker.evaluate(async () =>
-    chrome.tabs.query({ active: true, lastFocusedWindow: true })
-  );
-  const popupTabId = popupTabs[0]?.id;
-  assert.equal(typeof popupTabId, "number", "The direct popup page should have an active tab id");
-  const demoItems = await worker.evaluate(async () => {
-    const stored = await chrome.storage.session.get(null);
-    return Object.entries(stored).find(([key]) => key.startsWith("tab:"))?.[1];
-  });
-  assert.ok(Array.isArray(demoItems), "Fictional demo items should be available for the popup");
-  console.log("Reloading the popup with its fictional demo records…");
-  await worker.evaluate(async (tabId, items) => {
-    await chrome.storage.session.set({ [`tab:${tabId}`]: items });
-  }, popupTabId, demoItems);
-  await popup.reload({ waitUntil: "load" });
+  console.log("Opening the real extension popup from the toolbar action…");
+  await extension.triggerAction(inspectedPage);
+  const popup = await waitForExtensionPage(extension, "popup.html");
   console.log("Waiting for the populated popup UI…");
   await popup.waitForFunction(() => document.body.innerText.includes("ClipHutch"), { timeout: 4_000 });
   await new Promise((resolveWait) => setTimeout(resolveWait, 400));
   const popupText = await popup.evaluate(() => document.body.innerText);
   console.log(`Popup preview: ${JSON.stringify(popupText.slice(0, 280))}`);
-  await popup.waitForFunction(() => document.body.innerText.includes("Videos 3"), { timeout: 4_000 });
+  await popup.waitForFunction(() =>
+    document.body.innerText.includes("Videos 3") && document.body.innerText.includes("Stills 1"),
+  { timeout: 4_000 });
+
+  console.log("Adding the visible fictional media to the real Hutch…");
+  await popup.evaluate(() => {
+    const button = [...document.querySelectorAll("button")].find((candidate) =>
+      candidate.textContent?.trim() === "Select visible",
+    );
+    if (!(button instanceof HTMLButtonElement)) throw new Error("Select visible control not found");
+    button.click();
+  });
+  await popup.waitForFunction(() => document.body.innerText.includes("3 selected:"), { timeout: 4_000 });
+
+  console.log("Adding the fictional still to the same Hutch…");
+  await popup.evaluate(() => {
+    const button = [...document.querySelectorAll("button")].find((candidate) =>
+      candidate.textContent?.trim() === "Stills 1",
+    );
+    if (!(button instanceof HTMLButtonElement)) throw new Error("Stills shelf tab not found");
+    button.click();
+  });
+  await popup.waitForFunction(() => document.body.innerText.includes("editorial-cover.jpg"), { timeout: 4_000 });
+  await popup.evaluate(() => {
+    const button = [...document.querySelectorAll("button")].find((candidate) =>
+      candidate.textContent?.trim() === "Select visible",
+    );
+    if (!(button instanceof HTMLButtonElement)) throw new Error("Select visible control not found for stills");
+    button.click();
+  });
+  await popup.waitForFunction(() => document.body.innerText.includes("4 selected:"), { timeout: 4_000 });
+
+  console.log("Opening the real global side panel from the popup…");
+  const openPanelSelector = "[data-cliphutch-open-side-panel]";
+  await popup.waitForSelector(openPanelSelector, { timeout: 4_000 });
+  await popup.click(openPanelSelector);
+  const panel = await waitForExtensionPage(extension, "sidepanel.html");
+  await panel.setViewport({ width: 420, height: 800, deviceScaleFactor: 1 });
+  await panel.waitForSelector("[data-cliphutch-sidepanel-root]", { timeout: 4_000 });
+  await panel.waitForFunction(() => document.body.innerText.includes("ClipHutch"), { timeout: 4_000 });
+  await panel.waitForFunction(() => document.body.innerText.includes("Hutch · 4 items"), { timeout: 4_000 });
+  await new Promise((resolveWait) => setTimeout(resolveWait, 400));
 
   console.log("Composing the 1280×800 store screenshot…");
   const siteCapture = await inspectedPage.screenshot({ type: "png" });
-  const popupCapture = await popup.screenshot({ type: "png" });
+  const panelCapture = await panel.screenshot({ type: "png" });
   const siteData = Buffer.from(siteCapture).toString("base64");
-  const popupData = Buffer.from(popupCapture).toString("base64");
+  const panelData = Buffer.from(panelCapture).toString("base64");
   const composition = await browser.newPage();
   await composition.setViewport({ width: 1280, height: 800, deviceScaleFactor: 1 });
   await composition.setContent(`<!doctype html><html><head><style>
     *{box-sizing:border-box} html,body{width:1280px;height:800px;margin:0;overflow:hidden;background:#f7f6f2}
     main{display:grid;grid-template-columns:860px 420px;width:100%;height:100%}.site{position:relative;overflow:hidden}.site img,.panel img{display:block;width:100%;height:100%;object-fit:cover;object-position:top left}.panel{border-left:1px solid #d9dbe4;background:#fff;box-shadow:-18px 0 48px rgb(30 31 42 / 14%)}.badge{position:absolute;top:20px;left:20px;padding:8px 12px;border:1px solid rgb(255 255 255 / 58%);border-radius:999px;color:#fff;background:rgb(23 23 27 / 82%);font:700 12px/1 system-ui,sans-serif;letter-spacing:.02em}
-  </style></head><body><main><section class="site"><img src="data:image/png;base64,${siteData}" alt=""><span class="badge">ClipHutch demo page</span></section><section class="panel"><img src="data:image/png;base64,${popupData}" alt=""></section></main></body></html>`);
+  </style></head><body><main><section class="site"><img src="data:image/png;base64,${siteData}" alt=""><span class="badge">ClipHutch demo page</span></section><section class="panel"><img src="data:image/png;base64,${panelData}" alt=""></section></main></body></html>`);
   await composition.screenshot({ path: resolve(outputDirectory, "cliphutch-screenshot-01.png"), type: "png" });
 
   const iconData = (await readFile(resolve("dist/icons/128.png"))).toString("base64");
@@ -195,12 +245,18 @@ try {
   await promo.setViewport({ width: 440, height: 280, deviceScaleFactor: 1 });
   await promo.setContent(`<!doctype html><html><head><style>
     *{box-sizing:border-box}html,body{width:440px;height:280px;margin:0;overflow:hidden}body{display:grid;grid-template-columns:108px 1fr;align-items:center;gap:24px;padding:36px;background:#17171b;color:#fff;font-family:Inter,ui-sans-serif,system-ui,sans-serif}img{width:100px;height:100px;border-radius:16px}h1{margin:0 0 10px;font-size:31px;letter-spacing:-.05em;line-height:1}p{margin:0;color:#d1d2db;font-size:16px;line-height:1.35}strong{color:#aebfff}
-  </style></head><body><img src="data:image/png;base64,${iconData}" alt=""><div><h1>ClipHutch</h1><p>Your browser’s media shelf.<br><strong>Find. Preview. Save.</strong></p></div></body></html>`);
+  </style></head><body><img src="data:image/png;base64,${iconData}" alt=""><div><h1>ClipHutch</h1><p>Build an organized media pack.<br><strong>Collect. Review. Save.</strong></p></div></body></html>`);
   await promo.screenshot({ path: resolve(outputDirectory, "cliphutch-small-promo.png"), type: "png" });
 
   console.log(`Captured ${relative(process.cwd(), outputDirectory)}/cliphutch-screenshot-01.png`);
   console.log(`Captured ${relative(process.cwd(), outputDirectory)}/cliphutch-small-promo.png`);
-  await Promise.all([popup.close(), composition.close(), promo.close(), inspectedPage.close()]);
+  await Promise.all([
+    ...(popup.isClosed() ? [] : [popup.close()]),
+    ...(panel.isClosed() ? [] : [panel.close()]),
+    composition.close(),
+    promo.close(),
+    inspectedPage.close(),
+  ]);
 } finally {
   await browser.close();
   await server.close();

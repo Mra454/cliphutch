@@ -4,6 +4,11 @@ import { describe, it, expect, vi } from "vitest";
 // deterministic concat-and-tag so the fMP4 test asserts on fetch +
 // orchestration logic without depending on mp4box.js.
 vi.mock("./dash-mux", () => ({
+  inspectFmp4Init: (bytes: Uint8Array) => ({
+    encrypted: bytes[0] === 0xee,
+    trackCount: bytes[0] === 0x02 ? 2 : 1,
+    trackTypes: [bytes[0] === 0x61 ? "audio" : "video"],
+  }),
   muxFmp4: async (videoBytes: Uint8Array) => videoBytes,
 }));
 
@@ -23,10 +28,14 @@ import {
   ByteRangeOutOfBoundsError,
   ByteRangeUnsupportedError,
   CancelledError,
+  DrmProtectedError,
+  EmptyManifestError,
   EncryptedStreamError,
   LiveStreamError,
   NetworkError,
   SizeCapError,
+  UnsupportedMediaShapeError,
+  VariantStaleError,
 } from "../lib/errors";
 
 type FetchEntry = {
@@ -286,6 +295,129 @@ describe("downloadHls — rejection rules", () => {
     ).rejects.toBeInstanceOf(EncryptedStreamError);
   });
 
+  it("rejects an empty VOD before muxing", async () => {
+    const empty = `#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-ENDLIST
+`;
+    const f = makeFetch({ "https://a/p.m3u8": { body: empty } });
+    await expect(
+      downloadHls("https://a/p.m3u8", {
+        onProgress: noProgress,
+        signal: noSignal,
+        sizeCapBytes: cap,
+        fetchImpl: f,
+      }),
+    ).rejects.toBeInstanceOf(EmptyManifestError);
+  });
+
+  it("rejects HLS discontinuities before requesting init or media", async () => {
+    const playlist = `#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:2,
+s0.m4s
+#EXT-X-DISCONTINUITY
+#EXTINF:2,
+s1.m4s
+#EXT-X-ENDLIST
+`;
+    let binaryRequests = 0;
+    const base = makeFetch({ "https://a/p.m3u8": { body: playlist } });
+    const f = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url !== "https://a/p.m3u8") binaryRequests++;
+      return base(input, init);
+    }) as typeof fetch;
+    await expect(
+      downloadHls("https://a/p.m3u8", {
+        onProgress: noProgress,
+        signal: noSignal,
+        sizeCapBytes: cap,
+        fetchImpl: f,
+      }),
+    ).rejects.toBeInstanceOf(UnsupportedMediaShapeError);
+    expect(binaryRequests).toBe(0);
+  });
+
+  it("rejects changed HLS init maps before requesting init or media", async () => {
+    const playlist = `#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-MAP:URI="init-1.mp4"
+#EXTINF:2,
+s0.m4s
+#EXT-X-MAP:URI="init-2.mp4"
+#EXTINF:2,
+s1.m4s
+#EXT-X-ENDLIST
+`;
+    let binaryRequests = 0;
+    const base = makeFetch({ "https://a/p.m3u8": { body: playlist } });
+    const f = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url !== "https://a/p.m3u8") binaryRequests++;
+      return base(input, init);
+    }) as typeof fetch;
+    await expect(
+      downloadHls("https://a/p.m3u8", {
+        onProgress: noProgress,
+        signal: noSignal,
+        sizeCapBytes: cap,
+        fetchImpl: f,
+      }),
+    ).rejects.toBeInstanceOf(UnsupportedMediaShapeError);
+    expect(binaryRequests).toBe(0);
+  });
+
+  it("rejects encrypted fMP4 init before requesting media", async () => {
+    let mediaRequests = 0;
+    const base = makeFetch({
+      "https://a/p.m3u8": { body: FMP4_PLAYLIST },
+      "https://a/init.mp4": { body: new Uint8Array([0xee]) },
+      "https://a/seg0.m4s": { body: new Uint8Array([1]) },
+    });
+    const f = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("seg0.m4s")) mediaRequests++;
+      return base(input, init);
+    }) as typeof fetch;
+    await expect(
+      downloadHls("https://a/p.m3u8", {
+        onProgress: noProgress,
+        signal: noSignal,
+        sizeCapBytes: cap,
+        fetchImpl: f,
+      }),
+    ).rejects.toBeInstanceOf(DrmProtectedError);
+    expect(mediaRequests).toBe(0);
+  });
+
+  it("rejects embedded multi-track fMP4 init before requesting media", async () => {
+    let mediaRequests = 0;
+    const base = makeFetch({
+      "https://a/p.m3u8": { body: FMP4_PLAYLIST },
+      "https://a/init.mp4": { body: new Uint8Array([0x02]) },
+      "https://a/seg0.m4s": { body: new Uint8Array([1]) },
+    });
+    const f = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("seg0.m4s")) mediaRequests++;
+      return base(input, init);
+    }) as typeof fetch;
+    await expect(
+      downloadHls("https://a/p.m3u8", {
+        onProgress: noProgress,
+        signal: noSignal,
+        sizeCapBytes: cap,
+        fetchImpl: f,
+      }),
+    ).rejects.toBeInstanceOf(UnsupportedMediaShapeError);
+    expect(mediaRequests).toBe(0);
+  });
+
   it("transmuxes MPEG-TS separate audio before muxing with fMP4 video", async () => {
     const INIT = new Uint8Array([0x66, 0x74, 0x79, 0x70]);
     const SEG = new Uint8Array([0x6d, 0x6f, 0x6f, 0x66]);
@@ -526,6 +658,20 @@ a1.m4s
 });
 
 describe("downloadHls — master variant selection", () => {
+  it("never auto-picks when an exact selection omits its child identity", async () => {
+    const f = vi.fn(makeFetch({
+      "https://a/master.m3u8": { body: MASTER_EMBEDDED },
+    }));
+    await expect(downloadHls("https://a/master.m3u8", {
+      onProgress: noProgress,
+      signal: noSignal,
+      sizeCapBytes: cap,
+      fetchImpl: f,
+      exactVariantSelection: true,
+    })).rejects.toBeInstanceOf(VariantStaleError);
+    expect(f).not.toHaveBeenCalled();
+  });
+
   it("picks highest-bandwidth embedded-audio variant", async () => {
     const f = makeFetch({
       "https://a/master.m3u8": { body: MASTER_EMBEDDED },
@@ -540,6 +686,79 @@ describe("downloadHls — master variant selection", () => {
       fetchImpl: f,
     });
     expect(blob.size).toBe(SEG_BYTES.length * 2);
+  });
+
+  it("rejects a supplied child URL that the fresh master does not name", async () => {
+    const f = vi.fn(makeFetch({
+      "https://a/master.m3u8": { body: MASTER_EMBEDDED },
+      "https://attacker.example/forged.m3u8": { body: HIGH_VARIANT },
+    }));
+    await expect(downloadHls("https://a/master.m3u8", {
+      onProgress: noProgress,
+      signal: noSignal,
+      sizeCapBytes: cap,
+      fetchImpl: f,
+      variantUrl: "https://attacker.example/forged.m3u8",
+    })).rejects.toBeInstanceOf(VariantStaleError);
+    expect(f).not.toHaveBeenCalledWith(
+      "https://attacker.example/forged.m3u8",
+      expect.anything(),
+    );
+  });
+
+  it("rejects a selected master child when the root drifts to an implicit media playlist", async () => {
+    const f = vi.fn(makeFetch({
+      "https://a/master.m3u8": { body: SIMPLE_VOD },
+      "https://a/seg0.ts": { body: SEG_BYTES },
+      "https://a/seg1.ts": { body: SEG_BYTES },
+    }));
+    await expect(downloadHls("https://a/master.m3u8", {
+      onProgress: noProgress,
+      signal: noSignal,
+      sizeCapBytes: cap,
+      fetchImpl: f,
+      variantUrl: "https://a/selected-child.m3u8",
+      exactVariantSelection: true,
+    })).rejects.toBeInstanceOf(VariantStaleError);
+    expect(f).toHaveBeenCalledTimes(1);
+  });
+
+  it("binds the exact default-audio rendition when entries share one video URL", async () => {
+    const master = `#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="A",DEFAULT=YES,URI="audio-a/audio.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="b",NAME="B",DEFAULT=YES,URI="audio-b/audio.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO="a"
+video/video.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO="b"
+video/video.m3u8
+`;
+    const f = vi.fn(makeFetch({
+      "https://a/master.m3u8": { body: master },
+      "https://a/video/video.m3u8": { body: FMP4_PLAYLIST },
+      "https://a/video/init.mp4": { body: new Uint8Array([0x76]) },
+      "https://a/video/seg0.m4s": { body: SEG_BYTES },
+      "https://a/audio-b/audio.m3u8": { body: FMP4_PLAYLIST },
+      "https://a/audio-b/init.mp4": { body: new Uint8Array([0x61]) },
+      "https://a/audio-b/seg0.m4s": { body: SEG_BYTES },
+    }));
+
+    await expect(downloadHls("https://a/master.m3u8", {
+      onProgress: noProgress,
+      signal: noSignal,
+      sizeCapBytes: cap,
+      fetchImpl: f,
+      variantUrl: "https://a/video/video.m3u8",
+      audioUrl: "https://a/audio-b/audio.m3u8",
+      exactVariantSelection: true,
+    })).resolves.toMatchObject({ type: "video/mp4" });
+    expect(f).toHaveBeenCalledWith(
+      "https://a/audio-b/audio.m3u8",
+      expect.anything(),
+    );
+    expect(f).not.toHaveBeenCalledWith(
+      "https://a/audio-a/audio.m3u8",
+      expect.anything(),
+    );
   });
 });
 

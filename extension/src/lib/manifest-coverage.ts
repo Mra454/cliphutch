@@ -1,49 +1,68 @@
-// When an HLS or DASH manifest is detected on a tab, the page's player
-// typically also fetches every individual segment / variant Representation
-// from the same directory. webRequest sees those segment fetches and the
-// detector surfaces each as a standalone "direct" video. With multi-bitrate
-// streams the popup explodes into dozens of segment entries, and users
-// click them thinking they're full videos — but each segment is just a
-// chunk (or a video-only Representation, in single-file-profile DASH),
-// not the full content.
-//
-// Heuristic: when a manifest URL is detected on the same tab, hide direct
-// video entries whose URL shares the manifest's directory prefix. The
-// .mpd / .m3u8 entry remains visible so the user can route through our
-// proper download flow (which fetches manifest, picks variant, muxes).
-//
-// Trade-off: a legitimate direct video in the same directory as a
-// manifest gets suppressed too. Rare in practice on real DASH/HLS pages
-// (segments and unrelated assets typically don't co-exist), and the cost
-// of a false positive (one missing entry) is much smaller than the cost
-// of a false negative (popup with 25+ confusing entries).
-
 import type { DetectedVideo } from "../types";
+
+/**
+ * A conservative presentation classifier for obvious stream parts.
+ *
+ * Directory co-location alone is never evidence that a direct file belongs to
+ * a manifest: sites commonly keep a downloadable MP4 beside an HLS/DASH
+ * manifest. Only extensions dedicated to segmented delivery and explicit init
+ * segment names are collapsed by default, and callers must keep the covered
+ * list available behind a visible “show stream parts” control.
+ */
+
+const DEDICATED_SEGMENT_EXTENSIONS = new Set(["ts", "m4s", "cmfv", "cmfa"]);
+const INIT_SEGMENT_PATTERN = /^(?:init|initialization)(?:[-_.][^/]*)?\.(?:mp4|m4v)$/i;
+
+export type ManifestCoveragePartition = {
+  visible: DetectedVideo[];
+  covered: DetectedVideo[];
+};
 
 export function manifestDirectoryPrefix(url: string): string | null {
   try {
-    const u = new URL(url);
-    const lastSlash = u.pathname.lastIndexOf("/");
+    const parsed = new URL(url);
+    const lastSlash = parsed.pathname.lastIndexOf("/");
     if (lastSlash < 0) return null;
-    return u.origin + u.pathname.slice(0, lastSlash + 1);
+    return parsed.origin + parsed.pathname.slice(0, lastSlash + 1);
   } catch {
     return null;
   }
 }
 
-export function filterCoveredByManifests(videos: DetectedVideo[]): DetectedVideo[] {
-  const prefixes: string[] = [];
-  for (const v of videos) {
-    if (v.kind !== "hls" && v.kind !== "dash") continue;
-    const prefix = manifestDirectoryPrefix(v.url);
-    if (prefix) prefixes.push(prefix);
+function likelyStreamPart(url: string): boolean {
+  try {
+    const basename = new URL(url).pathname.split("/").pop() ?? "";
+    const extension = basename.includes(".") ? basename.split(".").pop()?.toLowerCase() : undefined;
+    return Boolean(
+      (extension && DEDICATED_SEGMENT_EXTENSIONS.has(extension)) ||
+      INIT_SEGMENT_PATTERN.test(basename),
+    );
+  } catch {
+    return false;
   }
-  if (prefixes.length === 0) return videos;
+}
 
-  return videos.filter((v) => {
-    // Always keep manifests visible — they're the entry point we want users
-    // to click.
-    if (v.kind !== "direct") return true;
-    return !prefixes.some((prefix) => v.url.startsWith(prefix));
+export function partitionCoveredByManifests(
+  videos: readonly DetectedVideo[],
+): ManifestCoveragePartition {
+  const prefixes = videos.flatMap((video) => {
+    if (video.kind !== "hls" && video.kind !== "dash") return [];
+    const prefix = manifestDirectoryPrefix(video.url);
+    return prefix ? [prefix] : [];
   });
+  if (prefixes.length === 0) return { visible: [...videos], covered: [] };
+
+  const visible: DetectedVideo[] = [];
+  const covered: DetectedVideo[] = [];
+  for (const video of videos) {
+    const isCovered = video.kind === "direct" && likelyStreamPart(video.url) &&
+      prefixes.some((prefix) => video.url.startsWith(prefix));
+    (isCovered ? covered : visible).push(video);
+  }
+  return { visible, covered };
+}
+
+/** Backward-compatible default shelf projection. */
+export function filterCoveredByManifests(videos: DetectedVideo[]): DetectedVideo[] {
+  return partitionCoveredByManifests(videos).visible;
 }

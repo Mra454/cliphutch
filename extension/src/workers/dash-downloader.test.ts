@@ -5,6 +5,11 @@ import { downloadDash } from "./dash-downloader";
 // deterministic concat-and-tag so the tests can assert on the fetch +
 // orchestration logic without depending on mp4box.js.
 vi.mock("./dash-mux", () => ({
+  inspectFmp4Init: (bytes: Uint8Array) => ({
+    encrypted: bytes[0] === 0xee,
+    trackCount: bytes[0] === 0x02 ? 2 : 1,
+    trackTypes: [bytes[0] >= 20 && bytes[0] !== 0xee ? "audio" : "video"],
+  }),
   muxFmp4: async (videoBytes: Uint8Array, audioBytes?: Uint8Array) => {
     const total = videoBytes.length + (audioBytes?.length ?? 0);
     const out = new Uint8Array(total);
@@ -20,6 +25,8 @@ import {
   EmptyManifestError,
   LiveStreamError,
   SizeCapError,
+  UnsupportedMediaShapeError,
+  VariantStaleError,
 } from "../lib/errors";
 
 type FetchEntry = { body: string | Uint8Array; status?: number };
@@ -214,5 +221,235 @@ describe("downloadDash", () => {
         onProgress: () => {},
       }),
     ).rejects.toThrow(SizeCapError);
+  });
+
+  it("does not let an unrelated unsupported Representation block a supported one", async () => {
+    const mpd = `<?xml version="1.0"?>
+<MPD type="static" mediaPresentationDuration="PT1S"><Period>
+  <AdaptationSet contentType="video" mimeType="video/mp4">
+    <Representation id="unsupported-high" bandwidth="9000000"><SegmentBase indexRange="0-99"/></Representation>
+    <Representation id="supported" bandwidth="1000000">
+      <SegmentTemplate initialization="i.m4s" media="s-$Number$.m4s" duration="1" timescale="1"/>
+    </Representation>
+  </AdaptationSet>
+</Period></MPD>`;
+    const requested: string[] = [];
+    const base = makeFetch({
+      [MANIFEST_URL]: { body: mpd },
+      "https://cdn.example.com/v/i.m4s": { body: new Uint8Array([1]) },
+      "https://cdn.example.com/v/s-1.m4s": { body: new Uint8Array([2]) },
+    });
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      requested.push(typeof input === "string" ? input : input.toString());
+      return base(input, init);
+    }) as typeof fetch;
+
+    const result = await downloadDash(MANIFEST_URL, {
+      signal: new AbortController().signal,
+      sizeCapBytes: 1_000_000,
+      fetchImpl,
+      onProgress: () => {},
+    });
+    expect(result.size).toBe(2);
+    expect(requested).not.toContain("https://cdn.example.com/v/unsupported-high");
+  });
+
+  it("does not let a protected alternative block a clear Representation", async () => {
+    const mpd = `<?xml version="1.0"?>
+<MPD type="static" mediaPresentationDuration="PT1S"><Period>
+  <AdaptationSet contentType="video" mimeType="video/mp4">
+    <SegmentTemplate initialization="i-$RepresentationID$.m4s" media="s-$RepresentationID$-$Number$.m4s" duration="1" timescale="1"/>
+    <Representation id="protected" bandwidth="9000000">
+      <ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cenc"/>
+    </Representation>
+    <Representation id="clear" bandwidth="1000000"/>
+  </AdaptationSet>
+</Period></MPD>`;
+    const requested: string[] = [];
+    const base = makeFetch({
+      [MANIFEST_URL]: { body: mpd },
+      "https://cdn.example.com/v/i-clear.m4s": { body: new Uint8Array([1]) },
+      "https://cdn.example.com/v/s-clear-1.m4s": { body: new Uint8Array([2]) },
+    });
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      requested.push(typeof input === "string" ? input : input.toString());
+      return base(input, init);
+    }) as typeof fetch;
+
+    const result = await downloadDash(MANIFEST_URL, {
+      signal: new AbortController().signal,
+      sizeCapBytes: 1_000_000,
+      fetchImpl,
+      onProgress: () => {},
+    });
+    expect(result.size).toBe(2);
+    expect(requested.some((url) => url.includes("protected"))).toBe(false);
+  });
+
+  it("returns VARIANT_STALE instead of silently replacing a missing selected quality", async () => {
+    const fetchImpl = makeFetch({ [MANIFEST_URL]: { body: MPD_VIDEO_ONLY } });
+    await expect(
+      downloadDash(MANIFEST_URL, {
+        signal: new AbortController().signal,
+        sizeCapBytes: 1_000_000,
+        fetchImpl,
+        videoRepresentationId: "gone",
+        onProgress: () => {},
+      }),
+    ).rejects.toMatchObject({ code: "VARIANT_STALE" });
+    await expect(
+      downloadDash(MANIFEST_URL, {
+        signal: new AbortController().signal,
+        sizeCapBytes: 1_000_000,
+        fetchImpl,
+        videoRepresentationId: "gone",
+        onProgress: () => {},
+      }),
+    ).rejects.toBeInstanceOf(VariantStaleError);
+  });
+
+  it("rejects multiple DASH periods before requesting any segment", async () => {
+    const multiPeriod = `<?xml version="1.0"?><MPD type="static"><Period/><Period/></MPD>`;
+    let mediaRequests = 0;
+    const base = makeFetch({ [MANIFEST_URL]: { body: multiPeriod } });
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url !== MANIFEST_URL) mediaRequests++;
+      return base(input, init);
+    }) as typeof fetch;
+    await expect(
+      downloadDash(MANIFEST_URL, {
+        signal: new AbortController().signal,
+        sizeCapBytes: 1_000_000,
+        fetchImpl,
+        onProgress: () => {},
+      }),
+    ).rejects.toBeInstanceOf(UnsupportedMediaShapeError);
+    expect(mediaRequests).toBe(0);
+  });
+
+  it("rejects SegmentList ranges before requesting init or media bytes", async () => {
+    const ranged = `<?xml version="1.0"?>
+<MPD type="static"><Period><AdaptationSet contentType="video" mimeType="video/mp4">
+  <Representation id="v" bandwidth="1"><SegmentList>
+    <Initialization sourceURL="all.mp4" range="0-99"/>
+    <SegmentURL media="all.mp4" mediaRange="100-199"/>
+  </SegmentList></Representation>
+</AdaptationSet></Period></MPD>`;
+    let binaryRequests = 0;
+    const base = makeFetch({ [MANIFEST_URL]: { body: ranged } });
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url !== MANIFEST_URL) binaryRequests++;
+      return base(input, init);
+    }) as typeof fetch;
+    await expect(
+      downloadDash(MANIFEST_URL, {
+        signal: new AbortController().signal,
+        sizeCapBytes: 1_000_000,
+        fetchImpl,
+        onProgress: () => {},
+      }),
+    ).rejects.toBeInstanceOf(ByteRangeError);
+    expect(binaryRequests).toBe(0);
+  });
+
+  it("rejects open-ended DASH timeline repeats before requesting init or media bytes", async () => {
+    const negativeRepeat = `<?xml version="1.0"?>
+<MPD type="static"><Period><AdaptationSet contentType="video" mimeType="video/mp4">
+  <Representation id="v" bandwidth="1"><SegmentTemplate initialization="i.m4s" media="s-$Time$.m4s">
+    <SegmentTimeline><S t="0" d="1" r="-1"/></SegmentTimeline>
+  </SegmentTemplate></Representation>
+</AdaptationSet></Period></MPD>`;
+    let binaryRequests = 0;
+    const base = makeFetch({ [MANIFEST_URL]: { body: negativeRepeat } });
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url !== MANIFEST_URL) binaryRequests++;
+      return base(input, init);
+    }) as typeof fetch;
+    await expect(
+      downloadDash(MANIFEST_URL, {
+        signal: new AbortController().signal,
+        sizeCapBytes: 1_000_000,
+        fetchImpl,
+        onProgress: () => {},
+      }),
+    ).rejects.toBeInstanceOf(UnsupportedMediaShapeError);
+    expect(binaryRequests).toBe(0);
+  });
+
+  it("rejects bare mp4protection CENC before requesting init or media bytes", async () => {
+    const bareCenc = `<?xml version="1.0"?>
+<MPD type="static" mediaPresentationDuration="PT1S"><Period>
+  <AdaptationSet contentType="video" mimeType="video/mp4">
+    <ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cenc"/>
+    <Representation id="v" bandwidth="1">
+      <SegmentTemplate initialization="i.m4s" media="s-$Number$.m4s" duration="1" timescale="1"/>
+    </Representation>
+  </AdaptationSet>
+</Period></MPD>`;
+    let binaryRequests = 0;
+    const base = makeFetch({ [MANIFEST_URL]: { body: bareCenc } });
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url !== MANIFEST_URL) binaryRequests++;
+      return base(input, init);
+    }) as typeof fetch;
+    await expect(
+      downloadDash(MANIFEST_URL, {
+        signal: new AbortController().signal,
+        sizeCapBytes: 1_000_000,
+        fetchImpl,
+        onProgress: () => {},
+      }),
+    ).rejects.toBeInstanceOf(DrmProtectedError);
+    expect(binaryRequests).toBe(0);
+  });
+
+  it("rejects CENC found in init before requesting media segments", async () => {
+    let mediaRequests = 0;
+    const base = makeFetch({
+      [MANIFEST_URL]: { body: MPD_VIDEO_ONLY },
+      "https://cdn.example.com/v/vinit.m4s": { body: new Uint8Array([0xee]) },
+      "https://cdn.example.com/v/v-1.m4s": { body: new Uint8Array([2]) },
+    });
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("v-1.m4s")) mediaRequests++;
+      return base(input, init);
+    }) as typeof fetch;
+    await expect(
+      downloadDash(MANIFEST_URL, {
+        signal: new AbortController().signal,
+        sizeCapBytes: 1_000_000,
+        fetchImpl,
+        onProgress: () => {},
+      }),
+    ).rejects.toBeInstanceOf(DrmProtectedError);
+    expect(mediaRequests).toBe(0);
+  });
+
+  it("rejects a multi-track DASH init before requesting media segments", async () => {
+    let mediaRequests = 0;
+    const base = makeFetch({
+      [MANIFEST_URL]: { body: MPD_VIDEO_ONLY },
+      "https://cdn.example.com/v/vinit.m4s": { body: new Uint8Array([0x02]) },
+      "https://cdn.example.com/v/v-1.m4s": { body: new Uint8Array([3]) },
+    });
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.endsWith("v-1.m4s")) mediaRequests++;
+      return base(input, init);
+    }) as typeof fetch;
+    await expect(
+      downloadDash(MANIFEST_URL, {
+        signal: new AbortController().signal,
+        sizeCapBytes: 1_000_000,
+        fetchImpl,
+        onProgress: () => {},
+      }),
+    ).rejects.toBeInstanceOf(UnsupportedMediaShapeError);
+    expect(mediaRequests).toBe(0);
   });
 });

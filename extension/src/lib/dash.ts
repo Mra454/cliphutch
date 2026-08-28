@@ -12,8 +12,21 @@
 import { XMLParser } from "fast-xml-parser";
 import type { DrmScheme } from "./drm";
 
+export type DashMediaType = "video" | "audio" | "unknown";
+
+export type DashRepresentationUnsupportedShape =
+  | "segment-base"
+  | "segment-list-range"
+  | "negative-repeat"
+  | "invalid-segment-template"
+  | "segment-limit"
+  | "no-segments"
+  | "ambiguous-media-type"
+  | "unsupported-container";
+
 export type DashRepresentation = {
   id: string;
+  mediaType: DashMediaType;
   mimeType: string;
   codecs?: string;
   bandwidth: number;
@@ -21,6 +34,8 @@ export type DashRepresentation = {
   height?: number;
   initSegmentUrl?: string;
   mediaSegmentUrls: string[];
+  drm: { protected: boolean; scheme?: DrmScheme };
+  unsupportedShape?: DashRepresentationUnsupportedShape;
 };
 
 export type DashManifest = {
@@ -28,8 +43,9 @@ export type DashManifest = {
   durationSec?: number;
   video: DashRepresentation[];
   audio: DashRepresentation[];
+  other: DashRepresentation[];
   drm: { protected: boolean; scheme?: DrmScheme };
-  unsupportedShape?: "byterange" | "no-segments";
+  unsupportedShape?: "multiple-periods" | "representation-limit";
 };
 
 export class DashParseError extends Error {
@@ -45,6 +61,15 @@ const DRM_SCHEME_IDS: Array<[string, DrmScheme]> = [
   ["urn:uuid:94ce86fb-07ff-4f43-adb8-93d2fa968ca2", "fairplay"],
   ["urn:uuid:e2719d58-a985-b3c9-781a-b030af78d30e", "clearkey"],
 ];
+
+// The current downloader eagerly materializes segment URLs. Until the v2
+// cursor-based planner lands, fail closed before an MPD can force excessive
+// expansion or request fan-out.
+export const DASH_MANIFEST_CHAR_LIMIT = 2_000_000;
+export const DASH_REPRESENTATION_LIMIT = 256;
+export const DASH_SEGMENT_LIMIT_PER_REPRESENTATION = 20_000;
+export const DASH_URL_LENGTH_LIMIT = 8_192;
+const DASH_TEMPLATE_PADDING_LIMIT = 20;
 
 function asArray<T>(v: T | T[] | undefined): T[] {
   if (v === undefined || v === null) return [];
@@ -75,6 +100,9 @@ function resolveBaseUrl(parents: string[], child: string | undefined): string {
       // leave as-is
     }
   }
+  if (url.length > DASH_URL_LENGTH_LIMIT) {
+    throw new DashParseError("DASH URL exceeds the parser length limit");
+  }
   return url;
 }
 
@@ -82,36 +110,51 @@ function classifyDrm(node: Record<string, unknown>): { protected: boolean; schem
   const cps = asArray(node.ContentProtection as Record<string, unknown> | Record<string, unknown>[] | undefined);
   if (cps.length === 0) return { protected: false };
 
+  let sawUnknownProtection = false;
   for (const cp of cps) {
     const schemeIdUri = String(cp["@_schemeIdUri"] ?? "").toLowerCase();
     if (!schemeIdUri) continue;
     if (schemeIdUri === "urn:mpeg:dash:mp4protection:2011") {
-      // The mp4protection scheme alone is generic CENC marking — it indicates
-      // the segments use Common Encryption but not which DRM system. Treat it
-      // as protected only if accompanied by a real scheme (handled by other
-      // ContentProtection siblings). Skip and continue scanning.
+      // Bare mp4protection still declares Common Encryption. The DRM system
+      // may be unspecified, but treating this as clear content downloads
+      // ciphertext and produces a corrupt-looking file for the customer.
+      sawUnknownProtection = true;
       continue;
     }
     for (const [marker, scheme] of DRM_SCHEME_IDS) {
       if (schemeIdUri.includes(marker)) return { protected: true, scheme };
     }
-    return { protected: true, scheme: "unknown" };
+    sawUnknownProtection = true;
   }
-  return { protected: false };
+  return sawUnknownProtection ? { protected: true, scheme: "unknown" } : { protected: false };
+}
+
+function firstProtected(
+  ...checks: Array<{ protected: boolean; scheme?: DrmScheme }>
+): { protected: boolean; scheme?: DrmScheme } {
+  return checks.find((check) => check.protected) ?? { protected: false };
 }
 
 function applyTemplate(
   tmpl: string,
   vars: { RepresentationID?: string; Number?: number; Time?: number; Bandwidth?: number },
 ): string {
-  return tmpl.replace(/\$(RepresentationID|Number|Time|Bandwidth)(?:%(\d+)d)?\$/g, (_m, name, pad) => {
+  const expanded = tmpl.replace(/\$(RepresentationID|Number|Time|Bandwidth)(?:%(\d+)d)?\$/g, (_m, name, pad) => {
     const v = vars[name as keyof typeof vars];
     if (v === undefined || v === null) return "";
     if (typeof v === "number" && pad) {
-      return String(v).padStart(Number(pad), "0");
+      const width = Number(pad);
+      if (!Number.isSafeInteger(width) || width > DASH_TEMPLATE_PADDING_LIMIT) {
+        throw new DashParseError("DASH template padding exceeds the parser limit");
+      }
+      return String(v).padStart(width, "0");
     }
     return String(v);
   });
+  if (expanded.length > DASH_URL_LENGTH_LIMIT) {
+    throw new DashParseError("DASH template URL exceeds the parser length limit");
+  }
+  return expanded;
 }
 
 function expandSegmentTemplate(
@@ -119,7 +162,11 @@ function expandSegmentTemplate(
   representationId: string,
   bandwidth: number,
   durationSec: number | undefined,
-): { initTmpl?: string; mediaUrls: string[] } {
+): {
+  initTmpl?: string;
+  mediaUrls: string[];
+  unsupportedShape?: DashRepresentationUnsupportedShape;
+} {
   const initTmpl = template["@_initialization"] as string | undefined;
   const mediaTmpl = template["@_media"] as string | undefined;
   const startNumber = Number(template["@_startNumber"] ?? 1);
@@ -128,15 +175,39 @@ function expandSegmentTemplate(
 
   const mediaUrls: string[] = [];
 
+  if (
+    !Number.isSafeInteger(startNumber) ||
+    startNumber < 0 ||
+    !Number.isFinite(timescale) ||
+    timescale <= 0 ||
+    (segDuration !== undefined && (!Number.isFinite(segDuration) || segDuration <= 0))
+  ) {
+    return { initTmpl, mediaUrls, unsupportedShape: "invalid-segment-template" };
+  }
+
   const timeline = asArray(template.SegmentTimeline as Record<string, unknown> | Record<string, unknown>[] | undefined)[0];
   if (timeline && mediaTmpl) {
     const ses = asArray(timeline.S as Record<string, unknown> | Record<string, unknown>[] | undefined);
     let segNum = startNumber;
     let curTime = 0;
     for (const seg of ses) {
-      if (seg["@_t"] !== undefined) curTime = Number(seg["@_t"]);
+      if (seg["@_t"] !== undefined) {
+        curTime = Number(seg["@_t"]);
+        if (!Number.isSafeInteger(curTime) || curTime < 0) {
+          return { initTmpl, mediaUrls: [], unsupportedShape: "invalid-segment-template" };
+        }
+      }
       const repeat = seg["@_r"] !== undefined ? Number(seg["@_r"]) : 0;
       const d = Number(seg["@_d"] ?? 0);
+      if (repeat < 0) {
+        return { initTmpl, mediaUrls: [], unsupportedShape: "negative-repeat" };
+      }
+      if (!Number.isSafeInteger(repeat) || !Number.isSafeInteger(d) || d <= 0) {
+        return { initTmpl, mediaUrls: [], unsupportedShape: "invalid-segment-template" };
+      }
+      if (mediaUrls.length + repeat + 1 > DASH_SEGMENT_LIMIT_PER_REPRESENTATION) {
+        return { initTmpl, mediaUrls: [], unsupportedShape: "segment-limit" };
+      }
       for (let i = 0; i <= repeat; i++) {
         mediaUrls.push(
           applyTemplate(mediaTmpl, {
@@ -153,6 +224,12 @@ function expandSegmentTemplate(
   } else if (mediaTmpl && segDuration && timescale && durationSec !== undefined) {
     const segLenSec = segDuration / timescale;
     const count = Math.ceil(durationSec / segLenSec);
+    if (!Number.isSafeInteger(count) || count < 0) {
+      return { initTmpl, mediaUrls: [], unsupportedShape: "invalid-segment-template" };
+    }
+    if (count > DASH_SEGMENT_LIMIT_PER_REPRESENTATION) {
+      return { initTmpl, mediaUrls: [], unsupportedShape: "segment-limit" };
+    }
     for (let i = 0; i < count; i++) {
       mediaUrls.push(
         applyTemplate(mediaTmpl, {
@@ -167,51 +244,100 @@ function expandSegmentTemplate(
   return { initTmpl, mediaUrls };
 }
 
-function expandSegmentList(list: Record<string, unknown>): { initUrl?: string; mediaUrls: string[] } {
+function expandSegmentList(list: Record<string, unknown>): {
+  initUrl?: string;
+  mediaUrls: string[];
+  unsupportedShape?: DashRepresentationUnsupportedShape;
+} {
   const init = asArray(list.Initialization as Record<string, unknown> | Record<string, unknown>[] | undefined)[0];
   const initUrl = init ? (init["@_sourceURL"] as string | undefined) : undefined;
-  const urls = asArray(list.SegmentURL as Record<string, unknown> | Record<string, unknown>[] | undefined)
+  const segmentUrls = asArray(list.SegmentURL as Record<string, unknown> | Record<string, unknown>[] | undefined);
+  if (
+    init?.["@_range"] !== undefined ||
+    segmentUrls.some((u) => u["@_mediaRange"] !== undefined || u["@_indexRange"] !== undefined)
+  ) {
+    return { initUrl, mediaUrls: [], unsupportedShape: "segment-list-range" };
+  }
+  if (segmentUrls.length > DASH_SEGMENT_LIMIT_PER_REPRESENTATION) {
+    return { initUrl, mediaUrls: [], unsupportedShape: "segment-limit" };
+  }
+  const urls = segmentUrls
     .map((u) => u["@_media"] as string | undefined)
     .filter((u): u is string => typeof u === "string");
   return { initUrl, mediaUrls: urls };
 }
 
+function resolveMediaType(
+  rep: Record<string, unknown>,
+  fallbackContentType: string,
+  fallbackMimeType: string,
+): DashMediaType {
+  const ownContentType = String(rep["@_contentType"] ?? "").toLowerCase();
+  const ownMimeType = String(rep["@_mimeType"] ?? "").toLowerCase();
+  const inheritedContentType = fallbackContentType.toLowerCase();
+  const inheritedMimeType = fallbackMimeType.toLowerCase();
+
+  // Representation-local declarations take precedence over an ambiguous or
+  // even contradictory AdaptationSet declaration.
+  if (ownContentType.startsWith("audio") || ownMimeType.startsWith("audio/")) return "audio";
+  if (ownContentType.startsWith("video") || ownMimeType.startsWith("video/")) return "video";
+  if (inheritedContentType.startsWith("audio") || inheritedMimeType.startsWith("audio/")) return "audio";
+  if (inheritedContentType.startsWith("video") || inheritedMimeType.startsWith("video/")) return "video";
+  if (rep["@_width"] !== undefined || rep["@_height"] !== undefined) return "video";
+  return "unknown";
+}
+
 function buildRepresentation(
   rep: Record<string, unknown>,
   parentBaseUrls: string[],
+  fallbackContentType: string,
   fallbackMimeType: string,
   inheritedTemplate: Record<string, unknown> | undefined,
+  inheritedList: Record<string, unknown> | undefined,
+  inheritedSegmentBase: boolean,
+  inheritedDrm: { protected: boolean; scheme?: DrmScheme },
   durationSec: number | undefined,
-): DashRepresentation | { unsupported: "byterange" | "no-segments" } {
+): DashRepresentation {
   const id = String(rep["@_id"] ?? "");
   const bandwidth = Number(rep["@_bandwidth"] ?? 0);
   const codecs = rep["@_codecs"] as string | undefined;
   const width = rep["@_width"] !== undefined ? Number(rep["@_width"]) : undefined;
   const height = rep["@_height"] !== undefined ? Number(rep["@_height"]) : undefined;
   const mimeType = String(rep["@_mimeType"] ?? fallbackMimeType);
+  const mediaType = resolveMediaType(rep, fallbackContentType, fallbackMimeType);
+  const drm = firstProtected(classifyDrm(rep), inheritedDrm);
 
   const repBaseUrl = asArray(rep.BaseURL as string | string[] | undefined)[0];
   const baseUrls = repBaseUrl ? [...parentBaseUrls, repBaseUrl] : parentBaseUrls;
 
-  if (rep.SegmentBase) {
-    return { unsupported: "byterange" };
-  }
-
   const tpl = (rep.SegmentTemplate as Record<string, unknown> | undefined) ?? inheritedTemplate;
-  const list = rep.SegmentList as Record<string, unknown> | undefined;
+  const list = (rep.SegmentList as Record<string, unknown> | undefined) ?? inheritedList;
 
   let initUrl: string | undefined;
   let mediaUrls: string[] = [];
+  let unsupportedShape: DashRepresentationUnsupportedShape | undefined;
 
-  if (tpl) {
-    const { initTmpl, mediaUrls: rawMedia } = expandSegmentTemplate(tpl, id, bandwidth, durationSec);
+  if (rep.SegmentBase || inheritedSegmentBase) {
+    unsupportedShape = "segment-base";
+  } else if (tpl) {
+    const {
+      initTmpl,
+      mediaUrls: rawMedia,
+      unsupportedShape: templateUnsupported,
+    } = expandSegmentTemplate(tpl, id, bandwidth, durationSec);
+    unsupportedShape = templateUnsupported;
     if (initTmpl) {
       const initRel = applyTemplate(initTmpl, { RepresentationID: id, Bandwidth: bandwidth });
       initUrl = resolveBaseUrl(baseUrls, initRel);
     }
     mediaUrls = rawMedia.map((u) => resolveBaseUrl(baseUrls, u));
   } else if (list) {
-    const { initUrl: rawInit, mediaUrls: rawMedia } = expandSegmentList(list);
+    const {
+      initUrl: rawInit,
+      mediaUrls: rawMedia,
+      unsupportedShape: listUnsupported,
+    } = expandSegmentList(list);
+    unsupportedShape = listUnsupported;
     if (rawInit) initUrl = resolveBaseUrl(baseUrls, rawInit);
     mediaUrls = rawMedia.map((u) => resolveBaseUrl(baseUrls, u));
   } else {
@@ -223,12 +349,23 @@ function buildRepresentation(
     if (last && !last.endsWith("/")) {
       mediaUrls = [resolveBaseUrl(baseUrls, undefined)];
     } else {
-      return { unsupported: "no-segments" };
+      unsupportedShape = "no-segments";
     }
   }
 
+  if (!unsupportedShape && mediaType === "unknown") unsupportedShape = "ambiguous-media-type";
+  if (
+    !unsupportedShape &&
+    mediaType !== "unknown" &&
+    mimeType.toLowerCase() !== `${mediaType}/mp4`
+  ) {
+    unsupportedShape = "unsupported-container";
+  }
+  if (!unsupportedShape && mediaUrls.length === 0) unsupportedShape = "no-segments";
+
   return {
     id,
+    mediaType,
     mimeType,
     codecs,
     bandwidth,
@@ -236,10 +373,16 @@ function buildRepresentation(
     height,
     initSegmentUrl: initUrl,
     mediaSegmentUrls: mediaUrls,
+    drm,
+    unsupportedShape,
   };
 }
 
 export function parseMpd(text: string, manifestUrl: string): DashManifest {
+  if (text.length > DASH_MANIFEST_CHAR_LIMIT) {
+    throw new DashParseError("MPD exceeds the parser size limit");
+  }
+
   const parser = new XMLParser({
     ignoreAttributes: false,
     attributeNamePrefix: "@_",
@@ -258,56 +401,112 @@ export function parseMpd(text: string, manifestUrl: string): DashManifest {
   if (!mpd) throw new DashParseError("No <MPD> root element");
 
   const type = (mpd["@_type"] as string | undefined) === "dynamic" ? "dynamic" : "static";
-  const durationSec = parseDurationIso(mpd["@_mediaPresentationDuration"] as string | undefined);
+  const mpdDurationSec = parseDurationIso(mpd["@_mediaPresentationDuration"] as string | undefined);
 
   const mpdBaseUrl = asArray(mpd.BaseURL as string | string[] | undefined)[0];
   const rootBaseUrls = mpdBaseUrl ? [manifestUrl, mpdBaseUrl] : [manifestUrl];
 
   const periods = asArray(mpd.Period as Record<string, unknown> | Record<string, unknown>[] | undefined);
+  if (periods.length > 1) {
+    return {
+      type,
+      durationSec: mpdDurationSec,
+      video: [],
+      audio: [],
+      other: [],
+      drm: classifyDrm(mpd),
+      unsupportedShape: "multiple-periods",
+    };
+  }
   const period = periods[0];
   if (!period) {
-    return { type, durationSec, video: [], audio: [], drm: { protected: false } };
+    return {
+      type,
+      durationSec: mpdDurationSec,
+      video: [],
+      audio: [],
+      other: [],
+      drm: classifyDrm(mpd),
+    };
   }
+  const durationSec =
+    mpdDurationSec ?? parseDurationIso(period["@_duration"] as string | undefined);
 
   const periodBaseUrl = asArray(period.BaseURL as string | string[] | undefined)[0];
   const periodBaseUrls = periodBaseUrl ? [...rootBaseUrls, periodBaseUrl] : rootBaseUrls;
 
   const adaptationSets = asArray(period.AdaptationSet as Record<string, unknown> | Record<string, unknown>[] | undefined);
 
-  let drm: { protected: boolean; scheme?: DrmScheme } = { protected: false };
+  const inheritedManifestDrm = firstProtected(classifyDrm(period), classifyDrm(mpd));
+  let drm: { protected: boolean; scheme?: DrmScheme } = inheritedManifestDrm;
   const video: DashRepresentation[] = [];
   const audio: DashRepresentation[] = [];
-  let unsupportedShape: "byterange" | "no-segments" | undefined;
+  const other: DashRepresentation[] = [];
+  let representationCount = 0;
 
   for (const as of adaptationSets) {
     const asBaseUrl = asArray(as.BaseURL as string | string[] | undefined)[0];
     const asBaseUrls = asBaseUrl ? [...periodBaseUrls, asBaseUrl] : periodBaseUrls;
     const asContentType = String(as["@_contentType"] ?? "").toLowerCase();
     const asMimeType = String(as["@_mimeType"] ?? "");
-    const isVideo = asContentType.startsWith("video") || /^video\//.test(asMimeType);
-    const isAudio = asContentType.startsWith("audio") || /^audio\//.test(asMimeType);
     const inheritedTemplate = as.SegmentTemplate as Record<string, unknown> | undefined;
+    const inheritedList = as.SegmentList as Record<string, unknown> | undefined;
+    const inheritedSegmentBase = Boolean(as.SegmentBase);
 
-    const asDrm = classifyDrm(as);
+    const asDrm = firstProtected(classifyDrm(as), inheritedManifestDrm);
     if (asDrm.protected && !drm.protected) drm = asDrm;
 
     const reps = asArray(as.Representation as Record<string, unknown> | Record<string, unknown>[] | undefined);
+    representationCount += reps.length;
+    if (representationCount > DASH_REPRESENTATION_LIMIT) {
+      return {
+        type,
+        durationSec,
+        video: [],
+        audio: [],
+        other: [],
+        drm,
+        unsupportedShape: "representation-limit",
+      };
+    }
     for (const rep of reps) {
-      const repDrm = classifyDrm(rep);
-      if (repDrm.protected && !drm.protected) drm = repDrm;
+      const built = buildRepresentation(
+        rep,
+        asBaseUrls,
+        asContentType,
+        asMimeType,
+        inheritedTemplate,
+        inheritedList,
+        inheritedSegmentBase,
+        asDrm,
+        durationSec,
+      );
+      if (built.drm.protected && !drm.protected) drm = built.drm;
 
-      const built = buildRepresentation(rep, asBaseUrls, asMimeType, inheritedTemplate, durationSec);
-      if ("unsupported" in built) {
-        unsupportedShape = built.unsupported;
-        continue;
-      }
-      if (isVideo || built.width || built.height) video.push(built);
-      else if (isAudio) audio.push(built);
-      else video.push(built);
+      if (built.mediaType === "video") video.push(built);
+      else if (built.mediaType === "audio") audio.push(built);
+      else other.push(built);
     }
   }
 
-  return { type, durationSec, video, audio, drm, unsupportedShape };
+  // Preserve a manifest-level DRM summary for callers that cannot select a
+  // Representation, but do not let one protected alternative poison a clear
+  // sibling. The downloader still checks the exact selected video/audio reps.
+  const protectedVideo =
+    video.length > 0 && video.every((rep) => rep.drm.protected)
+      ? video.find((rep) => rep.drm.protected)
+      : undefined;
+  const protectedAudio =
+    audio.length > 0 && audio.every((rep) => rep.drm.protected)
+      ? audio.find((rep) => rep.drm.protected)
+      : undefined;
+  const manifestDrm = firstProtected(
+    inheritedManifestDrm,
+    protectedVideo?.drm ?? { protected: false },
+    protectedAudio?.drm ?? { protected: false },
+  );
+
+  return { type, durationSec, video, audio, other, drm: manifestDrm };
 }
 
 export function pickHighestBandwidth(reps: DashRepresentation[]): DashRepresentation | undefined {

@@ -12,10 +12,12 @@ import {
   NetworkError,
   ParseError,
   SizeCapError,
+  UnsupportedMediaShapeError,
+  VariantStaleError,
 } from "../lib/errors";
 import { classifyHlsManifestForDrm } from "../lib/drm";
 import { HLS_SEGMENT_FETCH_CONCURRENCY } from "../lib/constants";
-import { muxFmp4 } from "./dash-mux";
+import { inspectFmp4Init, muxFmp4 } from "./dash-mux";
 import { transmuxTsAudioToFmp4, transmuxTsToMp4 } from "./ts-audio-to-fmp4";
 
 export type HlsProgress = {
@@ -36,6 +38,8 @@ export type DownloadHlsOptions = {
   // mux into the output MP4. Required for separate-audio variants. Both the
   // video variant and the audio rendition must be fMP4 (Stage 1 limitation).
   audioUrl?: string;
+  /** Require the fresh master to name this exact video/default-audio tuple. */
+  exactVariantSelection?: boolean;
 };
 
 type ByteRange = { length: number; offset: number };
@@ -44,8 +48,10 @@ type ParsedSegment = {
   uri: string;
   duration?: number;
   key?: { method?: string; uri?: string };
-  map?: { uri?: string; byterange?: ByteRange };
+  map?: { uri?: string; byterange?: ByteRange; key?: { method?: string } };
   byterange?: ByteRange;
+  discontinuity?: boolean;
+  timeline?: number;
 };
 
 type ParsedVariant = {
@@ -61,6 +67,7 @@ type ParsedVariant = {
 type ParsedManifest = {
   endList?: boolean;
   segments?: ParsedSegment[];
+  discontinuityStarts?: number[];
   playlists?: ParsedVariant[];
   mediaGroups?: {
     AUDIO?: Record<string, Record<string, { uri?: string; default?: boolean; autoselect?: boolean; language?: string }>>;
@@ -188,10 +195,25 @@ function pickVariant(
 function validateVariant(parsed: ParsedManifest): void {
   if (!parsed.endList) throw new LiveStreamError();
   const segments = parsed.segments ?? [];
+  if (segments.length === 0) throw new EmptyManifestError();
   for (const seg of segments) {
     if (seg.key && seg.key.method && seg.key.method.toUpperCase() !== "NONE") {
       throw new EncryptedStreamError();
     }
+  }
+
+  if ((parsed.discontinuityStarts?.length ?? 0) > 0 || segments.some((seg) => seg.discontinuity)) {
+    throw new UnsupportedMediaShapeError("an HLS discontinuity");
+  }
+
+  const mapSignature = (seg: ParsedSegment): string => {
+    if (!seg.map?.uri) return "none";
+    const range = seg.map.byterange;
+    return `${seg.map.uri}|${range?.offset ?? ""}|${range?.length ?? ""}`;
+  };
+  const firstMap = mapSignature(segments[0]);
+  if (segments.some((seg) => mapSignature(seg) !== firstMap)) {
+    throw new UnsupportedMediaShapeError("an HLS initialization-map change");
   }
 }
 
@@ -203,6 +225,27 @@ function detectFmp4Init(segments: ParsedSegment[]): { uri: string; byterange?: B
   const map = segments[0]?.map;
   if (!map?.uri) return undefined;
   return { uri: map.uri, byterange: map.byterange };
+}
+
+function validateFmp4Init(bytes: Uint8Array, expectedType: "video" | "audio"): void {
+  let inspection: ReturnType<typeof inspectFmp4Init>;
+  try {
+    inspection = inspectFmp4Init(bytes);
+  } catch {
+    throw new UnsupportedMediaShapeError("an unreadable fMP4 initialization segment");
+  }
+  if (inspection.encrypted) throw new DrmProtectedError("unknown");
+  if (inspection.trackCount !== 1) {
+    throw new UnsupportedMediaShapeError(
+      `an embedded fMP4 initialization segment containing ${inspection.trackCount} tracks`,
+    );
+  }
+  const actualType = inspection.trackTypes[0];
+  if (actualType !== expectedType) {
+    throw new UnsupportedMediaShapeError(
+      `an HLS ${expectedType} rendition whose init declares a ${actualType} track`,
+    );
+  }
 }
 
 function estimateSize(parsed: ParsedManifest, bandwidthBps: number): number {
@@ -281,6 +324,9 @@ export async function downloadHls(
   const { signal, sizeCapBytes, onProgress } = opts;
 
   if (signal.aborted) throw new CancelledError();
+  if (opts.exactVariantSelection && !opts.variantUrl) {
+    throw new VariantStaleError();
+  }
 
   // === Step 1: resolve video variant + (optionally) audio rendition ===
 
@@ -295,14 +341,34 @@ export async function downloadHls(
 
   if (parsed.playlists && parsed.playlists.length > 0) {
     if (opts.variantUrl) {
-      // Caller picked a specific variant — locate it to read AUDIO group when
-      // opts.audioUrl wasn't pre-resolved.
-      variantUrl = opts.variantUrl;
+      // A persistent Capture Pack selection binds both the video and its
+      // reviewed default-audio rendition. Legacy callers retain the old
+      // video-only lookup and default-audio discovery behavior.
       const matched = parsed.playlists.find(
-        (p) => resolveUrl(p.uri, playlistUrl) === opts.variantUrl,
+        (candidate) => {
+          if (resolveUrl(candidate.uri, playlistUrl) !== opts.variantUrl) {
+            return false;
+          }
+          if (!opts.exactVariantSelection) return true;
+          const renditionUri = resolveDefaultAudioRenditionUri(
+            candidate.attributes.AUDIO,
+            parsed.mediaGroups,
+          );
+          const candidateAudioUrl = renditionUri === undefined
+            ? undefined
+            : resolveUrl(renditionUri, playlistUrl);
+          return candidateAudioUrl === opts.audioUrl;
+        },
       );
-      bandwidthBps = matched?.attributes.BANDWIDTH ?? 0;
-      if (!audioRenditionUrl && matched) {
+      // A child URL is executable only when the fresh master names it. This
+      // rejects stale signed URLs and prevents an arbitrary caller URL from
+      // crossing the trusted manifest boundary.
+      if (!matched) throw new VariantStaleError();
+      variantUrl = resolveUrl(matched.uri, playlistUrl);
+      bandwidthBps = matched.attributes.BANDWIDTH ?? 0;
+      if (opts.exactVariantSelection) {
+        audioRenditionUrl = opts.audioUrl;
+      } else if (!audioRenditionUrl) {
         const renditionUri = resolveDefaultAudioRenditionUri(
           matched.attributes.AUDIO,
           parsed.mediaGroups,
@@ -321,6 +387,18 @@ export async function downloadHls(
     const variantDrm = classifyHlsManifestForDrm(variantText);
     if (variantDrm.protected) throw new DrmProtectedError(variantDrm.scheme);
     parsed = parseManifest(variantText);
+  } else if (opts.exactVariantSelection) {
+    const rootUrl = resolveUrl(playlistUrl, playlistUrl);
+    const selectedUrl = opts.variantUrl === undefined
+      ? undefined
+      : resolveUrl(opts.variantUrl, playlistUrl);
+    // If execution revalidation selected a master child, a subsequent root
+    // fetch drifting to an implicit media playlist must fail stale instead of
+    // silently downloading the root. A genuine implicit selection binds the
+    // root itself and cannot carry a separate default-audio rendition.
+    if (selectedUrl !== rootUrl || opts.audioUrl !== undefined) {
+      throw new VariantStaleError();
+    }
   }
 
   validateVariant(parsed);
@@ -381,11 +459,13 @@ export async function downloadHls(
     videoInitBytes = await fetchInit(videoInit, variantUrl);
     runningBytes += videoInitBytes.length;
     checkCap();
+    validateFmp4Init(videoInitBytes, "video");
   }
   if (audioInit && audioRenditionUrl) {
     audioInitBytes = await fetchInit(audioInit, audioBaseUrl);
     runningBytes += audioInitBytes.length;
     checkCap();
+    validateFmp4Init(audioInitBytes, "audio");
   }
 
   // === Step 5: fetch media segments — parallel video + audio when both present ===

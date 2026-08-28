@@ -159,14 +159,14 @@ describe("parseMpd", () => {
     }
   });
 
-  it("does NOT flag bare urn:mpeg:dash:mp4protection:2011 alone (no real DRM scheme)", () => {
+  it("flags bare urn:mpeg:dash:mp4protection:2011 as unsupported CENC", () => {
     const xml = `<?xml version="1.0"?>
 <MPD type="static"><Period><AdaptationSet contentType="video" mimeType="video/mp4">
 <ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cenc"/>
 <Representation id="v" bandwidth="1"><SegmentTemplate initialization="i.m4s" media="s-$Number$.m4s" startNumber="1" duration="1" timescale="1"/></Representation>
 </AdaptationSet></Period></MPD>`;
     const m = parseMpd(xml, BASE);
-    expect(m.drm.protected).toBe(false);
+    expect(m.drm).toEqual({ protected: true, scheme: "unknown" });
   });
 
   it("flags an unknown DRM schemeIdUri as protected with scheme=unknown", () => {
@@ -179,6 +179,23 @@ describe("parseMpd", () => {
     expect(m.drm).toEqual({ protected: true, scheme: "unknown" });
   });
 
+  it("keeps Representation-level DRM local when a clear sibling exists", () => {
+    const xml = `<?xml version="1.0"?>
+<MPD type="static" mediaPresentationDuration="PT1S"><Period>
+  <AdaptationSet contentType="video" mimeType="video/mp4">
+    <SegmentTemplate initialization="i-$RepresentationID$.m4s" media="s-$RepresentationID$-$Number$.m4s" duration="1" timescale="1"/>
+    <Representation id="encrypted" bandwidth="2000000">
+      <ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cenc"/>
+    </Representation>
+    <Representation id="clear" bandwidth="1000000"/>
+  </AdaptationSet>
+</Period></MPD>`;
+    const m = parseMpd(xml, BASE);
+    expect(m.video.find((rep) => rep.id === "encrypted")?.drm.protected).toBe(true);
+    expect(m.video.find((rep) => rep.id === "clear")?.drm.protected).toBe(false);
+    expect(m.drm.protected).toBe(false);
+  });
+
   it("reports SegmentBase as unsupported byterange shape", () => {
     const xml = `<?xml version="1.0"?>
 <MPD type="static"><Period><AdaptationSet contentType="video" mimeType="video/mp4">
@@ -187,8 +204,8 @@ describe("parseMpd", () => {
 </Representation>
 </AdaptationSet></Period></MPD>`;
     const m = parseMpd(xml, BASE);
-    expect(m.video).toHaveLength(0);
-    expect(m.unsupportedShape).toBe("byterange");
+    expect(m.video).toHaveLength(1);
+    expect(m.video[0].unsupportedShape).toBe("segment-base");
   });
 
   it("treats a Representation with only <BaseURL>file</BaseURL> (single-file on-demand profile) as one-segment-no-init", () => {
@@ -245,6 +262,104 @@ describe("parseMpd", () => {
     ]);
   });
 
+  it("uses Representation-level MIME before AdaptationSet defaults", () => {
+    const xml = `<?xml version="1.0"?>
+<MPD type="static" mediaPresentationDuration="PT1S"><Period>
+  <AdaptationSet>
+    <Representation id="audio-only" mimeType="audio/mp4" bandwidth="128000">
+      <SegmentTemplate initialization="a-init.m4s" media="a-$Number$.m4s" duration="1" timescale="1"/>
+    </Representation>
+    <Representation id="video-only" mimeType="video/mp4" bandwidth="1000000">
+      <SegmentTemplate initialization="v-init.m4s" media="v-$Number$.m4s" duration="1" timescale="1"/>
+    </Representation>
+  </AdaptationSet>
+</Period></MPD>`;
+    const m = parseMpd(xml, BASE);
+    expect(m.audio.map((rep) => rep.id)).toEqual(["audio-only"]);
+    expect(m.video.map((rep) => rep.id)).toEqual(["video-only"]);
+    expect(m.audio[0].mediaType).toBe("audio");
+  });
+
+  it("keeps SegmentList range refusal local to its Representation", () => {
+    const xml = `<?xml version="1.0"?>
+<MPD type="static" mediaPresentationDuration="PT1S"><Period>
+  <AdaptationSet contentType="video" mimeType="video/mp4">
+    <Representation id="ranged" bandwidth="2000000">
+      <SegmentList><Initialization sourceURL="all.mp4" range="0-99"/><SegmentURL media="all.mp4" mediaRange="100-199"/></SegmentList>
+    </Representation>
+    <Representation id="supported" bandwidth="1000000">
+      <SegmentTemplate initialization="init.m4s" media="s-$Number$.m4s" duration="1" timescale="1"/>
+    </Representation>
+  </AdaptationSet>
+</Period></MPD>`;
+    const m = parseMpd(xml, BASE);
+    expect(m.video).toHaveLength(2);
+    expect(m.video.find((rep) => rep.id === "ranged")?.unsupportedShape).toBe(
+      "segment-list-range",
+    );
+    expect(m.video.find((rep) => rep.id === "supported")?.unsupportedShape).toBeUndefined();
+    expect(m.unsupportedShape).toBeUndefined();
+  });
+
+  it("keeps unsupported containers local to their Representation", () => {
+    const xml = `<?xml version="1.0"?>
+<MPD type="static" mediaPresentationDuration="PT1S"><Period>
+  <AdaptationSet contentType="video">
+    <Representation id="webm" mimeType="video/webm" bandwidth="2000000">
+      <SegmentTemplate initialization="init.webm" media="s-$Number$.webm" duration="1" timescale="1"/>
+    </Representation>
+    <Representation id="mp4" mimeType="video/mp4" bandwidth="1000000">
+      <SegmentTemplate initialization="init.mp4" media="s-$Number$.m4s" duration="1" timescale="1"/>
+    </Representation>
+  </AdaptationSet>
+</Period></MPD>`;
+    const m = parseMpd(xml, BASE);
+    expect(m.video.find((rep) => rep.id === "webm")?.unsupportedShape).toBe(
+      "unsupported-container",
+    );
+    expect(m.video.find((rep) => rep.id === "mp4")?.unsupportedShape).toBeUndefined();
+  });
+
+  it("marks an r=-1 timeline unsupported without expanding it", () => {
+    const xml = `<?xml version="1.0"?>
+<MPD type="static"><Period><AdaptationSet contentType="video" mimeType="video/mp4">
+  <Representation id="v" bandwidth="1"><SegmentTemplate initialization="i.m4s" media="s-$Time$.m4s">
+    <SegmentTimeline><S t="0" d="2" r="-1"/></SegmentTimeline>
+  </SegmentTemplate></Representation>
+</AdaptationSet></Period></MPD>`;
+    const rep = parseMpd(xml, BASE).video[0];
+    expect(rep.unsupportedShape).toBe("negative-repeat");
+    expect(rep.mediaSegmentUrls).toEqual([]);
+  });
+
+  it("bounds timeline expansion before allocating segment URLs", () => {
+    const xml = `<?xml version="1.0"?>
+<MPD type="static"><Period><AdaptationSet contentType="video" mimeType="video/mp4">
+  <Representation id="v" bandwidth="1"><SegmentTemplate initialization="i.m4s" media="s-$Time$.m4s">
+    <SegmentTimeline><S t="0" d="1" r="999999999"/></SegmentTimeline>
+  </SegmentTemplate></Representation>
+</AdaptationSet></Period></MPD>`;
+    const rep = parseMpd(xml, BASE).video[0];
+    expect(rep.unsupportedShape).toBe("segment-limit");
+    expect(rep.mediaSegmentUrls).toEqual([]);
+  });
+
+  it("rejects pathological template padding before padStart allocation", () => {
+    const xml = `<?xml version="1.0"?>
+<MPD type="static" mediaPresentationDuration="PT1S"><Period><AdaptationSet contentType="video" mimeType="video/mp4">
+  <Representation id="v" bandwidth="1"><SegmentTemplate media="s-$Number%999999999d$.m4s" duration="1" timescale="1"/></Representation>
+</AdaptationSet></Period></MPD>`;
+    expect(() => parseMpd(xml, BASE)).toThrow(DashParseError);
+  });
+
+  it("refuses multiple Periods instead of silently using the first", () => {
+    const xml = `<?xml version="1.0"?>
+<MPD type="static"><Period/><Period/></MPD>`;
+    const m = parseMpd(xml, BASE);
+    expect(m.unsupportedShape).toBe("multiple-periods");
+    expect(m.video).toEqual([]);
+  });
+
   it("throws DashParseError on malformed XML", () => {
     expect(() => parseMpd("<not><valid", BASE)).toThrow(DashParseError);
   });
@@ -261,9 +376,9 @@ describe("pickHighestBandwidth", () => {
 
   it("returns the highest-bandwidth representation", () => {
     const reps = [
-      { id: "a", mimeType: "video/mp4", bandwidth: 1000, mediaSegmentUrls: [] },
-      { id: "b", mimeType: "video/mp4", bandwidth: 5000, mediaSegmentUrls: [] },
-      { id: "c", mimeType: "video/mp4", bandwidth: 3000, mediaSegmentUrls: [] },
+      { id: "a", mediaType: "video" as const, mimeType: "video/mp4", bandwidth: 1000, mediaSegmentUrls: [], drm: { protected: false } },
+      { id: "b", mediaType: "video" as const, mimeType: "video/mp4", bandwidth: 5000, mediaSegmentUrls: [], drm: { protected: false } },
+      { id: "c", mediaType: "video" as const, mimeType: "video/mp4", bandwidth: 3000, mediaSegmentUrls: [], drm: { protected: false } },
     ];
     expect(pickHighestBandwidth(reps)?.id).toBe("b");
   });

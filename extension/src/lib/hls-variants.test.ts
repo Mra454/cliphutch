@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { isMasterPlaylist, parseMasterVariants } from "./hls-variants";
+import {
+  hlsQueryRedactedIdentityUri,
+  isMasterPlaylist,
+  parseMasterVariants,
+} from "./hls-variants";
 
 const MASTER_THREE_VARIANTS = `#EXTM3U
 #EXT-X-VERSION:3
@@ -71,6 +75,66 @@ describe("parseMasterVariants", () => {
     expect(variants[1].audioRenditionUri).toBe("audio_en.m3u8");
   });
 
+  it("retains aggregate average bandwidth and default-audio structure", () => {
+    const master = `#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud1",NAME="French",DEFAULT=NO,AUTOSELECT=YES,LANGUAGE="fr",URI="fr.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud1",NAME="English",DEFAULT=YES,AUTOSELECT=YES,LANGUAGE="en",URI="en.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=2400000,AVERAGE-BANDWIDTH=1800000,RESOLUTION=1280x720,AUDIO="aud1",CODECS="avc1.4d401f,mp4a.40.2"
+video.m3u8
+`;
+    const [variant] = parseMasterVariants(
+      master,
+      "https://cdn.example.test/master.m3u8?token=master-secret",
+    );
+    expect(variant.averageBandwidth).toBe(1_800_000);
+    expect(variant.audioGroupId).toBe("aud1");
+    expect(variant.audioRendition).toEqual({
+      groupId: "aud1",
+      name: "English",
+      uri: "en.m3u8",
+      identityUri: "https://cdn.example.test/en.m3u8",
+      default: true,
+      autoselect: true,
+      language: "en",
+    });
+    expect(variant.defaultAudioRendition).toEqual(variant.audioRendition);
+    expect(variant.identityInput).toEqual({
+      uri: "https://cdn.example.test/video.m3u8",
+      bandwidth: 2_400_000,
+      averageBandwidth: 1_800_000,
+      width: 1280,
+      height: 720,
+      codecs: "avc1.4d401f,mp4a.40.2",
+      audio: {
+        groupId: "aud1",
+        name: "English",
+        uri: "https://cdn.example.test/en.m3u8",
+        language: "en",
+      },
+    });
+  });
+
+  it("produces identical query-redacted identity inputs after signed URL rotation", () => {
+    const makeMaster = (token: string) => `#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="Main",DEFAULT=YES,URI="audio.m3u8?token=${token}"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,AVERAGE-BANDWIDTH=800000,AUDIO="aud"
+video.m3u8?token=${token}
+`;
+    const first = parseMasterVariants(
+      makeMaster("one"),
+      "https://user:pass@cdn.example.test/root/master.m3u8?token=master-one",
+    )[0];
+    const second = parseMasterVariants(
+      makeMaster("two"),
+      "https://other:secret@cdn.example.test/root/master.m3u8?token=master-two",
+    )[0];
+    expect(first.uri).not.toBe(second.uri);
+    expect(first.audioRenditionUri).not.toBe(second.audioRenditionUri);
+    expect(first.identityInput).toEqual(second.identityInput);
+    expect(JSON.stringify(first.identityInput)).not.toContain("one");
+    expect(JSON.stringify(first.identityInput)).not.toContain("pass");
+  });
+
   it("mixed master: embedded variants have no audioRenditionUri; separate ones do", () => {
     const variants = parseMasterVariants(MASTER_MIXED);
     expect(variants).toHaveLength(2);
@@ -98,6 +162,12 @@ v.m3u8
 `;
     const variants = parseMasterVariants(EMBEDDED_FLAG);
     expect(variants[0].audioRenditionUri).toBeUndefined();
+    expect(variants[0].defaultAudioRendition).toEqual({
+      groupId: "aud1",
+      name: "Audio",
+      default: true,
+      autoselect: true,
+    });
   });
 });
 
@@ -112,5 +182,25 @@ describe("isMasterPlaylist", () => {
 
   it("returns false for empty text", () => {
     expect(isMasterPlaylist("")).toBe(false);
+  });
+});
+
+describe("hlsQueryRedactedIdentityUri", () => {
+  it("resolves a child while removing userinfo, query, and fragment", () => {
+    expect(
+      hlsQueryRedactedIdentityUri(
+        "../720.m3u8?signature=secret#fragment",
+        "https://user:pass@cdn.example.test/root/master.m3u8?token=secret",
+      ),
+    ).toBe("https://cdn.example.test/720.m3u8");
+  });
+
+  it("rejects non-HTTP identity schemes", () => {
+    expect(
+      hlsQueryRedactedIdentityUri(
+        "data:text/plain,manifest",
+        "https://cdn.example.test/master.m3u8",
+      ),
+    ).toBeUndefined();
   });
 });

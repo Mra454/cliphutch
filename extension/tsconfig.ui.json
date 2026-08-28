@@ -1,0 +1,16 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "types": ["chrome", "vite/client"]
+  },
+  "include": [
+    "src/content-script.ts",
+    "src/firstrun/**/*.ts",
+    "src/options/**/*.tsx",
+    "src/popup/**/*.tsx",
+    "src/sidepanel/**/*.tsx",
+    "src/**/*.d.ts"
+  ]
+}

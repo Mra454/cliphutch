@@ -1,24 +1,21 @@
 ClipHutch source-code offer
 
+Release version:
+
+{{VERSION}}
+
+Verified release source reference:
+
+{{SOURCE_REF}}
+
+Complete corresponding source for this exact ClipHutch extension package is
+published at:
+
+{{SOURCE_URL}}
+
 ClipHutch includes @ffmpeg/core 0.12.10, which is licensed under
 GPL-2.0-or-later and is bundled as ffmpeg-core/ffmpeg-core.js and
 ffmpeg-core/ffmpeg-core.wasm.
-
-Release identifier:
-
-cliphutch-v0.1.2-cws-submit-2026-07-03
-
-Complete corresponding source for this ClipHutch extension release will be
-published at this exact release tag:
-
-https://github.com/Mra454/cliphutch/releases/tag/cliphutch-v0.1.2-cws-submit-2026-07-03
-
-The repository is private before publication. Until the release tag is public,
-or if you received this binary after the public repository has moved or become
-unavailable, email licenses@cliphutch.com and request the complete
-corresponding source for:
-
-cliphutch-v0.1.2-cws-submit-2026-07-03
 
 The upstream source for @ffmpeg/core is available at:
 
@@ -35,7 +32,7 @@ installed npm package at node_modules/@ffmpeg/core/dist/esm/ffmpeg-core.js and
 node_modules/@ffmpeg/core/dist/esm/ffmpeg-core.wasm.
 
 If you received a binary copy of ClipHutch and need the corresponding source
-for that exact release, email licenses@cliphutch.com. ClipHutch will provide
+for this exact release, email licenses@cliphutch.com. ClipHutch will provide
 the corresponding source by electronic download at no charge other than any
 reasonable cost of distribution permitted by the applicable license. This
 written offer is valid for at least three years from distribution of this

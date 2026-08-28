@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import type { DetectedVideo } from "../types";
-import { filterCoveredByManifests, manifestDirectoryPrefix } from "./manifest-coverage";
+import {
+  filterCoveredByManifests,
+  manifestDirectoryPrefix,
+  partitionCoveredByManifests,
+} from "./manifest-coverage";
 
 const v = (overrides: Partial<DetectedVideo> & Pick<DetectedVideo, "url" | "kind">): DetectedVideo => ({
   id: overrides.url,
@@ -32,7 +36,7 @@ describe("filterCoveredByManifests", () => {
     expect(filterCoveredByManifests(videos)).toEqual(videos);
   });
 
-  it("hides direct videos whose URL is under a detected DASH manifest's directory", () => {
+  it("hides only high-confidence stream parts under a manifest directory", () => {
     const videos = [
       v({ url: "https://cdn.example.com/v/manifest.mpd", kind: "dash" }),
       v({ url: "https://cdn.example.com/v/seg-001.m4v", kind: "direct" }),
@@ -41,9 +45,11 @@ describe("filterCoveredByManifests", () => {
       v({ url: "https://cdn.example.com/elsewhere.mp4", kind: "direct" }),
     ];
     const filtered = filterCoveredByManifests(videos);
-    expect(filtered).toHaveLength(2);
+    expect(filtered).toHaveLength(4);
     expect(filtered.map((x) => x.url)).toEqual([
       "https://cdn.example.com/v/manifest.mpd",
+      "https://cdn.example.com/v/seg-001.m4v",
+      "https://cdn.example.com/v/Track1.m4v",
       "https://cdn.example.com/elsewhere.mp4",
     ]);
   });
@@ -53,7 +59,7 @@ describe("filterCoveredByManifests", () => {
       v({ url: "https://a.example.com/x/master.m3u8", kind: "hls" }),
       v({ url: "https://b.example.com/y/manifest.mpd", kind: "dash" }),
       v({ url: "https://a.example.com/x/seg.ts", kind: "direct" }),
-      v({ url: "https://b.example.com/y/video.m4v", kind: "direct" }),
+      v({ url: "https://b.example.com/y/video.m4s", kind: "direct" }),
       v({ url: "https://c.example.com/unrelated.mp4", kind: "direct" }),
     ];
     const filtered = filterCoveredByManifests(videos);
@@ -71,7 +77,23 @@ describe("filterCoveredByManifests", () => {
       v({ url: "https://cdn.example.com/clip.mp4", kind: "direct" }),
     ];
     const filtered = filterCoveredByManifests(videos);
-    expect(filtered.map((x) => x.kind)).toEqual(["dash", "hls"]);
+    expect(filtered.map((x) => x.kind)).toEqual(["dash", "hls", "direct"]);
+  });
+
+  it("never treats an ordinary direct MP4 beside a root manifest as covered", () => {
+    const videos = [
+      v({ url: "https://cdn.example.com/master.m3u8", kind: "hls" }),
+      v({ url: "https://cdn.example.com/clip.mp4", kind: "direct" }),
+      v({ url: "https://cdn.example.com/chunk-1.m4s", kind: "direct" }),
+    ];
+    const partition = partitionCoveredByManifests(videos);
+    expect(partition.visible.map((item) => item.url)).toEqual([
+      "https://cdn.example.com/master.m3u8",
+      "https://cdn.example.com/clip.mp4",
+    ]);
+    expect(partition.covered.map((item) => item.url)).toEqual([
+      "https://cdn.example.com/chunk-1.m4s",
+    ]);
   });
 
   it("preserves direct videos whose URL shares only the origin, not the directory", () => {

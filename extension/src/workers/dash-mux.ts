@@ -33,14 +33,15 @@ type AnyTrak = {
   tkhd: { track_id: number; volume?: number };
   mdia: { minf: { stbl: { stsd: { entries: AnyBox[] } } } };
 };
-type AnyMoov = { traks: AnyTrak[] };
+type AnyMoov = { traks: AnyTrak[]; boxes?: AnyBox[] };
 type AnyIso = {
   moov: AnyMoov;
+  boxes?: AnyBox[];
   appendBuffer: (b: MP4BoxBuffer) => number;
   flush: () => void;
   onReady?: (info: unknown) => void;
   onSamples?: (id: number, user: unknown, batch: unknown[]) => void;
-  onError?: (msg: string) => void;
+  onError?: (moduleOrMessage: string, message?: string) => void;
   setExtractionOptions: (id: number, user: unknown, opts: { nbSamples: number }) => void;
   start: () => void;
   addTrack: (opts: unknown) => number | undefined;
@@ -65,6 +66,64 @@ type ParsedTrack = {
 };
 
 type Parsed = { iso: AnyIso; track: ParsedTrack; samples: ParsedSample[] };
+
+export const MP4BOX_SAMPLE_BATCH_SIZE = 4_096;
+
+export type Fmp4InitInspection = {
+  trackCount: number;
+  trackTypes: string[];
+  encrypted: boolean;
+};
+
+const ENCRYPTION_BOX_TYPES = new Set(["encv", "enca", "sinf", "tenc", "pssh"]);
+
+function containsEncryptionBox(box: AnyBox): boolean {
+  if (box.type && ENCRYPTION_BOX_TYPES.has(box.type)) return true;
+  return box.boxes?.some(containsEncryptionBox) ?? false;
+}
+
+// Init-only preflight used by HLS/DASH downloaders before any media segment
+// request. mp4box emits Movie info as soon as moov is complete, so samples
+// are neither extracted nor retained here.
+export function inspectFmp4Init(bytes: Uint8Array): Fmp4InitInspection {
+  const iso = createFile() as unknown as AnyIso;
+  let tracks: Array<{ type?: string }> | null = null;
+  let parseError: string | undefined;
+
+  iso.onReady = (info: unknown) => {
+    tracks = (info as { tracks?: Array<{ type?: string }> }).tracks ?? [];
+  };
+  iso.onError = (moduleOrMessage, message) => {
+    parseError = message ? `${moduleOrMessage}: ${message}` : moduleOrMessage;
+  };
+
+  const buf = MP4BoxBuffer.fromArrayBuffer(
+    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
+    0,
+  );
+  iso.appendBuffer(buf);
+  iso.flush();
+
+  if (parseError) throw new Error(`mp4box init parse error: ${parseError}`);
+  // mp4box invokes onReady synchronously during append/flush for a complete
+  // init. TypeScript cannot infer mutation performed through that callback.
+  const readyTracks = tracks as Array<{ type?: string }> | null;
+  if (!readyTracks) throw new Error("No movie metadata found in fMP4 init segment");
+
+  const entryBoxes = iso.moov?.traks.flatMap(
+    (trak) => trak.mdia.minf.stbl.stsd.entries,
+  ) ?? [];
+  const encrypted =
+    entryBoxes.some(containsEncryptionBox) ||
+    (iso.boxes ?? []).some(containsEncryptionBox) ||
+    (iso.moov?.boxes ?? []).some(containsEncryptionBox);
+
+  return {
+    trackCount: readyTracks.length,
+    trackTypes: readyTracks.map((track) => track.type ?? "unknown"),
+    encrypted,
+  };
+}
 
 // FullBox subclasses (esds, btrt, others) round-trip incorrectly through
 // mp4box's default write path. Trace:
@@ -129,16 +188,19 @@ function parseFmp4(bytes: Uint8Array): Parsed {
       );
     }
     track = tracks[0];
-    iso.setExtractionOptions(tracks[0].id, null, { nbSamples: 1_000_000 });
+    iso.setExtractionOptions(tracks[0].id, null, { nbSamples: MP4BOX_SAMPLE_BATCH_SIZE });
     iso.start();
   };
 
   iso.onSamples = (_id, _user, batch) => {
-    samples.push(...(batch as ParsedSample[]));
+    // Avoid Function-argument limits: a spread append throws RangeError on
+    // long tracks even when mp4box or a future parser supplies a large batch.
+    for (const sample of batch as ParsedSample[]) samples.push(sample);
   };
 
-  iso.onError = (msg) => {
-    throw new Error(`mp4box parse error: ${msg}`);
+  iso.onError = (moduleOrMessage, message) => {
+    const detail = message ? `${moduleOrMessage}: ${message}` : moduleOrMessage;
+    throw new Error(`mp4box parse error: ${detail}`);
   };
 
   const buf = MP4BoxBuffer.fromArrayBuffer(

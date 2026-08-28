@@ -33,7 +33,11 @@ export const VIDEO_REQUEST_TYPES: chrome.webRequest.ResourceType[] = [
 
 export const PRICE_USD = 35;
 export const CHECKOUT_URL = "https://buy.stripe.com/8x29ATcsIdsW3V31wUfw400";
-export const VALIDATE_URL = "https://cliphutch-api.mra454.workers.dev/validate";
+export const LICENSE_API_ORIGIN = "https://cliphutch-api.mra454.workers.dev";
+export const VALIDATE_URL = `${LICENSE_API_ORIGIN}/validate`;
+export const LICENSE_ACTIVATE_URL = `${LICENSE_API_ORIGIN}/v2/activate`;
+export const LICENSE_STATUS_URL = `${LICENSE_API_ORIGIN}/v2/status`;
+export const LICENSE_DEACTIVATE_URL = `${LICENSE_API_ORIGIN}/v2/deactivate`;
 
 // Re-validate the cached license at most once per this interval.
 export const REVALIDATION_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;

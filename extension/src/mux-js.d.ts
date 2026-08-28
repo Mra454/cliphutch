@@ -8,7 +8,7 @@ declare module "mux.js" {
   };
 
   type TransmuxedSegment = {
-    type: "audio" | "video";
+    type: "audio" | "video" | "combined";
     initSegment: Uint8Array;
     data: Uint8Array;
   };

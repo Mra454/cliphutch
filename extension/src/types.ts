@@ -1,22 +1,54 @@
 export type VideoKind = "direct" | "hls" | "dash";
 export type MediaKind = VideoKind | "image";
 
+export type MediaProvenance =
+  | "network"
+  | "rendered-image"
+  | "picture"
+  | "metadata"
+  | "poster";
+
 export type DetectedVideo = {
   id: string;
   url: string;
   kind: MediaKind;
   detectedAt: number;
+  // Optional for session records written before metadata preservation landed.
+  firstSeenAt?: number;
+  lastSeenAt?: number;
   pageUrl?: string;
   pageTitle?: string;
   sizeBytes?: number;
   contentType?: string;
   contentDisposition?: string;
+  width?: number;
+  height?: number;
+  provenance?: MediaProvenance[];
+  /**
+   * The background captured replayable request headers for this exact shelf
+   * record. Capture-Pack Add must either freeze them into a bounded lease or
+   * fail visibly; absence from the ordinary header registry is not permission
+   * to silently downgrade this record to a public source.
+   */
+  hasCapturedReplayHeaders?: boolean;
+  // Only set for an authoritative family (for example, one img/srcset tree).
+  // Filename, title, and CDN-directory similarities are not family evidence.
+  familyId?: string;
 };
 
-export type StreamJobStatus = "running" | "saving" | "complete" | "error" | "cancelled";
+export type StreamJobStatus =
+  | "running"
+  | "delivery_pending"
+  | "saving"
+  | "complete"
+  | "error"
+  | "cancelled";
 export type StreamSaveStatus = "pending" | "complete" | "interrupted";
 
 export type DirectJob = {
+  // Stable identifier for the explicit popup intent that created this job.
+  // Optional for backward compatibility with existing session records.
+  commandId?: string;
   videoId: string;
   tabId: number;
   downloadId: number;
@@ -32,6 +64,8 @@ export type DirectJob = {
 };
 
 export type HlsJob = {
+  // Optional so jobs written by older extension builds remain readable.
+  commandId?: string;
   jobId: string;
   videoId: string;
   tabId: number;
@@ -45,6 +79,9 @@ export type HlsJob = {
   // Resolution/quality label for the picked variant (e.g. "1080p"), used to
   // qualify the saved filename.
   variantLabel?: string;
+  // Frozen before execution so delivery does not depend on the source tab's
+  // transient media shelf still existing after navigation or tab closure.
+  plannedFilename?: string;
   // Reserved when a free-tier video download starts. Released if the download
   // fails before completion.
   quotaReservationId?: string;
@@ -56,6 +93,8 @@ export type HlsJob = {
 };
 
 export type DashJob = {
+  // Optional so jobs written by older extension builds remain readable.
+  commandId?: string;
   jobId: string;
   videoId: string;
   tabId: number;
@@ -71,6 +110,8 @@ export type DashJob = {
   // Resolution/quality label for the picked variant (e.g. "1080p"), used to
   // qualify the saved filename.
   variantLabel?: string;
+  // Optional for backward compatibility with jobs created before snapshots.
+  plannedFilename?: string;
   // Reserved when a free-tier video download starts. Released if the download
   // fails before completion.
   quotaReservationId?: string;
@@ -82,6 +123,8 @@ export type DashJob = {
 };
 
 export type WebmTranscodeJob = {
+  // Optional so jobs written by older extension builds remain readable.
+  commandId?: string;
   jobId: string;
   videoId: string;
   tabId: number;
@@ -91,6 +134,8 @@ export type WebmTranscodeJob = {
   status: StreamJobStatus;
   progress: { ratio: number; message?: string };
   downloadId?: number;
+  // Frozen MP4 filename used after the tab shelf has been cleared.
+  plannedFilename?: string;
   // Reserved when a free-tier video download starts. Released if the download
   // fails before completion.
   quotaReservationId?: string;
