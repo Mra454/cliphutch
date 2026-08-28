@@ -15,29 +15,34 @@ export type StripeEvent = {
   data: { object: Record<string, unknown> };
 };
 
-function parseSignatureHeader(header: string): { t: string; v1: string } | null {
+function parseSignatureHeader(
+  header: string,
+): { t: string; v1: readonly string[] } | null {
   const parts = header.split(",");
   let t: string | null = null;
-  let v1: string | null = null;
+  const v1: string[] = [];
   for (const part of parts) {
-    const [k, v] = part.split("=");
-    if (k === "t") t = v;
-    else if (k === "v1") v1 = v;
+    const separator = part.indexOf("=");
+    if (separator < 1) continue;
+    const key = part.slice(0, separator).trim();
+    const value = part.slice(separator + 1).trim();
+    if (key === "t" && value) t = value;
+    else if (key === "v1" && value) v1.push(value);
   }
-  if (!t || !v1) return null;
+  if (!t || v1.length === 0) return null;
   return { t, v1 };
 }
 
-function constantTimeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) {
-    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+function hexBytes(value: string): Uint8Array | null {
+  if (!/^[a-f\d]{64}$/i.test(value)) return null;
+  const bytes = new Uint8Array(32);
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = Number.parseInt(value.slice(index * 2, index * 2 + 2), 16);
   }
-  return diff === 0;
+  return bytes;
 }
 
-async function hmacHex(key: string, message: string): Promise<string> {
+async function hmacBytes(key: string, message: string): Promise<Uint8Array> {
   const cryptoKey = await crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(key),
@@ -50,9 +55,7 @@ async function hmacHex(key: string, message: string): Promise<string> {
     cryptoKey,
     new TextEncoder().encode(message),
   );
-  return Array.from(new Uint8Array(sig))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+  return new Uint8Array(sig);
 }
 
 export async function verifyStripeSignature(
@@ -69,6 +72,13 @@ export async function verifyStripeSignature(
   if (!Number.isFinite(ts)) return false;
   if (Math.abs(now - ts) > REPLAY_WINDOW_SECONDS) return false;
 
-  const expected = await hmacHex(secret, `${parsed.t}.${rawBody}`);
-  return constantTimeEqual(expected, parsed.v1);
+  const expected = await hmacBytes(secret, `${parsed.t}.${rawBody}`);
+  let valid = false;
+  for (const candidate of parsed.v1) {
+    const bytes = hexBytes(candidate);
+    if (bytes !== null && crypto.subtle.timingSafeEqual(expected, bytes)) {
+      valid = true;
+    }
+  }
+  return valid;
 }

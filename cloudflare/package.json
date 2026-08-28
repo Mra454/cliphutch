@@ -4,19 +4,31 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "typecheck": "tsc --noEmit",
-    "db:init:remote": "wrangler d1 execute cliphutch-licenses --remote --file=schema.sql",
-    "db:init:local": "wrangler d1 execute cliphutch-licenses --local --file=schema.sql",
-    "db:migrations:list": "wrangler d1 migrations list cliphutch-licenses --remote",
-    "db:migrations:apply": "wrangler d1 migrations apply cliphutch-licenses --remote",
-    "tail": "wrangler tail",
-    "test:resend": "node scripts/resend-license.mjs mra454@gmail.com CH-TEST-AAAA-BBBB-CCCC"
+    "dev": "wrangler dev --env staging",
+    "deploy:staging": "node scripts/run-wrangler-operation.mjs deploy staging",
+    "versions:production:upload": "node scripts/run-wrangler-operation.mjs versions-upload production",
+    "versions:production:stage": "node scripts/run-wrangler-operation.mjs versions-stage production",
+    "versions:production:promote": "node scripts/run-wrangler-operation.mjs versions-promote production",
+    "types": "wrangler types worker-configuration.d.ts --strict-vars false",
+    "types:check": "npm run types -- --check",
+    "typecheck": "npm run types:check && tsc --noEmit && tsc -p test/tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run typecheck && npm test && wrangler deploy --env staging --dry-run --outdir dist/dry-run",
+    "db:local:bootstrap": "node scripts/run-wrangler-operation.mjs bootstrap local",
+    "db:staging:bootstrap": "node scripts/run-wrangler-operation.mjs bootstrap staging",
+    "db:staging:migrations:list": "node scripts/run-wrangler-operation.mjs migrations-list staging",
+    "db:staging:migrations:apply": "node scripts/run-wrangler-operation.mjs migrations-apply staging",
+    "db:production:migrations:list": "node scripts/run-wrangler-operation.mjs migrations-list production",
+    "db:production:migrations:apply": "node scripts/run-wrangler-operation.mjs migrations-apply production",
+    "smoke:version": "node scripts/assert-worker-version.mjs",
+    "tail:staging": "wrangler tail --env staging",
+    "tail:production": "wrangler tail --env production"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20260717.1",
+    "@cloudflare/vitest-pool-workers": "^0.21.3",
     "typescript": "^5.4.0",
-    "wrangler": "^4.112.0"
+    "vitest": "^4.1.10",
+    "wrangler": "^4.123.0"
   }
 }

@@ -4,6 +4,16 @@ const RESEND_ENDPOINT = "https://api.resend.com/emails";
 
 type LicenseEmailProduct = "cliphutch" | "computedkit";
 
+export class LicenseEmailDeliveryError extends Error {
+  constructor(
+    readonly status: number | null,
+    readonly kind: "provider" | "timeout_or_network",
+  ) {
+    super("License email provider rejected the request");
+    this.name = "LicenseEmailDeliveryError";
+  }
+}
+
 function emailCopy(product: LicenseEmailProduct): {
   productName: string;
   activationSteps: readonly string[];
@@ -37,6 +47,8 @@ export async function sendLicenseEmail(
   apiKey: string,
   fromAddress: string,
   product: LicenseEmailProduct = "cliphutch",
+  timeoutMs = 10_000,
+  idempotencyKey?: string,
 ): Promise<void> {
   const copy = emailCopy(product);
   const text = [
@@ -65,23 +77,31 @@ export async function sendLicenseEmail(
     </p>
   `;
 
-  const response = await fetch(RESEND_ENDPOINT, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      from: fromAddress,
-      to,
-      subject: `Your ${copy.productName} license key`,
-      text,
-      html,
-    }),
-  });
+  let response: Response;
+  try {
+    response = await fetch(RESEND_ENDPOINT, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}),
+      },
+      body: JSON.stringify({
+        from: fromAddress,
+        to,
+        subject: `Your ${copy.productName} license key`,
+        text,
+        html,
+      }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch {
+    throw new LicenseEmailDeliveryError(null, "timeout_or_network");
+  }
 
   if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    throw new Error(`Resend ${response.status}: ${detail.slice(0, 300)}`);
+    await response.body?.cancel().catch(() => undefined);
+    throw new LicenseEmailDeliveryError(response.status, "provider");
   }
+  await response.body?.cancel().catch(() => undefined);
 }
