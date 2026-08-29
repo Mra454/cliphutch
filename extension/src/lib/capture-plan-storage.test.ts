@@ -302,6 +302,71 @@ describe("Capture Review plan parsing", () => {
     });
   });
 
+  it.each([
+    "QUALITY_SELECTION_REQUIRED",
+    "QUALITY_CONFIRMATION_REQUIRED",
+    "QUALITY_FACTS_UNKNOWN",
+  ])("accepts a persisted stream choice prompt with %s", (warningCode) => {
+    const ready = persistentStreamPlan("hls", `plan-needs-choice-${warningCode.toLowerCase()}`);
+    const readyItem = ready.items[0];
+    if (readyItem.readiness !== "ready") throw new Error("Expected ready stream fixture");
+    const needsChoiceItem: CaptureReviewPlanV1["items"][number] = {
+      itemId: readyItem.itemId,
+      include: readyItem.include,
+      media: readyItem.media,
+      plannedRelativePath: readyItem.plannedRelativePath,
+      readiness: "needs_choice",
+      copyChoice: readyItem.copyChoice,
+      warnings: [{ code: warningCode, message: "Choose a quality explicitly." }],
+    };
+    const needsChoicePlan: CaptureReviewPlanV1 = {
+      ...ready,
+      items: [needsChoiceItem],
+      totals: {
+        included: 1,
+        videos: 1,
+        stills: 0,
+        unknownSizeCount: 1,
+        requiredFreeVideoSlots: 1,
+      },
+    };
+
+    expect(parseStoredCapturePlan(needsChoicePlan)).toMatchObject({
+      status: "valid",
+      plan: { items: [{ readiness: "needs_choice", warnings: [{ code: warningCode }] }] },
+    });
+  });
+
+  it("rejects an unexplained persisted stream choice prompt", () => {
+    const ready = persistentStreamPlan("hls", "plan-needs-choice-unexplained");
+    const readyItem = ready.items[0];
+    if (readyItem.readiness !== "ready") throw new Error("Expected ready stream fixture");
+    const needsChoicePlan: CaptureReviewPlanV1 = {
+      ...ready,
+      items: [{
+        itemId: readyItem.itemId,
+        include: readyItem.include,
+        media: readyItem.media,
+        plannedRelativePath: readyItem.plannedRelativePath,
+        readiness: "needs_choice",
+        copyChoice: readyItem.copyChoice,
+        warnings: [{ code: "UNRELATED_WARNING", message: "This does not explain a quality choice." }],
+      }],
+      totals: {
+        included: 1,
+        videos: 1,
+        stills: 0,
+        unknownSizeCount: 1,
+        requiredFreeVideoSlots: 1,
+      },
+    };
+
+    expect(parseStoredCapturePlan(needsChoicePlan)).toEqual({
+      status: "invalid",
+      reason: "corrupt",
+    });
+  });
+
   it("revalidates the exact canonical clone when accessors change after validation", () => {
     const accessorBacked = plan() as CaptureReviewPlanV1;
     let planIdReads = 0;

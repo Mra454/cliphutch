@@ -23,6 +23,11 @@ export const MAX_CAPTURE_PLAN_STORAGE_BYTES =
   MAX_CAPTURE_PLAN_INDEX_BYTES;
 const MAX_ID_LENGTH = 256;
 const UNSAFE_TEXT_PATTERN = /[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/;
+const CAPTURE_NEEDS_CHOICE_WARNING_CODES = new Set([
+  "QUALITY_SELECTION_REQUIRED",
+  "QUALITY_CONFIRMATION_REQUIRED",
+  "QUALITY_FACTS_UNKNOWN",
+]);
 
 export type CapturePlanIndexV1 = {
   schemaVersion: typeof CAPTURE_PACK_SCHEMA_VERSION;
@@ -223,7 +228,9 @@ function isStorageSafePlan(plan: CaptureReviewPlanV1): boolean {
         }
         if (item.readiness === "needs_choice") {
           return (item.media.kind === "hls" || item.media.kind === "dash") &&
-            item.warnings.some((warning) => warning.code === "QUALITY_SELECTION_REQUIRED");
+            item.warnings.some((warning) =>
+              CAPTURE_NEEDS_CHOICE_WARNING_CODES.has(warning.code),
+            );
         }
         return item.warnings.length > 0;
       },

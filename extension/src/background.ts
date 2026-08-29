@@ -2308,7 +2308,8 @@ async function handleCapturePlanCreateUnlocked(request: CapturePlanCreateRequest
       (item.media.kind === "direct" || item.media.kind === "image") &&
       !captureDraftItemIsWebm(item) &&
       resolution?.ok === true &&
-      resolution.lease !== null
+      resolution.lease !== null &&
+      hasDirectCredentialHeaders(resolution.lease.headers)
     );
   }));
 
