@@ -6,7 +6,6 @@ import {
   CancelledError,
   DrmProtectedError,
   EmptyManifestError,
-  EncryptedStreamError,
   LiveStreamError,
   MixedContainerAudioError,
   NetworkError,
@@ -19,6 +18,16 @@ import { classifyHlsManifestForDrm } from "../lib/drm";
 import { HLS_SEGMENT_FETCH_CONCURRENCY } from "../lib/constants";
 import { inspectFmp4Init, muxFmp4 } from "./dash-mux";
 import { transmuxTsAudioToFmp4, transmuxTsToMp4 } from "./ts-audio-to-fmp4";
+import {
+  buildHlsCryptoPlan,
+  createKeyCache,
+  decryptAes128Cbc,
+  ivForMap,
+  ivForSegment,
+  type HlsCryptoPlan,
+  type HlsKeyContext,
+  type HlsSegmentCrypto,
+} from "./hls-crypto-plan";
 
 export type HlsProgress = {
   done: number;
@@ -152,15 +161,20 @@ async function fetchByteRange(
 
 async function fetchSegmentBytes(
   seg: ParsedSegment,
+  crypto: HlsSegmentCrypto,
+  keyCache: ReturnType<typeof createKeyCache>,
   baseUrl: string,
   signal: AbortSignal,
   fetchImpl: typeof fetch,
 ): Promise<Uint8Array> {
   const url = resolveUrl(seg.uri, baseUrl);
-  if (seg.byterange) {
-    return fetchByteRange(url, seg.byterange.offset, seg.byterange.length, signal, fetchImpl);
-  }
-  return fetchBytes(url, signal, fetchImpl);
+  const mediaPromise = seg.byterange
+    ? fetchByteRange(url, seg.byterange.offset, seg.byterange.length, signal, fetchImpl)
+    : fetchBytes(url, signal, fetchImpl);
+  if (crypto.key.method === "NONE") return mediaPromise;
+  const keyPromise = keyCache.getKey(crypto.key.keyUri);
+  const [bytes, key] = await Promise.all([mediaPromise, keyPromise]);
+  return decryptAes128Cbc(key, ivForSegment(crypto), bytes);
 }
 
 function resolveDefaultAudioRenditionUri(
@@ -192,27 +206,32 @@ function pickVariant(
   };
 }
 
-function validateVariant(parsed: ParsedManifest): void {
+function cryptoContextSignature(key: HlsKeyContext | undefined): string {
+  if (key === undefined) return "none";
+  if (key.method === "NONE") return "NONE";
+  const iv = key.iv === undefined
+    ? ""
+    : Array.from(key.iv, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `AES-128|${key.keyUri}|${iv}`;
+}
+
+function validateVariant(parsed: ParsedManifest, cryptoPlan: HlsCryptoPlan): void {
   if (!parsed.endList) throw new LiveStreamError();
   const segments = parsed.segments ?? [];
   if (segments.length === 0) throw new EmptyManifestError();
-  for (const seg of segments) {
-    if (seg.key && seg.key.method && seg.key.method.toUpperCase() !== "NONE") {
-      throw new EncryptedStreamError();
-    }
-  }
 
   if ((parsed.discontinuityStarts?.length ?? 0) > 0 || segments.some((seg) => seg.discontinuity)) {
     throw new UnsupportedMediaShapeError("an HLS discontinuity");
   }
 
-  const mapSignature = (seg: ParsedSegment): string => {
+  const mapSignature = (seg: ParsedSegment, index: number): string => {
     if (!seg.map?.uri) return "none";
     const range = seg.map.byterange;
-    return `${seg.map.uri}|${range?.offset ?? ""}|${range?.length ?? ""}`;
+    const mapKey = cryptoPlan.segments[index]?.mapKey;
+    return `${seg.map.uri}|${range?.offset ?? ""}|${range?.length ?? ""}|${cryptoContextSignature(mapKey)}`;
   };
-  const firstMap = mapSignature(segments[0]);
-  if (segments.some((seg) => mapSignature(seg) !== firstMap)) {
+  const firstMap = mapSignature(segments[0], 0);
+  if (segments.some((seg, index) => mapSignature(seg, index) !== firstMap)) {
     throw new UnsupportedMediaShapeError("an HLS initialization-map change");
   }
 }
@@ -221,10 +240,23 @@ function validateVariant(parsed: ParsedManifest): void {
 // (Apple-style single-file CMAF uses BYTERANGE on EXT-X-MAP to delimit the
 // init box at the head of main.mp4). Assumes uniform map across the variant
 // (true for VOD without mid-stream discontinuities — the common case).
-function detectFmp4Init(segments: ParsedSegment[]): { uri: string; byterange?: ByteRange } | undefined {
+type Fmp4Init = {
+  uri: string;
+  byterange?: ByteRange;
+  mapCrypto: HlsSegmentCrypto;
+};
+
+function detectFmp4Init(
+  segments: ParsedSegment[],
+  cryptoPlan: HlsCryptoPlan,
+): Fmp4Init | undefined {
   const map = segments[0]?.map;
   if (!map?.uri) return undefined;
-  return { uri: map.uri, byterange: map.byterange };
+  return {
+    uri: map.uri,
+    byterange: map.byterange,
+    mapCrypto: cryptoPlan.segments[0],
+  };
 }
 
 function validateFmp4Init(bytes: Uint8Array, expectedType: "video" | "audio"): void {
@@ -264,6 +296,8 @@ function resolveUrl(uri: string, base: string): string {
 // counter without re-implementing the worker pool per call.
 async function fetchSegmentsConcurrent(
   segments: ParsedSegment[],
+  cryptoSegments: HlsSegmentCrypto[],
+  keyCache: ReturnType<typeof createKeyCache>,
   baseUrl: string,
   signal: AbortSignal,
   fetchImpl: typeof fetch,
@@ -286,7 +320,14 @@ async function fetchSegmentsConcurrent(
       const idx = nextIndex++;
       if (idx >= total) return;
       try {
-        const bytes = await fetchSegmentBytes(segments[idx], baseUrl, pool.signal, fetchImpl);
+        const bytes = await fetchSegmentBytes(
+          segments[idx],
+          cryptoSegments[idx],
+          keyCache,
+          baseUrl,
+          pool.signal,
+          fetchImpl,
+        );
         buffers[idx] = bytes;
         onSegmentDone(idx, bytes.length);
       } catch (err) {
@@ -334,6 +375,7 @@ export async function downloadHls(
   const masterDrm = classifyHlsManifestForDrm(playlistText);
   if (masterDrm.protected) throw new DrmProtectedError(masterDrm.scheme);
   let parsed = parseManifest(playlistText);
+  let videoPlaylistText = playlistText;
 
   let bandwidthBps = 0;
   let variantUrl = playlistUrl;
@@ -387,6 +429,7 @@ export async function downloadHls(
     const variantDrm = classifyHlsManifestForDrm(variantText);
     if (variantDrm.protected) throw new DrmProtectedError(variantDrm.scheme);
     parsed = parseManifest(variantText);
+    videoPlaylistText = variantText;
   } else if (opts.exactVariantSelection) {
     const rootUrl = resolveUrl(playlistUrl, playlistUrl);
     const selectedUrl = opts.variantUrl === undefined
@@ -401,15 +444,23 @@ export async function downloadHls(
     }
   }
 
-  validateVariant(parsed);
+  const videoPlan = buildHlsCryptoPlan(videoPlaylistText, variantUrl);
+  if (videoPlan.segments.length !== (parsed.segments ?? []).length) {
+    throw new UnsupportedMediaShapeError("a playlist ClipHutch could not align");
+  }
+  if (videoPlan.iFramesOnly) {
+    throw new UnsupportedMediaShapeError("an I-frame-only playlist");
+  }
+  validateVariant(parsed, videoPlan);
 
   const videoSegments = parsed.segments ?? [];
-  const videoInit = detectFmp4Init(videoSegments);
+  const videoInit = detectFmp4Init(videoSegments, videoPlan);
 
   // === Step 2: parse + validate audio rendition (if any) ===
 
   let audioSegments: ParsedSegment[] = [];
-  let audioInit: { uri: string; byterange?: ByteRange } | undefined;
+  let audioPlan: HlsCryptoPlan = { segments: [], iFramesOnly: false };
+  let audioInit: Fmp4Init | undefined;
   let audioBaseUrl = "";
 
   if (audioRenditionUrl) {
@@ -417,9 +468,16 @@ export async function downloadHls(
     const audioDrm = classifyHlsManifestForDrm(audioText);
     if (audioDrm.protected) throw new DrmProtectedError(audioDrm.scheme);
     const audioParsed = parseManifest(audioText);
-    validateVariant(audioParsed);
+    audioPlan = buildHlsCryptoPlan(audioText, audioRenditionUrl);
+    if (audioPlan.segments.length !== (audioParsed.segments ?? []).length) {
+      throw new UnsupportedMediaShapeError("a playlist ClipHutch could not align");
+    }
+    if (audioPlan.iFramesOnly) {
+      throw new UnsupportedMediaShapeError("an I-frame-only playlist");
+    }
+    validateVariant(audioParsed, audioPlan);
     audioSegments = audioParsed.segments ?? [];
-    audioInit = detectFmp4Init(audioSegments);
+    audioInit = detectFmp4Init(audioSegments, audioPlan);
     audioBaseUrl = audioRenditionUrl;
 
     // Separate MPEG-TS audio can be transmuxed to fMP4 before muxing. The
@@ -440,101 +498,130 @@ export async function downloadHls(
   const checkCap = () => {
     if (runningBytes > sizeCapBytes) throw new SizeCapError(sizeCapBytes);
   };
+  const run = new AbortController();
+  const relayRunAbort = () => run.abort();
+  if (signal.aborted) run.abort();
+  else signal.addEventListener("abort", relayRunAbort, { once: true });
+  const keyCache = createKeyCache(fetchImpl, run.signal);
 
   const fetchInit = async (
-    init: { uri: string; byterange?: ByteRange },
+    init: Fmp4Init,
     baseUrl: string,
   ): Promise<Uint8Array> => {
     const url = resolveUrl(init.uri, baseUrl);
-    if (init.byterange) {
-      return fetchByteRange(url, init.byterange.offset, init.byterange.length, signal, fetchImpl);
+    const mapKey = init.mapCrypto.mapKey;
+    const mediaPromise = init.byterange
+      ? fetchByteRange(url, init.byterange.offset, init.byterange.length, run.signal, fetchImpl)
+      : fetchBytes(url, run.signal, fetchImpl);
+    if (mapKey?.method !== "AES-128") return mediaPromise;
+    const keyPromise = keyCache.getKey(mapKey.keyUri);
+    const [bytes, key] = await Promise.all([mediaPromise, keyPromise]);
+    return decryptAes128Cbc(key, ivForMap(init.mapCrypto), bytes);
+  };
+
+  try {
+    let videoInitBytes: Uint8Array | undefined;
+    let audioInitBytes: Uint8Array | undefined;
+
+    try {
+      if (videoInit) {
+        videoInitBytes = await fetchInit(videoInit, variantUrl);
+        runningBytes += videoInitBytes.length;
+        checkCap();
+        validateFmp4Init(videoInitBytes, "video");
+      }
+      if (audioInit && audioRenditionUrl) {
+        audioInitBytes = await fetchInit(audioInit, audioBaseUrl);
+        runningBytes += audioInitBytes.length;
+        checkCap();
+        validateFmp4Init(audioInitBytes, "audio");
+      }
+    } catch (error) {
+      run.abort();
+      throw error;
     }
-    return fetchBytes(url, signal, fetchImpl);
-  };
 
-  let videoInitBytes: Uint8Array | undefined;
-  let audioInitBytes: Uint8Array | undefined;
+    // === Step 5: fetch media segments — parallel video + audio when both present ===
 
-  if (videoInit) {
-    videoInitBytes = await fetchInit(videoInit, variantUrl);
-    runningBytes += videoInitBytes.length;
-    checkCap();
-    validateFmp4Init(videoInitBytes, "video");
-  }
-  if (audioInit && audioRenditionUrl) {
-    audioInitBytes = await fetchInit(audioInit, audioBaseUrl);
-    runningBytes += audioInitBytes.length;
-    checkCap();
-    validateFmp4Init(audioInitBytes, "audio");
-  }
+    const videoTotal = videoSegments.length;
+    const audioTotal = audioSegments.length;
+    let videoDone = 0;
+    let audioDone = 0;
+    const emitProgress = () => {
+      onProgress({
+        done: videoDone + audioDone,
+        total: videoTotal + audioTotal,
+        bytes: runningBytes,
+      });
+    };
 
-  // === Step 5: fetch media segments — parallel video + audio when both present ===
+    const videoFetch = fetchSegmentsConcurrent(
+      videoSegments,
+      videoPlan.segments,
+      keyCache,
+      variantUrl,
+      run.signal,
+      fetchImpl,
+      (_idx, bytes) => {
+        runningBytes += bytes;
+        checkCap();
+        videoDone += 1;
+        emitProgress();
+      },
+    );
 
-  const videoTotal = videoSegments.length;
-  const audioTotal = audioSegments.length;
-  let videoDone = 0;
-  let audioDone = 0;
-  const emitProgress = () => {
-    onProgress({
-      done: videoDone + audioDone,
-      total: videoTotal + audioTotal,
-      bytes: runningBytes,
-    });
-  };
+    const audioFetch = audioRenditionUrl
+      ? fetchSegmentsConcurrent(
+          audioSegments,
+          audioPlan.segments,
+          keyCache,
+          audioBaseUrl,
+          run.signal,
+          fetchImpl,
+          (_idx, bytes) => {
+            runningBytes += bytes;
+            checkCap();
+            audioDone += 1;
+            emitProgress();
+          },
+        )
+      : Promise.resolve([] as Uint8Array[]);
 
-  const videoFetch = fetchSegmentsConcurrent(
-    videoSegments,
-    variantUrl,
-    signal,
-    fetchImpl,
-    (_idx, bytes) => {
-      runningBytes += bytes;
-      checkCap();
-      videoDone += 1;
-      emitProgress();
-    },
-  );
+    let videoBuffers: Uint8Array[];
+    let audioBuffers: Uint8Array[];
+    try {
+      [videoBuffers, audioBuffers] = await Promise.all([videoFetch, audioFetch]);
+    } catch (error) {
+      run.abort();
+      throw error;
+    }
 
-  const audioFetch = audioRenditionUrl
-    ? fetchSegmentsConcurrent(
-        audioSegments,
-        audioBaseUrl,
-        signal,
-        fetchImpl,
-        (_idx, bytes) => {
-          runningBytes += bytes;
-          checkCap();
-          audioDone += 1;
-          emitProgress();
-        },
-      )
-    : Promise.resolve([] as Uint8Array[]);
+    // === Step 6: assemble output blob ===
 
-  const [videoBuffers, audioBuffers] = await Promise.all([videoFetch, audioFetch]);
+    // Branch A: separate-audio fMP4 video + fMP4 or MPEG-TS AAC audio — mux
+    // into a single MP4.
+    if (audioRenditionUrl && videoInitBytes) {
+      const videoBytes = concatBuffers([videoInitBytes, ...videoBuffers]);
+      const audioBytes = audioInitBytes
+        ? concatBuffers([audioInitBytes, ...audioBuffers])
+        : transmuxTsAudioToFmp4(audioBuffers);
+      const muxed = await muxFmp4(videoBytes, audioBytes);
+      return new Blob([muxed as BlobPart], { type: "video/mp4" });
+    }
 
-  // === Step 6: assemble output blob ===
+    // Branch B: embedded-audio fMP4 (Cloudflare-shape) — pass single concatenated
+    // stream through muxFmp4 to produce a non-fragmented MP4.
+    if (videoInit && videoInitBytes) {
+      const combined = concatBuffers([videoInitBytes, ...videoBuffers]);
+      const muxed = await muxFmp4(combined);
+      return new Blob([muxed as BlobPart], { type: "video/mp4" });
+    }
 
-  // Branch A: separate-audio fMP4 video + fMP4 or MPEG-TS AAC audio — mux
-  // into a single MP4.
-  if (audioRenditionUrl && videoInitBytes) {
-    const videoBytes = concatBuffers([videoInitBytes, ...videoBuffers]);
-    const audioBytes = audioInitBytes
-      ? concatBuffers([audioInitBytes, ...audioBuffers])
-      : transmuxTsAudioToFmp4(audioBuffers);
-    const muxed = await muxFmp4(videoBytes, audioBytes);
+    // Branch C: MPEG-TS embedded — transmux to MP4 so users do not need a
+    // transport-stream-specific player.
+    const muxed = transmuxTsToMp4(videoBuffers);
     return new Blob([muxed as BlobPart], { type: "video/mp4" });
+  } finally {
+    signal.removeEventListener("abort", relayRunAbort);
   }
-
-  // Branch B: embedded-audio fMP4 (Cloudflare-shape) — pass single concatenated
-  // stream through muxFmp4 to produce a non-fragmented MP4.
-  if (videoInit && videoInitBytes) {
-    const combined = concatBuffers([videoInitBytes, ...videoBuffers]);
-    const muxed = await muxFmp4(combined);
-    return new Blob([muxed as BlobPart], { type: "video/mp4" });
-  }
-
-  // Branch C: MPEG-TS embedded — transmux to MP4 so users do not need a
-  // transport-stream-specific player.
-  const muxed = transmuxTsToMp4(videoBuffers);
-  return new Blob([muxed as BlobPart], { type: "video/mp4" });
 }

@@ -392,8 +392,17 @@
         <li>
           Provide access to media unless your browser is already authorized to load it.
         </li>
-        <li>Decrypt encrypted media streams.</li>
+        <li>Handle DRM-protected media.</li>
       </ul>
+      <p>
+        Some HLS streams use standard AES-128 transport encryption. When you
+        start a download, ClipHutch fetches the 16-byte key named by the
+        selected playlist, decrypts the segments on your device, and keeps the
+        key in memory only for that download. If the source refuses the key
+        request, the download fails. ClipHutch does not handle DRM (Widevine,
+        PlayReady, FairPlay) and does not work around logins, paywalls, or other
+        access controls.
+      </p>
     </section>
 
     <section>

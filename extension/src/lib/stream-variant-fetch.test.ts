@@ -280,18 +280,33 @@ shape.m3u8
     }
   });
 
-  it("does not lose plain SESSION-KEY encryption declared by the master", async () => {
-    const master = `#EXTM3U
+  it("allows identity AES-128 SESSION-KEY but still rejects SAMPLE-AES", async () => {
+    const identityMaster = `#EXTM3U
 #EXT-X-SESSION-KEY:METHOD=AES-128,URI="https://keys.example.test/key",KEYFORMAT="identity"
 #EXT-X-STREAM-INF:BANDWIDTH=1000000
 video.m3u8
 `;
-    const runtime = new StreamVariantFetchRuntimeV1({
+    const identityRuntime = new StreamVariantFetchRuntimeV1({
       fetchImpl: (async (input: RequestInfo | URL) =>
-        String(input).includes("master") ? response(master) : response(TS_VOD)
+        String(input).includes("master") ? response(identityMaster) : response(TS_VOD)
       ) as typeof fetch,
     });
-    await expect(runtime.inspect(request())).resolves.toMatchObject({
+    const identityResult = await identityRuntime.inspect(request());
+    expect(identityResult).toMatchObject({ ok: true });
+    if (!identityResult.ok) throw new Error("expected identity session key to be supported");
+    expect(identityResult.variants[0].disabledReason).toBeUndefined();
+
+    const sampleRuntime = new StreamVariantFetchRuntimeV1({
+      fetchImpl: (async (input: RequestInfo | URL) =>
+        String(input).includes("master")
+          ? response(identityMaster.replace("METHOD=AES-128", "METHOD=SAMPLE-AES"))
+          : response(TS_VOD)
+      ) as typeof fetch,
+    });
+    await expect(sampleRuntime.inspect(request({
+      requestId: "sample-request",
+      reviewId: "sample-review",
+    }))).resolves.toMatchObject({
       ok: true,
       variants: [{ disabledReason: "unsupported_manifest_shape" }],
     });
@@ -369,8 +384,21 @@ describe("StreamVariantFetchRuntimeV1 execution snapshots", () => {
     const videoUrl = "https://cdn.example.test/video.m3u8?token=video-secret";
     const audioUrl = "https://cdn.example.test/audio.m3u8?token=audio-secret";
     const segmentUrl = "https://cdn.example.test/one.m4s?token=segment-secret";
-    const videoText = FMP4_VOD.replace("one.m4s", "one.m4s?token=segment-secret");
+    const videoKeyUrl = "https://cdn.example.test/keys/video.key?token=video-key-secret";
+    const audioKeyUrl = "https://keys.example.test/audio.key?token=audio-key-secret";
+    const sessionKeyUrl = "https://keys.example.test/session.key?token=session-secret";
+    const videoText = FMP4_VOD
+      .replace(
+        '#EXT-X-MAP:URI="init.mp4"',
+        '#EXT-X-MAP:URI="init.mp4"\n#EXT-X-KEY:METHOD=AES-128,URI="keys/video.key?token=video-key-secret"',
+      )
+      .replace("one.m4s", "one.m4s?token=segment-secret");
+    const audioText = TS_VOD.replace(
+      "#EXTINF:1,",
+      `#EXT-X-KEY:METHOD=AES-128,URI="${audioKeyUrl}"\n#EXTINF:1,`,
+    );
     const master = `#EXTM3U
+#EXT-X-SESSION-KEY:METHOD=AES-128,URI="${sessionKeyUrl}",KEYFORMAT="identity"
 #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="Main",DEFAULT=YES,URI="${audioUrl}"
 #EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS="avc1.4d401f,mp4a.40.2",AUDIO="aud"
 ${videoUrl}
@@ -379,7 +407,7 @@ ${videoUrl}
       const url = String(input);
       if (url === rootUrl) return response(master);
       if (url === videoUrl) return response(videoText);
-      if (url === audioUrl) return response(TS_VOD);
+      if (url === audioUrl) return response(audioText);
       throw new Error("unexpected inspection fetch");
     }) as unknown as typeof fetch;
     const snapshotId = executionSnapshotId(1);
@@ -416,14 +444,23 @@ ${videoUrl}
 
     await expect(consumed.fetchImpl(rootUrl).then((value) => value.text())).resolves.toBe(master);
     await expect(consumed.fetchImpl(videoUrl).then((value) => value.text())).resolves.toBe(videoText);
-    await expect(consumed.fetchImpl(audioUrl).then((value) => value.text())).resolves.toBe(TS_VOD);
+    await expect(consumed.fetchImpl(audioUrl).then((value) => value.text())).resolves.toBe(audioText);
     await expect(consumed.fetchImpl(segmentUrl).then((value) => value.text())).resolves.toBe(
       `segment:${segmentUrl}`,
+    );
+    await expect(consumed.fetchImpl(videoKeyUrl).then((value) => value.text())).resolves.toBe(
+      `segment:${videoKeyUrl}`,
+    );
+    await expect(consumed.fetchImpl(audioKeyUrl).then((value) => value.text())).resolves.toBe(
+      `segment:${audioKeyUrl}`,
+    );
+    await expect(consumed.fetchImpl(sessionKeyUrl)).rejects.toThrow(
+      "Execution URL is not authorized by the snapshot.",
     );
     await expect(
       consumed.fetchImpl("https://cdn.example.test/uninspected-audio.m3u8"),
     ).rejects.toThrow("Execution URL is not authorized by the snapshot.");
-    expect(delegateReceivers).toEqual([undefined]);
+    expect(delegateReceivers).toEqual([undefined, undefined, undefined]);
     expect(
       runtime.consumeExecutionSnapshot({
         executionSnapshotId: snapshotId,

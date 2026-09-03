@@ -93,6 +93,7 @@ Active branch: **`option-c-stage-1-separate-audio`** (pushed, ahead of master, *
 | Recovery (B2) | `b36b85c`, `2d180a0`, `e31e447`, `60bbfd6` | redirect-resolved URL classification; per-tab `addOrUpdateVideo` mutex; `RawAacAudioError` ADTS sniff; WebM DNR header replay; SIZE_CAP "Download anyway"; captured headers persisted to `chrome.storage.session` (`lib/captured-headers`) + deterministic FNV-1a rule IDs surviving SW restart |
 | Disclosure (Stage 2D) | `782125f` (+ `fa33894` in cliphutch-site, **not deployed**) | PRIVACY/PERMISSIONS/firstrun + site privacy.html cover separate-audio fetch, byte-range, MPEG-TS repackaging, header-replay scope, captured-header storage; GPL tag → v0.1.1 |
 | Upgrade UX | `699df43` | "Already have a key?" link in the at-limit banner |
+| AES-128 transport decrypt | (this branch, uncommitted) | hls-crypto-plan.ts owns key/IV/sequence from raw text; decrypt in fetchSegmentBytes + fetchInit; 16-byte key fetch cap; snapshot authorizes media-playlist key URIs; disclosures rewritten |
 
 **Smoke gate: declined by Mikey 2026-07-03; proceeding as if cleared.** Pre-flight only: Mux `tos_ismc` and Apple `img_bipbop_adv_example_fmp4` manifests fetched via browser, confirmed live and exactly the Stage 1 / Stage 1+2A shapes. Browser automation can't load the unpacked ext, drive the popup, or hear audio, so these paths are **logic-verified + unit-tested but NOT browser-smoked** — say so if it matters.
 
@@ -103,13 +104,13 @@ Checkout verified live 2026-07-03: `CHECKOUT_URL` (`buy.stripe.com/8x29ATcsIdsW3
 1. **Remote checkpoint** — keep the reviewed Worker, extension, and status-document commits backed up on this feature branch. PR/merge remains a separate decision.
 2. **Deploy site privacy** — `fa33894` in cliphutch-site is local only; `npx wrangler pages deploy public --project-name cliphutch-site`.
 3. **Worker promotion gates** — the fixes and 40-test local Worker suite are checkpointed; staging setup, exact Payment Link qualification, production refund-row disposition, a refund-safe rollback point, migrations, and v2 smoke remain. Deployment is not implied by a branch push.
-4. **Optional:** B3 stills (video posters, CSS bg-images); full raw-ADTS→fMP4 muxing (currently accurate error only); UX batch (direct-download cancel, rate-limit reset time, host-aware empty state); AES-128 spike (post-0.1.2); CI/typecheck gate (M3 — `tsc` has ~35 pre-existing DOM-lib errors, needs tsconfig split first).
+4. **Optional:** B3 stills (video posters, CSS bg-images); full raw-ADTS→fMP4 muxing (currently accurate error only); UX batch (direct-download cancel, rate-limit reset time, host-aware empty state); CI/typecheck gate (M3 — `tsc` has ~35 pre-existing DOM-lib errors, needs tsconfig split first).
 
 ### Known concerns parked
 
 - **DNR header replay scope.** `buildUrlFilter` at `lib/header-capture.ts:74` creates `||host/dir/` from the master URL's directory. Works in practice (audio renditions co-located). If a deployment ever places audio at a parallel path on the same host, audio fetches go header-less. Documented inline in `header-capture.ts`. Fix is a second DNR rule for the audio URL when its path falls outside the video's prefix.
 - **Multi-track init muxer.** `dash-mux.ts parseFmp4` extracts `tracks[0]` only; multi-track fMP4 input now throws (guard from `5fca8a9`). No public test stream exercises this. Defer the full multi-track fix until a real site reports silent audio.
-- **Out of scope after Option C lands:** AES-128 transport encryption, FairPlay/Widevine DRM, live/event playlists, discontinuities with codec changes, multi-period DASH, WebM/Opus HLS, CMAF subtitles/timed metadata, MSE-only flows (YouTube, Twitter), sites needing headers/cookies not captured at detection time.
+- **Out of scope after Option C lands:** SAMPLE-AES, I-frame-only playlists, FairPlay/Widevine DRM, live/event playlists, discontinuities with codec changes, multi-period DASH, WebM/Opus HLS, CMAF subtitles/timed metadata, MSE-only flows (YouTube, Twitter), sites needing headers/cookies not captured at detection time.
 
 ### Where the master plan lives
 

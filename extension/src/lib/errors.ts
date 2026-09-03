@@ -40,10 +40,11 @@ export class RawAacAudioError extends HlsDownloadError {
 }
 
 export class EncryptedStreamError extends HlsDownloadError {
-  constructor() {
+  constructor(detail?: string) {
+    const message = "This stream uses an encryption method ClipHutch does not support";
     super(
       "ENCRYPTED",
-      "This HLS stream is encrypted. ClipHutch does not fetch encryption keys or decrypt media.",
+      detail ? `${message} (${detail}).` : `${message}.`,
     );
     this.name = "EncryptedStreamError";
   }

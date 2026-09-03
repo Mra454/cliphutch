@@ -624,7 +624,7 @@ function Diagnostics({ v, job }: { v: DetectedVideo; job: AnyJob | null }) {
     }
   }
   if (job && "errorCode" in job && job.errorCode === "ENCRYPTED") {
-    notes.push("This stream is encrypted; keys are not fetched.");
+    notes.push("This stream's encryption method is not supported.");
   }
   if (job && "errorCode" in job && job.errorCode === "DRM_PROTECTED") {
     notes.push("This stream is DRM-protected and cannot be downloaded.");

@@ -15,6 +15,7 @@ import {
   inspectHlsMediaPlaylistV1,
 } from "./stream-variant-inspection";
 import type { RawVariantOptionV1, VariantDisabledReasonV1 } from "./variant-options";
+import { buildHlsCryptoPlan, type HlsKeyContext } from "../workers/hls-crypto-plan";
 
 export const STREAM_VARIANT_HTTP_CONCURRENCY = 3;
 export const STREAM_VARIANT_RESPONSE_BYTE_LIMIT = 2 * 1024 * 1024;
@@ -224,7 +225,10 @@ function hlsMasterProtectionReason(text: string): VariantDisabledReasonV1 | unde
     const method = /(?:^|,)\s*METHOD\s*=\s*([^,\s]+)/i.exec(
       trimmed.slice(trimmed.indexOf(":") + 1),
     )?.[1]?.trim().toUpperCase();
-    return method !== undefined && method !== "" && method !== "NONE";
+    return method !== undefined &&
+      method !== "" &&
+      method !== "NONE" &&
+      method !== "AES-128";
   });
   return encrypted ? "unsupported_manifest_shape" : undefined;
 }
@@ -462,6 +466,17 @@ export class StreamVariantFetchRuntimeV1 {
         const initUrl = resolveHttpUrl(segment.map.uri, manifestUrl);
         if (initUrl !== undefined) authorizedSegmentUrls.add(initUrl);
       }
+    }
+    if ((manifest.segments?.length ?? 0) === 0) return;
+    const cryptoPlan = buildHlsCryptoPlan(manifestText, manifestUrl);
+    const authorizeKey = (key: HlsKeyContext | undefined) => {
+      if (key?.method !== "AES-128") return;
+      const keyUrl = resolveHttpUrl(key.keyUri, manifestUrl);
+      if (keyUrl !== undefined) authorizedSegmentUrls.add(keyUrl);
+    };
+    for (const segment of cryptoPlan.segments) {
+      authorizeKey(segment.key);
+      authorizeKey(segment.mapKey);
     }
   }
 

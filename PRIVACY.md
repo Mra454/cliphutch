@@ -59,7 +59,7 @@ A redacted mutation journal stores SHA-256 fingerprints instead of raw license k
 
 There are no analytics, telemetry, or update pings beyond Chrome's own extension-update mechanism. Capture Pack manifest content is written only to the local download you requested; ClipHutch does not send it to a ClipHutch-operated server.
 
-When the popup or side-panel workspace shows a preview for a direct media file, or when you download media, the extension fetches the media **directly from the source server** that originally served it, using whatever credentials (cookies, referrer) your browser would normally send to that origin. ClipHutch does not send page or media URLs to ClipHutch, analytics services, or a download relay.
+When the popup or side-panel workspace shows a preview for a direct media file, or when you download media, the extension fetches the media **directly from the source server** that originally served it, using whatever credentials (cookies, referrer) your browser would normally send to that origin. For AES-128 encrypted HLS streams, the decryption key is fetched from the source server, used on your device for that download only, and never stored or sent to ClipHutch. ClipHutch does not send page or media URLs to ClipHutch, analytics services, or a download relay.
 
 ## 5. Chrome Web Store Limited Use
 

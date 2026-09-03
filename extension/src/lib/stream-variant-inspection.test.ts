@@ -63,25 +63,55 @@ describe("inspectHlsMediaPlaylistV1", () => {
     });
   });
 
-  it("distinguishes DRM from plain transport encryption", () => {
+  it("supports identity AES-128 while distinguishing SAMPLE-AES and DRM", () => {
     const drm = TS_VOD.replace(
       "#EXTINF:6,",
       '#EXT-X-KEY:METHOD=SAMPLE-AES,URI="skd://key",KEYFORMAT="com.apple.streamingkeydelivery"\n#EXTINF:6,',
     );
-    const encrypted = TS_VOD.replace(
+    const identityAes = TS_VOD.replace(
       "#EXTINF:6,",
       '#EXT-X-KEY:METHOD=AES-128,URI="https://keys.example.test/key"\n#EXTINF:6,',
+    );
+    const sampleAes = TS_VOD.replace(
+      "#EXTINF:6,",
+      '#EXT-X-KEY:METHOD=SAMPLE-AES,URI="https://keys.example.test/key"\n#EXTINF:6,',
     );
     expect(inspectHlsMediaPlaylistV1(drm)).toMatchObject({
       supported: false,
       code: "drm",
       disabledReason: "drm",
     });
-    expect(inspectHlsMediaPlaylistV1(encrypted)).toMatchObject({
+    expect(inspectHlsMediaPlaylistV1(identityAes)).toMatchObject({
+      supported: true,
+      durationSec: 10.5,
+    });
+    expect(inspectHlsMediaPlaylistV1(sampleAes)).toMatchObject({
       supported: false,
       code: "encrypted",
       disabledReason: "unsupported_manifest_shape",
     });
+  });
+
+  it("rejects I-frame-only and malformed AES-128 media playlists", () => {
+    const iFramesOnly = TS_VOD.replace(
+      "#EXT-X-TARGETDURATION:6",
+      "#EXT-X-TARGETDURATION:6\n#EXT-X-I-FRAMES-ONLY",
+    );
+    const missingKeyUri = TS_VOD.replace(
+      "#EXTINF:6,",
+      "#EXT-X-KEY:METHOD=AES-128\n#EXTINF:6,",
+    );
+    const encryptedMapWithoutIv = FMP4_VOD.replace(
+      '#EXT-X-MAP:URI="init.mp4"',
+      '#EXT-X-KEY:METHOD=AES-128,URI="key.bin"\n#EXT-X-MAP:URI="init.mp4"',
+    );
+    for (const text of [iFramesOnly, missingKeyUri, encryptedMapWithoutIv]) {
+      expect(inspectHlsMediaPlaylistV1(text)).toMatchObject({
+        supported: false,
+        code: "encrypted",
+        disabledReason: "unsupported_manifest_shape",
+      });
+    }
   });
 
   it("rejects discontinuities and initialization-map changes", () => {

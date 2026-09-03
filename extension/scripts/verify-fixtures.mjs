@@ -7,6 +7,7 @@ const required = [
   "fixtures/dash-test/video.m4v",
   "fixtures/dash-test/audio.m4a",
   "../fixtures/video-test-page/hls-simple/segment0.ts",
+  "../fixtures/video-test-page/hls-encrypted/segment0.ts",
 ];
 
 for (const path of required) {
@@ -15,3 +16,10 @@ for (const path of required) {
   if (!info.isFile() || info.size === 0) throw new Error(`Required fixture is empty: ${path}`);
   console.log(`[fixture] ${path}: ${info.size} bytes`);
 }
+
+const encryptedKey = "../fixtures/video-test-page/hls-encrypted/key.bin";
+const encryptedKeyInfo = statSync(resolve(extensionDirectory, encryptedKey));
+if (!encryptedKeyInfo.isFile() || encryptedKeyInfo.size !== 16) {
+  throw new Error(`Required fixture key is not 16 bytes: ${encryptedKey}`);
+}
+console.log(`[fixture] ${encryptedKey}: ${encryptedKeyInfo.size} bytes`);

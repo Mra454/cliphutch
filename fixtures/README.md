@@ -20,12 +20,13 @@ Then open http://localhost:8000. Stdlib-only (no pip deps); explicit MIME overri
 | 3 | `hls-simple/playlist.m3u8` | HLS VOD | Embedded audio, unencrypted — Session 5 happy path |
 | 4 | `hls-master-embedded/master.m3u8` | HLS master | Two variants, both with embedded audio |
 | 5 | `hls-master-separate-audio/master.m3u8` | HLS master | `EXT-X-MEDIA TYPE=AUDIO` rendition — Session 5 rejects |
-| 6 | `hls-encrypted/playlist.m3u8` | HLS VOD | `EXT-X-KEY METHOD=AES-128` — Session 5 rejects |
+| 6 | `hls-encrypted/playlist.m3u8` | HLS VOD | Real AES-128 encrypted segments with sequence-derived IVs; download must play |
+| 7 | `hls-encrypted-iv/playlist.m3u8` | HLS VOD | Real AES-128 encrypted segments with an explicit IV and media sequence 5; download must play |
 
 Total fixture size: under 15 MB.
 
 ## Notes
 
-- Sections 5 and 6 ship with empty stub segments. They fire the right network requests but are not playable; that is intentional.
+- Section 5 ships with empty stub segments. It fires the right network requests but is not playable; that is intentional. Sections 6 and 7 contain real encrypted segments and 16-byte keys.
 - No `hls.js` or third-party player is bundled. HLS sections issue a single `fetch()` for the master/playlist; segment fetches happen only when the extension downloads (Session 5).
 - Direct MP4/WebM keyframe interval is 2s (`-g 60` at 30fps), which is what lets `hls-simple` and `hls-master-embedded/high` be cut by `-c copy` into 5 clean segments without re-encoding.

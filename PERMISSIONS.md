@@ -31,6 +31,8 @@ The manifest can contain each item's planned relative path; final basename when 
 - Track usage or include analytics.
 - Read form fields, text content, cookies, passwords, or private page data from the DOM.
 - Provide access to media unless your browser is already authorized to load it.
-- Decrypt encrypted media streams.
+- Handle DRM-protected media.
 
 Direct media previews and downloads are fetched directly from the original source server, not from a ClipHutch server. WebM direct files are converted locally to MP4 before saving, and streams with separate audio and video (or MPEG-TS segments) are combined and repackaged into one MP4 on your device.
+
+Some HLS streams use standard AES-128 transport encryption. When you start a download, ClipHutch fetches the 16-byte key named by the selected playlist, decrypts the segments on your device, and keeps the key in memory only for that download. If the source refuses the key request, the download fails. ClipHutch does not handle DRM (Widevine, PlayReady, FairPlay) and does not work around logins, paywalls, or other access controls.

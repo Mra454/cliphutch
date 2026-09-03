@@ -4,7 +4,9 @@ import {
   type DashRepresentation,
 } from "./dash";
 import { classifyHlsManifestForDrm } from "./drm";
+import { DrmProtectedError } from "./errors";
 import type { HlsVariant } from "./hls-variants";
+import { buildHlsCryptoPlan } from "../workers/hls-crypto-plan";
 import {
   MAX_VARIANT_BANDWIDTH,
   MAX_VARIANT_DIMENSION,
@@ -25,7 +27,6 @@ type ByteRange = { length?: number; offset?: number };
 type ParsedHlsSegment = {
   uri?: string;
   duration?: number;
-  key?: { method?: string };
   map?: { uri?: string; byterange?: ByteRange };
   discontinuity?: boolean;
 };
@@ -93,26 +94,6 @@ function parseHlsMediaPlaylist(text: string): ParsedHlsMediaPlaylist | undefined
   }
 }
 
-function hasPlainHlsEncryption(text: string, segments: ParsedHlsSegment[]): boolean {
-  if (
-    segments.some((segment) => {
-      const method = segment.key?.method?.trim().toUpperCase();
-      return method !== undefined && method !== "" && method !== "NONE";
-    })
-  ) {
-    return true;
-  }
-  // SESSION-KEY can apply before a segment key is attached by m3u8-parser.
-  return text.split(/\r?\n/).some((line) => {
-    const trimmed = line.trim();
-    if (!/^#EXT-X-(?:SESSION-)?KEY\s*:/i.test(trimmed)) return false;
-    const method = /(?:^|,)\s*METHOD\s*=\s*([^,\s]+)/i.exec(
-      trimmed.slice(trimmed.indexOf(":") + 1),
-    )?.[1]?.trim().toUpperCase();
-    return method !== undefined && method !== "" && method !== "NONE";
-  });
-}
-
 function mapSignature(segment: ParsedHlsSegment): string {
   if (!segment.map?.uri) return "none";
   const range = segment.map.byterange;
@@ -166,7 +147,14 @@ export function inspectHlsMediaPlaylistV1(
   if (segments.length > HLS_MEDIA_PLAYLIST_SEGMENT_LIMIT) {
     return hlsFailure("segment_limit", "unsupported_manifest_shape");
   }
-  if (hasPlainHlsEncryption(text, segments)) {
+  let cryptoPlan;
+  try {
+    cryptoPlan = buildHlsCryptoPlan(text, "file:///cliphutch-inspection/playlist.m3u8");
+  } catch (error) {
+    if (error instanceof DrmProtectedError) return hlsFailure("drm", "drm");
+    return hlsFailure("encrypted", "unsupported_manifest_shape");
+  }
+  if (cryptoPlan.iFramesOnly) {
     return hlsFailure("encrypted", "unsupported_manifest_shape");
   }
   if (
