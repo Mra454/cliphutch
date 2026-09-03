@@ -6,6 +6,7 @@ import {
   CancelledError,
   DrmProtectedError,
   EmptyManifestError,
+  HlsDownloadError,
   LiveStreamError,
   MixedContainerAudioError,
   NetworkError,
@@ -114,16 +115,18 @@ async function fetchBytes(
   signal: AbortSignal,
   fetchImpl: typeof fetch,
 ): Promise<Uint8Array> {
-  let res: Response;
   try {
-    res = await fetchImpl(url, { credentials: "include", signal });
+    const res = await fetchImpl(url, { credentials: "include", signal });
+    if (res.status === 401 || res.status === 403) throw new AccessDeniedError();
+    if (!res.ok) throw new NetworkError(`Status ${res.status}`);
+    return new Uint8Array(await res.arrayBuffer());
   } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") throw new CancelledError();
+    if (err instanceof HlsDownloadError) throw err;
+    if (signal.aborted || (err instanceof Error && err.name === "AbortError")) {
+      throw new CancelledError();
+    }
     throw new NetworkError(err instanceof Error ? err.message : undefined);
   }
-  if (res.status === 401 || res.status === 403) throw new AccessDeniedError();
-  if (!res.ok) throw new NetworkError(`Status ${res.status}`);
-  return new Uint8Array(await res.arrayBuffer());
 }
 
 async function fetchByteRange(
@@ -134,29 +137,31 @@ async function fetchByteRange(
   fetchImpl: typeof fetch,
 ): Promise<Uint8Array> {
   const end = offset + length - 1;
-  let res: Response;
   try {
-    res = await fetchImpl(url, {
+    const res = await fetchImpl(url, {
       credentials: "include",
       signal,
       headers: { Range: `bytes=${offset}-${end}` },
     });
+    if (res.status === 401 || res.status === 403) throw new AccessDeniedError();
+    if (res.status === 416) throw new ByteRangeOutOfBoundsError();
+    // 200 means the server ignored the Range header and sent the full resource.
+    // Using the full body would silently produce huge / wrong segments, so
+    // surface this rather than fall through.
+    if (res.status === 200) throw new ByteRangeUnsupportedError();
+    if (res.status !== 206 && !res.ok) throw new NetworkError(`Status ${res.status}`);
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    // Some servers honor 206 but return the full body anyway. Trim defensively
+    // so callers get exactly the requested range length.
+    if (bytes.length > length) return bytes.slice(0, length);
+    return bytes;
   } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") throw new CancelledError();
+    if (err instanceof HlsDownloadError) throw err;
+    if (signal.aborted || (err instanceof Error && err.name === "AbortError")) {
+      throw new CancelledError();
+    }
     throw new NetworkError(err instanceof Error ? err.message : undefined);
   }
-  if (res.status === 401 || res.status === 403) throw new AccessDeniedError();
-  if (res.status === 416) throw new ByteRangeOutOfBoundsError();
-  // 200 means the server ignored the Range header and sent the full resource.
-  // Using the full body would silently produce huge / wrong segments, so
-  // surface this rather than fall through.
-  if (res.status === 200) throw new ByteRangeUnsupportedError();
-  if (res.status !== 206 && !res.ok) throw new NetworkError(`Status ${res.status}`);
-  const bytes = new Uint8Array(await res.arrayBuffer());
-  // Some servers honor 206 but return the full body anyway. Trim defensively
-  // so callers get exactly the requested range length.
-  if (bytes.length > length) return bytes.slice(0, length);
-  return bytes;
 }
 
 async function fetchSegmentBytes(

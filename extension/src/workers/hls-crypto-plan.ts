@@ -3,6 +3,7 @@ import {
   CancelledError,
   DrmProtectedError,
   EncryptedStreamError,
+  HlsDownloadError,
   NetworkError,
   UnsupportedMediaShapeError,
 } from "../lib/errors";
@@ -251,25 +252,25 @@ export function createKeyCache(
     const existing = cache.get(keyUri);
     if (existing !== undefined) return existing;
     const pending = (async () => {
-      let response: Response;
       try {
-        response = await fetchImpl(keyUri, { credentials: "include", signal });
+        const response = await fetchImpl(keyUri, { credentials: "include", signal });
+        if (response.status === 401 || response.status === 403) throw new AccessDeniedError();
+        if (!response.ok) throw new EncryptedStreamError("key request failed");
+        const bytes = await readKeyBytes(response);
+        return await globalThis.crypto.subtle.importKey(
+          "raw",
+          copiedArrayBuffer(bytes),
+          "AES-CBC",
+          false,
+          ["decrypt"],
+        );
       } catch (error) {
-        if (error instanceof Error && error.name === "AbortError") {
+        if (error instanceof HlsDownloadError) throw error;
+        if (signal.aborted || (error instanceof Error && error.name === "AbortError")) {
           throw new CancelledError();
         }
         throw new NetworkError(error instanceof Error ? error.message : undefined);
       }
-      if (response.status === 401 || response.status === 403) throw new AccessDeniedError();
-      if (!response.ok) throw new EncryptedStreamError("key request failed");
-      const bytes = await readKeyBytes(response);
-      return globalThis.crypto.subtle.importKey(
-        "raw",
-        copiedArrayBuffer(bytes),
-        "AES-CBC",
-        false,
-        ["decrypt"],
-      );
     })();
     cache.set(keyUri, pending);
     pending.catch(() => {});

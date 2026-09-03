@@ -50,12 +50,57 @@ type FetchEntry = {
   status?: number;
   delayMs?: number;
   onAbort?: () => void;
+  controlledBody?: ControlledBody;
   // When set, override how the mock responds to a Range request:
   //   "ignore-range": return full body with 200 (server ignored Range).
   //   "out-of-bounds": return 416.
   // Default: slice the body by the request's Range header and return 206.
   rangeBehavior?: "ignore-range" | "out-of-bounds";
 };
+
+type ControlledBody = {
+  stream(signal?: AbortSignal | null): ReadableStream<Uint8Array>;
+  started: Promise<void>;
+  release(bytes: Uint8Array): void;
+  fail(error: Error): void;
+};
+
+function createControlledBody(): ControlledBody {
+  let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+  let settled = false;
+  let markStarted: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => { markStarted = resolve; });
+
+  return {
+    stream(signal) {
+      return new ReadableStream<Uint8Array>({
+        start(controller) {
+          streamController = controller;
+          markStarted?.();
+          const abort = () => {
+            if (settled) return;
+            settled = true;
+            controller.error(new DOMException("Aborted", "AbortError"));
+          };
+          if (signal?.aborted) abort();
+          else signal?.addEventListener("abort", abort, { once: true });
+        },
+      });
+    },
+    started,
+    release(bytes) {
+      if (settled || streamController === undefined) return;
+      settled = true;
+      streamController.enqueue(bytes);
+      streamController.close();
+    },
+    fail(error) {
+      if (settled || streamController === undefined) return;
+      settled = true;
+      streamController.error(error);
+    },
+  };
+}
 
 function parseRange(header: string | null): { start: number; end: number } | null {
   if (!header) return null;
@@ -89,6 +134,11 @@ function makeFetch(map: Record<string, FetchEntry>): typeof fetch {
     }
     if (entry.status && entry.status >= 400) {
       return new Response("", { status: entry.status });
+    }
+    if (entry.controlledBody) {
+      return new Response(entry.controlledBody.stream(init?.signal), {
+        status: entry.status ?? 200,
+      });
     }
 
     // Honor Range headers: if the caller sent Range and the entry body is
@@ -259,6 +309,110 @@ describe("downloadHls — failure aborts the segment pool", () => {
     // SEG_COUNT.
     await new Promise((r) => setTimeout(r, 150));
     expect(started).toBeLessThanOrEqual(HLS_SEGMENT_FETCH_CONCURRENCY);
+  });
+});
+
+describe("downloadHls — body-phase failures", () => {
+  it("cancelling while a media segment body is stalled rejects with CancelledError", async () => {
+    const body = createControlledBody();
+    const controller = new AbortController();
+    const byteRangePlaylist = `#EXTM3U
+#EXT-X-VERSION:4
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-TARGETDURATION:2
+#EXTINF:2.0,
+#EXT-X-BYTERANGE:4@0
+segment.ts
+#EXT-X-ENDLIST
+`;
+    const download = downloadHls("https://a/p.m3u8", {
+      onProgress: noProgress,
+      signal: controller.signal,
+      sizeCapBytes: cap,
+      fetchImpl: makeFetch({
+        "https://a/p.m3u8": { body: byteRangePlaylist },
+        "https://a/segment.ts": {
+          body: new Uint8Array(),
+          status: 206,
+          controlledBody: body,
+        },
+      }),
+    });
+
+    await body.started;
+    controller.abort();
+
+    await expect(download).rejects.toMatchObject({
+      name: "CancelledError",
+      code: "CANCELLED",
+    });
+  });
+
+  it("cancelling while an fMP4 init body is stalled rejects with CancelledError", async () => {
+    const body = createControlledBody();
+    const controller = new AbortController();
+    const download = downloadHls("https://a/p.m3u8", {
+      onProgress: noProgress,
+      signal: controller.signal,
+      sizeCapBytes: cap,
+      fetchImpl: makeFetch({
+        "https://a/p.m3u8": { body: FMP4_PLAYLIST },
+        "https://a/init.mp4": { body: new Uint8Array(), controlledBody: body },
+        "https://a/seg0.m4s": { body: SEG_BYTES },
+      }),
+    });
+
+    await body.started;
+    controller.abort();
+
+    await expect(download).rejects.toBeInstanceOf(CancelledError);
+  });
+
+  it("cancelling while an AES-128 key body is stalled rejects with CancelledError", async () => {
+    const body = createControlledBody();
+    const controller = new AbortController();
+    const fetchMock = vi.fn(makeFetch({
+      "https://a/p.m3u8": { body: ENCRYPTED_PLAYLIST },
+      "https://a/key.bin": { body: new Uint8Array(), controlledBody: body },
+      "https://a/seg0.ts": { body: new Uint8Array(16) },
+      "https://a/seg1.ts": { body: new Uint8Array(16) },
+    }));
+    const download = downloadHls("https://a/p.m3u8", {
+      onProgress: noProgress,
+      signal: controller.signal,
+      sizeCapBytes: cap,
+      fetchImpl: fetchMock,
+    });
+
+    await body.started;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fetchMock.mock.calls.filter(([input]) => String(input).includes("seg"))).toHaveLength(2);
+    controller.abort();
+
+    await expect(download).rejects.toBeInstanceOf(CancelledError);
+  });
+
+  it("maps a media body-phase transport failure to NetworkError", async () => {
+    const body = createControlledBody();
+    const controller = new AbortController();
+    const download = downloadHls("https://a/p.m3u8", {
+      onProgress: noProgress,
+      signal: controller.signal,
+      sizeCapBytes: cap,
+      fetchImpl: makeFetch({
+        "https://a/p.m3u8": { body: SIMPLE_VOD },
+        "https://a/seg0.ts": { body: new Uint8Array(), controlledBody: body },
+        "https://a/seg1.ts": { body: SEG_BYTES },
+      }),
+    });
+
+    await body.started;
+    body.fail(new TypeError("body transport failed"));
+
+    await expect(download).rejects.toMatchObject({
+      name: "NetworkError",
+      code: "NETWORK",
+    });
   });
 });
 

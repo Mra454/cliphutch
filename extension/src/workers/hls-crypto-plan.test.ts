@@ -388,6 +388,44 @@ describe("createKeyCache", () => {
       process.removeListener("unhandledRejection", onUnhandled);
     }
   });
+
+  it("normalizes body-phase cancellation without remapping key response errors", async () => {
+    const controller = new AbortController();
+    const stalledBody = new ReadableStream<Uint8Array>({
+      start(streamController) {
+        controller.signal.addEventListener(
+          "abort",
+          () => streamController.error(new DOMException("Aborted", "AbortError")),
+          { once: true },
+        );
+      },
+    });
+    const stalled = createKeyCache(
+      (async () => new Response(stalledBody)) as typeof fetch,
+      controller.signal,
+    ).getKey("https://keys.example.test/stalled");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    controller.abort();
+    await expect(stalled).rejects.toBeInstanceOf(CancelledError);
+
+    const oversized = createKeyCache(
+      (async () => new Response(new Uint8Array(17) as unknown as BodyInit)) as typeof fetch,
+      noSignal(),
+    );
+    await expect(oversized.getKey("https://keys.example.test/oversized")).rejects.toThrow(
+      /unexpected key size/,
+    );
+    await expect(oversized.getKey("https://keys.example.test/oversized")).rejects.toBeInstanceOf(
+      EncryptedStreamError,
+    );
+
+    const forbidden = createKeyCache(
+      (async () => new Response("", { status: 403 })) as typeof fetch,
+      noSignal(),
+    );
+    await expect(forbidden.getKey("https://keys.example.test/forbidden-body-test")).rejects
+      .toBeInstanceOf(AccessDeniedError);
+  });
 });
 
 describe("EncryptedStreamError", () => {
