@@ -33,3 +33,51 @@ validated trust story, keep Pro brief and framed to the maintenance audience.
 
 COMPUTEDKIT PRO
 The core inspector is free with no quotas, runs only when you ask, and keeps results in Chrome. ComputedKit Pro is a US$29 one-time purchase, not a subscription, for pages you maintain and revisit: save a local baseline of a page's computed values, and a later scan shows exactly which of them changed. One license activates Pro on up to three browser installations, with a 14-day refund window. Details and purchase: https://cliphutch.com/computedkit/
+
+## CWS declarations paste, 2026-09-03 (0.1.4 candidate)
+
+Dashboard fields under Privacy practices. Every claim traces to PERMISSIONS.md
+and PRIVACY.md on the aes128-transport-decrypt branch; edit those first if a
+claim changes. New since the live 0.1.3 listing: `alarms`, `sidePanel`, Hutch
+session retention, selected header leases, local Capture Pack manifests, and
+plain AES-128 HLS decryption.
+
+### Single purpose
+
+ClipHutch detects video and larger image files that a web page loads and saves them to the user's device through Chrome's download manager, combining HLS and DASH streams into one MP4 locally when needed.
+
+### Permission justifications
+
+webRequest: Observes network requests, including request headers, so the extension can detect media URLs as the originating tab loads them and, only when the user starts a download, replay the request headers that page sent. Nothing observed leaves the device.
+
+alarms: Schedules one-shot local cleanup wakes for the next selected-item header-lease expiry and for retrying delivery or cleanup of a local Capture Pack manifest. Not used for polling, tracking, or analytics.
+
+storage: Session storage holds detected media, the user's selected Hutch snapshot, review and run context, download-job state, and bounded header leases; all clear on browser restart. Local storage holds settings, license state, an installation identifier, notices, and rolling free-tier quota timestamps.
+
+sidePanel: Hosts the packaged ClipHutch workspace beside the pages the user browses so the Hutch and download activity stay visible across tab switches. Grants no additional access to page data.
+
+downloads: Saves the media the user chose, plus a Capture Pack's redacted local `_cliphutch-manifest.json` and an optional CSV, through Chrome's built-in download manager.
+
+offscreen: Runs briefly to assemble HLS and DASH segments, combine separate audio and video tracks into one MP4, repackage MPEG-TS into MP4, decrypt standard AES-128 HLS segments with the key named by the selected playlist, convert WebM direct files to MP4, and create a local text Blob for a Capture Pack manifest. All work is on the device.
+
+declarativeNetRequestWithHostAccess: When a selected item needs the request headers its source page sent (such as Referer or Authorization), installs a temporary session rule from that item's bounded header lease, limited to extension-initiated requests and the selected source's exact scheme, origin, and path scope. Removed when the job ends, the item is removed, the lease expires, or the session ends.
+
+Host permissions (http://*/*, https://*/*): Required for webRequest to observe media requests on any HTTP or HTTPS site the user visits, and for the single content script that reads image URL attributes already present in page markup. The extension processes request URLs and headers it observed, image URL attributes, and the originating tab's URL and title; it does not read form fields, text content, cookies, passwords, or other page data.
+
+### Remote code
+
+No. All JavaScript and the WebAssembly media tooling are packaged in the extension.
+
+### Data usage
+
+Collected (licensed tier only): Authentication information. The license key and installation identifier are sent to https://cliphutch-api.mra454.workers.dev when a user activates or deactivates a license and when an activation older than 7 days refreshes its status. The free tier contacts no ClipHutch server.
+
+Not collected: personally identifiable information, health, financial or payment information, personal communications, location, web history, user activity, website content. Media URLs, page titles, hostnames, filenames, and browsing activity stay on the device. AES-128 keys are fetched from the source server, held in memory for that download only, and never stored or sent to ClipHutch.
+
+Certifications: data is not sold to third parties; data is not used or transferred for purposes unrelated to the item's single purpose; data is not used or transferred to determine creditworthiness or for lending purposes.
+
+Privacy policy: https://cliphutch.com/privacy
+
+### Reviewer notes (optional field)
+
+Version 0.1.4 adds a side-panel workspace (sidePanel), one-shot local cleanup alarms (alarms), session-only Hutch retention with bounded header leases, a redacted local Capture Pack manifest, and on-device decryption of standard AES-128 HLS transport encryption. DRM (Widevine, PlayReady, FairPlay) remains unsupported. Permission count is 7 API permissions plus broad host permissions, disclosed at https://cliphutch.com/privacy and in the extension's first-run page.
