@@ -93,14 +93,15 @@
       <h2>5. HLS — master with separate audio rendition</h2>
       <p>
         Master uses <code>EXT-X-MEDIA TYPE=AUDIO URI=...</code> referenced by
-        the variant's <code>AUDIO</code> attribute. Detection must succeed;
-        download must reject with <code>SeparateAudioError</code> in Session 5.
+        the variant's <code>AUDIO</code> attribute. This fixture's audio
+        rendition serves raw-ADTS <code>.aac</code> segments; MPEG-TS and fMP4
+        separate-audio fixtures download in the sections below.
       </p>
       <button data-fetch="hls-master-separate-audio/master.m3u8">Fetch master.m3u8</button>
       <span class="status"></span>
       <p class="expect">
-        <strong>Expect:</strong> popup detects HLS; download fails with the
-        separate-audio message.
+        <strong>Expect:</strong> popup detects HLS; download fails with the raw
+        AAC audio message.
       </p>
     </section>
 
@@ -148,7 +149,21 @@
     </section>
 
     <section>
-      <h2>9. HLS — AES-128 MPEG-TS video with separate MPEG-TS audio</h2>
+      <h2>9. HLS — MPEG-TS separate audio with timeline offset</h2>
+      <p>
+        Master uses a default audio rendition. The audio timeline begins after
+        the video timeline.
+      </p>
+      <button data-fetch="hls-master-separate-audio-ts-offset/master.m3u8">Fetch master.m3u8</button>
+      <span class="status"></span>
+      <p class="expect">
+        <strong>Expect:</strong> download completes; audio stays in sync (audio
+        begins about half a second after the first frame).
+      </p>
+    </section>
+
+    <section>
+      <h2>10. HLS — AES-128 MPEG-TS video with separate MPEG-TS audio</h2>
       <p>
         Master uses a default audio rendition. The video and audio playlists
         are encrypted with separate AES-128 keys and sequence-derived IVs.

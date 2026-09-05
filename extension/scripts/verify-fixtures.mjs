@@ -10,6 +10,8 @@ const required = [
   "../fixtures/video-test-page/hls-encrypted/segment0.ts",
   "../fixtures/video-test-page/hls-master-separate-audio-ts/video/segment0.ts",
   "../fixtures/video-test-page/hls-master-separate-audio-ts/audio/segment0.ts",
+  "../fixtures/video-test-page/hls-master-separate-audio-ts-offset/video/segment0.ts",
+  "../fixtures/video-test-page/hls-master-separate-audio-ts-offset/audio/segment0.ts",
 ];
 
 for (const path of required) {

@@ -18,11 +18,12 @@
 //     the next call to addSample crashes with an opaque mp4box-internal
 //     error. We surface it as a clean exception.
 
-import { createFile, MP4BoxBuffer, DataStream } from "mp4box";
+import { createFile, MP4BoxBuffer, DataStream, BoxParser } from "mp4box";
 
 type AnyBox = {
   type?: string;
   boxes?: AnyBox[];
+  addBox?: (box: AnyBox) => AnyBox;
   // Populated by parsing scaffolding; available on parsed boxes:
   start?: number;
   size?: number;
@@ -30,10 +31,16 @@ type AnyBox = {
   data?: Uint8Array;
 };
 type AnyTrak = {
-  tkhd: { track_id: number; volume?: number };
-  mdia: { minf: { stbl: { stsd: { entries: AnyBox[] } } } };
+  boxes?: AnyBox[];
+  addBox?: (box: AnyBox) => AnyBox;
+  tkhd: { track_id: number; duration?: number; volume?: number };
+  mdia?: { mdhd?: { duration?: number }; minf: { stbl: { stsd: { entries: AnyBox[] } } } };
 };
-type AnyMoov = { traks: AnyTrak[]; boxes?: AnyBox[] };
+type AnyMoov = {
+  mvhd?: { timescale?: number; duration?: number };
+  traks: AnyTrak[];
+  boxes?: AnyBox[];
+};
 type AnyIso = {
   moov: AnyMoov;
   boxes?: AnyBox[];
@@ -66,6 +73,19 @@ type ParsedTrack = {
 };
 
 type Parsed = { iso: AnyIso; track: ParsedTrack; samples: ParsedSample[] };
+
+type EditListEntry = {
+  segment_duration: number;
+  media_time: number;
+  media_rate_integer: number;
+  media_rate_fraction: number;
+};
+
+type EditListBox = AnyBox & {
+  version: number;
+  flags: number;
+  entries: EditListEntry[];
+};
 
 export const MP4BOX_SAMPLE_BATCH_SIZE = 4_096;
 
@@ -111,7 +131,7 @@ export function inspectFmp4Init(bytes: Uint8Array): Fmp4InitInspection {
   if (!readyTracks) throw new Error("No movie metadata found in fMP4 init segment");
 
   const entryBoxes = iso.moov?.traks.flatMap(
-    (trak) => trak.mdia.minf.stbl.stsd.entries,
+    (trak) => trak.mdia?.minf.stbl.stsd.entries ?? [],
   ) ?? [];
   const encrypted =
     entryBoxes.some(containsEncryptionBox) ||
@@ -213,7 +233,7 @@ function parseFmp4(bytes: Uint8Array): Parsed {
   if (!track) throw new Error("No track found in fMP4");
   if (samples.length === 0) throw new Error("No samples extracted from fMP4");
 
-  const srcEntryBoxes = (iso.moov.traks[0]?.mdia.minf.stbl.stsd.entries[0]?.boxes ?? []) as AnyBox[];
+  const srcEntryBoxes = (iso.moov.traks[0]?.mdia?.minf.stbl.stsd.entries[0]?.boxes ?? []) as AnyBox[];
   patchUnserializedBoxData(srcEntryBoxes, bytes);
 
   return { iso, track, samples };
@@ -225,7 +245,7 @@ function buildTrackOptions(p: Parsed): Record<string, unknown> {
 
   // Source sample entry (avc1 / hvc1 / mp4a / opus / ...). Its children
   // are the codec config boxes we need to carry over.
-  const srcEntry = p.iso.moov.traks[0]?.mdia.minf.stbl.stsd.entries[0];
+  const srcEntry = p.iso.moov.traks[0]?.mdia?.minf.stbl.stsd.entries[0];
   const childBoxes = (srcEntry?.boxes ?? []).slice();
 
   const opts: Record<string, unknown> = {
@@ -284,6 +304,90 @@ function setTrackVolume(out: AnyIso, trackId: number, volume: number): void {
   if (trak) trak.tkhd.volume = volume;
 }
 
+function firstSampleStartSec(p: Parsed): number {
+  let firstDts = Number.POSITIVE_INFINITY;
+  for (const sample of p.samples) {
+    firstDts = Math.min(firstDts, sample.dts);
+  }
+  return firstDts / p.track.timescale;
+}
+
+function mediaDurationSec(p: Parsed): number {
+  const duration = p.samples.reduce((sum, sample) => sum + sample.duration, 0);
+  return duration / p.track.timescale;
+}
+
+function movieDuration(sec: number, movieTimescale: number): number {
+  return Math.round(sec * movieTimescale);
+}
+
+function findOutTrack(out: AnyIso, trackId: number): AnyTrak | undefined {
+  return out.moov.traks.find((t) => t.tkhd.track_id === trackId);
+}
+
+function addEditList(trak: AnyTrak, delaySec: number, mediaDuration: number, movieTimescale: number): void {
+  const boxRegistry = BoxParser as unknown as {
+    box: {
+      edts: new () => AnyBox & { addBox: (box: AnyBox) => AnyBox };
+      elst: new () => EditListBox;
+    };
+  };
+  const edts = new boxRegistry.box.edts();
+  const elst = new boxRegistry.box.elst();
+  elst.version = 0;
+  elst.flags = 0;
+  elst.entries = [
+    {
+      segment_duration: movieDuration(delaySec, movieTimescale),
+      media_time: -1,
+      media_rate_integer: 1,
+      media_rate_fraction: 0,
+    },
+    {
+      segment_duration: movieDuration(mediaDuration, movieTimescale),
+      media_time: 0,
+      media_rate_integer: 1,
+      media_rate_fraction: 0,
+    },
+  ];
+  edts.addBox(elst);
+  if (!trak.addBox) throw new Error("mp4box output track missing addBox for edit list");
+  trak.addBox(edts);
+}
+
+function applyPresentationTiming(
+  out: AnyIso,
+  tracks: Array<{ id: number; parsed: Parsed }>,
+): void {
+  const mvhd = out.moov.mvhd;
+  if (!mvhd || mvhd.timescale === undefined || mvhd.timescale <= 0) {
+    throw new Error("mp4box output missing movie timescale");
+  }
+  const movieTimescale = mvhd.timescale;
+
+  const starts = tracks.map(({ parsed }) => firstSampleStartSec(parsed));
+  const origin = Math.min(...starts);
+  let movieDurationMax = 0;
+
+  for (const [index, item] of tracks.entries()) {
+    const trak = findOutTrack(out, item.id);
+    if (!trak) continue;
+    const mediaDuration = mediaDurationSec(item.parsed);
+    const delay = starts[index] - origin;
+    const presentationDuration = movieDuration(delay + mediaDuration, movieTimescale);
+    trak.tkhd.duration = presentationDuration;
+    if (item.parsed.track.samples_duration > 0 && trak.mdia?.mdhd) {
+      trak.mdia.mdhd.duration = item.parsed.track.samples_duration;
+    }
+    movieDurationMax = Math.max(movieDurationMax, presentationDuration);
+    if (delay > 0.001) {
+      addEditList(trak, delay, mediaDuration, movieTimescale);
+    }
+  }
+
+  mvhd.duration = movieDurationMax;
+}
+
 export async function muxFmp4(
   videoBytes: Uint8Array,
   audioBytes?: Uint8Array,
@@ -295,11 +399,14 @@ export async function muxFmp4(
   const videoTrackId = addTrackOrThrow(out, buildTrackOptions(video), "video");
   setTrackVolume(out, videoTrackId, 0);
   copySamples(out, videoTrackId, video.samples);
+  const outputTracks = [{ id: videoTrackId, parsed: video }];
 
   if (audio) {
     const audioTrackId = addTrackOrThrow(out, buildTrackOptions(audio), "audio");
     copySamples(out, audioTrackId, audio.samples);
+    outputTracks.push({ id: audioTrackId, parsed: audio });
   }
+  applyPresentationTiming(out, outputTracks);
 
   // getBuffer() instead of save() — save() triggers an actual <a download>
   // click that writes a file to disk in addition to returning the Blob.

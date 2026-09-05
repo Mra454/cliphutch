@@ -88,13 +88,13 @@ Active branch: **`option-c-stage-1-separate-audio`** (pushed, ahead of master, *
 |---|---|---|
 | Stage 1 / 2A | `02fb183`, `178a184` | separate-audio fMP4 + fMP4 (`muxFmp4`, `MixedContainerAudioError`); byte-range segment fetch (`fetchByteRange`, `ByteRange*Error`) |
 | Stage 2B/2C | inside `cbd2b1e` (5/14 v0.1.1 resubmission) | `mux.js`, `transmuxTsAudioToFmp4()`, mixed fMP4-video + MPEG-TS-audio path |
-| TS video + separate audio | (this branch, uncommitted) | `transmuxTsVideoToFmp4` + mux branch A2; inspection no longer requires fMP4 video for separate audio |
+| TS video + separate audio | `231ac9b` | `transmuxTsVideoToFmp4` + mux branch A2; inspection no longer requires fMP4 video for separate audio<br>`muxFmp4` preserves cross-rendition start offsets with an edit list |
 | Naming (Track A) | `6be9b5d`, `d96df5d` | machine-noise demotion in `lib/filename.ts` (hashes/UUIDs/camera/`hash_res`/generic-manifest stems lose to page title); `"auto"` FilenameTemplate default; honors the Options filenameTemplate setting; host+date fallback; resolution qualifier; popup preview = saved name |
 | Reliability (Track C) | `315fddc`, `ce9505c`, `8cf6493` | `lib/session-jobs` serialized job writes + terminal guards (stuck-"running" fix); segment pools abort siblings on first failure; lost-completion reconcile; quota charged once on completion, not kickoff |
 | Recovery (B2) | `b36b85c`, `2d180a0`, `e31e447`, `60bbfd6` | redirect-resolved URL classification; per-tab `addOrUpdateVideo` mutex; `RawAacAudioError` ADTS sniff; WebM DNR header replay; SIZE_CAP "Download anyway"; captured headers persisted to `chrome.storage.session` (`lib/captured-headers`) + deterministic FNV-1a rule IDs surviving SW restart |
 | Disclosure (Stage 2D) | `782125f` (+ `fa33894` in cliphutch-site, **not deployed**) | PRIVACY/PERMISSIONS/firstrun + site privacy.html cover separate-audio fetch, byte-range, MPEG-TS repackaging, header-replay scope, captured-header storage; GPL tag → v0.1.1 |
 | Upgrade UX | `699df43` | "Already have a key?" link in the at-limit banner |
-| AES-128 transport decrypt | (this branch, uncommitted) | hls-crypto-plan.ts owns key/IV/sequence from raw text; decrypt in fetchSegmentBytes + fetchInit; 16-byte key fetch cap; snapshot authorizes media-playlist key URIs; disclosures rewritten |
+| AES-128 transport decrypt | `488b353+b96e66f` | hls-crypto-plan.ts owns key/IV/sequence from raw text; decrypt in fetchSegmentBytes + fetchInit; 16-byte key fetch cap; snapshot authorizes media-playlist key URIs; disclosures rewritten |
 
 **Smoke gate: declined by Mikey 2026-07-03; proceeding as if cleared.** Pre-flight only: Mux `tos_ismc` and Apple `img_bipbop_adv_example_fmp4` manifests fetched via browser, confirmed live and exactly the Stage 1 / Stage 1+2A shapes. Browser automation can't load the unpacked ext, drive the popup, or hear audio, so these paths are **logic-verified + unit-tested but NOT browser-smoked** — say so if it matters.
 

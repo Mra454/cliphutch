@@ -17,11 +17,14 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createFile, MP4BoxBuffer } from "mp4box";
 import { inspectFmp4Init, muxFmp4 } from "./dash-mux";
+import { transmuxTsAudioToFmp4, transmuxTsVideoToFmp4 } from "./ts-audio-to-fmp4";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const FIXTURES_DIR = resolve(__dirname, "..", "..", "fixtures", "dash-test");
 const VIDEO_PATH = resolve(FIXTURES_DIR, "video.m4v");
 const AUDIO_PATH = resolve(FIXTURES_DIR, "audio.m4a");
+const HLS_FIXTURES_DIR = resolve(__dirname, "..", "..", "..", "fixtures", "video-test-page");
+const OFFSET_FIXTURE_DIR = resolve(HLS_FIXTURES_DIR, "hls-master-separate-audio-ts-offset");
 
 const fixturesPresent = existsSync(VIDEO_PATH) && existsSync(AUDIO_PATH);
 
@@ -33,46 +36,75 @@ type AnyBox = {
   hdr_size?: number;
 };
 type ParsedFile = {
-  tracks: Array<{ id: number; codec: string; nb_samples: number; type: "video" | "audio" | string }>;
+  tracks: Array<{
+    id: number;
+    codec: string;
+    nb_samples: number;
+    type: "video" | "audio" | string;
+    timescale: number;
+  }>;
   // mp4box's traks shorthand on moov
-  moov: { traks: Array<AnyTrak> };
+  moov: { mvhd: { timescale: number; duration: number }; traks: Array<AnyTrak> };
 };
 type AnyTrak = {
-  tkhd: { track_id: number; volume: number };
+  boxes?: AnyBox[];
+  tkhd: { track_id: number; volume: number; duration: number };
   mdia: {
     hdlr: { handler: string };
     minf: { stbl: { stsd: { entries: AnyBox[] } } };
   };
+};
+type ParsedSample = {
+  duration: number;
+  dts: number;
+};
+type EditListEntry = {
+  segment_duration: number;
+  media_time: number;
+  media_rate_integer: number;
+  media_rate_fraction: number;
 };
 
 function findChild(parent: AnyBox | undefined, type: string): AnyBox | undefined {
   return parent?.boxes?.find((b) => b.type === type);
 }
 
+function editListEntries(trak: AnyTrak | undefined): EditListEntry[] | undefined {
+  const edts = findChild(trak as AnyBox | undefined, "edts");
+  const elst = findChild(edts, "elst") as (AnyBox & { entries?: EditListEntry[] }) | undefined;
+  return elst?.entries;
+}
+
 function parseToFile(bytes: Uint8Array): {
   info: ParsedFile;
   sampleCount: number;
+  samplesByTrack: Map<number, ParsedSample[]>;
 } {
   // Cast the mp4box createFile result to a minimal shape we control.
   const iso = createFile() as unknown as {
     onReady: (info: ParsedFile) => void;
     onError: (msg: string) => void;
-    onSamples: (id: number, _u: unknown, batch: unknown[]) => void;
+    onSamples: (id: number, _u: unknown, batch: ParsedSample[]) => void;
     setExtractionOptions: (id: number, u: unknown, opts: { nbSamples: number }) => void;
     start: () => void;
     appendBuffer: (b: MP4BoxBuffer) => number;
     flush: () => void;
-    moov: { traks: AnyTrak[] };
+    moov: { mvhd: { timescale: number; duration: number }; traks: AnyTrak[] };
   };
   let info: ParsedFile | null = null;
   let sampleCount = 0;
+  const samplesByTrack = new Map<number, ParsedSample[]>();
   iso.onReady = (i) => {
     info = i;
-    for (const t of i.tracks) iso.setExtractionOptions(t.id, null, { nbSamples: 1_000_000 });
+    for (const t of i.tracks) {
+      samplesByTrack.set(t.id, []);
+      iso.setExtractionOptions(t.id, null, { nbSamples: 1_000_000 });
+    }
     iso.start();
   };
-  iso.onSamples = (_id, _u, batch) => {
+  iso.onSamples = (id, _u, batch) => {
     sampleCount += batch.length;
+    samplesByTrack.get(id)?.push(...batch);
   };
   iso.onError = (msg) => {
     throw new Error(`mp4box parse error: ${msg}`);
@@ -86,7 +118,72 @@ function parseToFile(bytes: Uint8Array): {
   const parsedInfo = info as ParsedFile | null;
   if (!parsedInfo) throw new Error("Parse produced no Movie info");
   // Splice in the moov reference for downstream avcC / esds inspection.
-  return { info: { ...parsedInfo, moov: iso.moov }, sampleCount };
+  return { info: { ...parsedInfo, moov: iso.moov }, sampleCount, samplesByTrack };
+}
+
+function playlistSegments(directory: string, playlistName = "playlist.m3u8"): Uint8Array[] {
+  const playlist = readFileSync(resolve(directory, playlistName), "utf8");
+  return playlist
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("#"))
+    .map((line) => new Uint8Array(readFileSync(resolve(directory, line))));
+}
+
+function firstSampleStartSec(bytes: Uint8Array): {
+  type: string;
+  startSec: number;
+  mediaDurationSec: number;
+} {
+  const { info, samplesByTrack } = parseToFile(bytes);
+  expect(info.tracks).toHaveLength(1);
+  const track = info.tracks[0];
+  const samples = samplesByTrack.get(track.id) ?? [];
+  if (samples.length === 0) throw new Error(`Track ${track.id} has no samples`);
+  const firstDts = Math.min(...samples.map((sample) => sample.dts));
+  const sampleDuration = samples.reduce((sum, sample) => sum + sample.duration, 0);
+  return {
+    type: track.type,
+    startSec: firstDts / track.timescale,
+    mediaDurationSec: sampleDuration / track.timescale,
+  };
+}
+
+function outputTrackTiming(
+  parsed: ReturnType<typeof parseToFile>,
+  type: "video" | "audio",
+): {
+  trak: AnyTrak;
+  presentationStartSec: number;
+  mediaDurationSec: number;
+  presentationLengthSec: number;
+} {
+  const track = parsed.info.tracks.find((candidate) => candidate.type === type);
+  expect(track, `output should contain a ${type} track`).toBeDefined();
+  const trak = parsed.info.moov.traks.find((candidate) => candidate.tkhd.track_id === track!.id);
+  expect(trak, `output should contain a ${type} trak`).toBeDefined();
+  const entries = editListEntries(trak);
+  const emptyEdit = entries?.find((entry) => entry.media_time === -1);
+  const presentationStartSec = emptyEdit === undefined
+    ? 0
+    : emptyEdit.segment_duration / parsed.info.moov.mvhd.timescale;
+  const samples = parsed.samplesByTrack.get(track!.id) ?? [];
+  const sampleDuration = samples.reduce((sum, sample) => sum + sample.duration, 0);
+  const mediaDurationSec = sampleDuration / track!.timescale;
+  return {
+    trak: trak!,
+    presentationStartSec,
+    mediaDurationSec,
+    presentationLengthSec: presentationStartSec + mediaDurationSec,
+  };
+}
+
+function expectNoPositiveEmptyEdit(trak: AnyTrak | undefined, movieTimescale: number): void {
+  const entries = editListEntries(trak);
+  const emptyEdit = entries?.find((entry) => entry.media_time === -1);
+  expect(
+    emptyEdit === undefined || emptyEdit.segment_duration / movieTimescale <= 0.001,
+  ).toBe(true);
 }
 
 function makeSyntheticInit(types: Array<"avc1" | "mp4a" | "encv">): Uint8Array {
@@ -218,5 +315,39 @@ describe("dash-mux integration (real fMP4 fixtures)", () => {
     const { info } = parseToFile(muxed);
     expect(info.tracks.length).toBe(1);
     expect(info.tracks[0].type).toBe("video");
+  });
+
+  it("preserves cross-rendition start offsets with an edit list", async () => {
+    const offsetVideo = transmuxTsVideoToFmp4(playlistSegments(resolve(OFFSET_FIXTURE_DIR, "video")));
+    const offsetAudio = transmuxTsAudioToFmp4(playlistSegments(resolve(OFFSET_FIXTURE_DIR, "audio")));
+    const sourceVideo = firstSampleStartSec(offsetVideo);
+    const sourceAudio = firstSampleStartSec(offsetAudio);
+    const expectedDelay = sourceAudio.startSec - sourceVideo.startSec;
+    expect(expectedDelay).toBeGreaterThan(0.4);
+
+    const parsed = parseToFile(await muxFmp4(offsetVideo, offsetAudio));
+    const movieTimescale = parsed.info.moov.mvhd.timescale;
+    const video = outputTrackTiming(parsed, "video");
+    const audio = outputTrackTiming(parsed, "audio");
+    const audioEntries = editListEntries(audio.trak);
+
+    expect(audioEntries?.[0]).toMatchObject({
+      media_time: -1,
+      media_rate_integer: 1,
+      media_rate_fraction: 0,
+    });
+    expect(audioEntries![0].segment_duration / movieTimescale).toBeCloseTo(
+      expectedDelay,
+      2,
+    );
+    expectNoPositiveEmptyEdit(video.trak, movieTimescale);
+    expect(Math.abs((audio.presentationStartSec - video.presentationStartSec) - expectedDelay))
+      .toBeLessThanOrEqual(0.005);
+    expect(parsed.info.moov.mvhd.duration / movieTimescale).toBeGreaterThanOrEqual(
+      video.presentationLengthSec,
+    );
+    expect(parsed.info.moov.mvhd.duration / movieTimescale).toBeGreaterThanOrEqual(
+      audio.presentationLengthSec,
+    );
   });
 });

@@ -451,4 +451,29 @@ video.m3u8
       durationSec: 10.5,
     });
   });
+
+  it("rejects declared MPEG audio for a separate TS audio rendition but supports declared AAC", () => {
+    const makeVariant = (audioCodec: string) => parseMasterVariants(`#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="Main",DEFAULT=YES,URI="audio.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS="avc1.4d401f,${audioCodec}",AUDIO="aud"
+video.m3u8
+`)[0];
+    const tsVideo = inspectHlsMediaPlaylistV1(TS_VOD);
+    const tsAudio = inspectHlsMediaPlaylistV1(TS_VOD);
+
+    expect(hlsRawVariantOptionV1(
+      makeVariant("mp4a.69"),
+      "https://cdn.example.test/master.m3u8",
+      tsVideo,
+      tsAudio,
+    )).toMatchObject({
+      disabledReason: "unsupported_codec",
+    });
+    expect(hlsRawVariantOptionV1(
+      makeVariant("mp4a.40.2"),
+      "https://cdn.example.test/master.m3u8",
+      tsVideo,
+      tsAudio,
+    )?.disabledReason).toBeUndefined();
+  });
 });
