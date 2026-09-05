@@ -6,6 +6,7 @@ import {
   isSafeRelativeDownloadPath,
   sanitizeDownloadFilename,
   sanitizePathSegment,
+  validateCustomDownloadStem,
 } from "./download-path";
 
 describe("download path planning", () => {
@@ -116,5 +117,46 @@ describe("download path planning", () => {
     const deduped = dedupePlannedPaths([path, path], 120);
     expect(deduped[1].length).toBeLessThanOrEqual(120);
     expect(deduped[1]).toMatch(/ \(2\)\.mp4$/);
+  });
+});
+
+describe("validateCustomDownloadStem", () => {
+  it("accepts a customer filename stem", () => {
+    expect(validateCustomDownloadStem("Slaying Trailer")).toEqual({
+      ok: true,
+      stem: "Slaying Trailer",
+    });
+  });
+
+  it("rejects stems over the download basename limit", () => {
+    expect(validateCustomDownloadStem("x".repeat(141))).toEqual({
+      ok: false,
+      reason: "Titles must be 140 characters or fewer.",
+    });
+  });
+
+  it("rejects control and direction-formatting characters", () => {
+    expect(validateCustomDownloadStem("unsafe\nname")).toEqual({
+      ok: false,
+      reason: "Remove control or direction-formatting characters from this title.",
+    });
+    expect(validateCustomDownloadStem("unsafe\u202ename")).toEqual({
+      ok: false,
+      reason: "Remove control or direction-formatting characters from this title.",
+    });
+  });
+
+  it("rejects path separators", () => {
+    expect(validateCustomDownloadStem("folder/name")).toEqual({
+      ok: false,
+      reason: "Titles cannot contain path separators.",
+    });
+  });
+
+  it("rejects dots-only names", () => {
+    expect(validateCustomDownloadStem("...")).toEqual({
+      ok: false,
+      reason: "Use at least one letter or number in this title.",
+    });
   });
 });

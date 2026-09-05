@@ -13,6 +13,12 @@ const INVALID_SEGMENT_PATTERN = /[\\/:*?"<>|]/g;
 const INVALID_SEGMENT_TEST_PATTERN = /[\\/:*?"<>|]/;
 const WINDOWS_RESERVED_PATTERN = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
 
+export const CUSTOM_DOWNLOAD_STEM_LIMIT = DEFAULT_FILENAME_LIMIT;
+
+export type CustomDownloadStemValidation =
+  | { ok: true; stem: string }
+  | { ok: false; reason: string };
+
 export type DownloadPathOptions = {
   packName: string;
   pageHost?: string;
@@ -99,6 +105,35 @@ export function sanitizeDownloadFilename(
   const stemLimit = Math.max(1, maxLength - Array.from(extension).length);
   const safeStem = sanitizePathSegment(stem, { fallback, maxLength: stemLimit });
   return `${safeStem}${extension}`;
+}
+
+export function validateCustomDownloadStem(value: string): CustomDownloadStemValidation {
+  const normalized = String(value ?? "").normalize("NFC").trim().replace(/[. ]+$/g, "");
+  if (Array.from(normalized).length > CUSTOM_DOWNLOAD_STEM_LIMIT) {
+    return { ok: false, reason: "Titles must be 140 characters or fewer." };
+  }
+  if (BIDI_CONTROL_TEST_PATTERN.test(normalized) || CONTROL_TEST_PATTERN.test(normalized)) {
+    return {
+      ok: false,
+      reason: "Remove control or direction-formatting characters from this title.",
+    };
+  }
+  if (/[\\/]/.test(normalized)) {
+    return { ok: false, reason: "Titles cannot contain path separators." };
+  }
+  if (INVALID_SEGMENT_TEST_PATTERN.test(normalized)) {
+    return { ok: false, reason: "Titles cannot contain characters Chrome rejects in filenames." };
+  }
+  if (!/[\p{L}\p{N}]/u.test(normalized) || normalized === "." || normalized === "..") {
+    return { ok: false, reason: "Use at least one letter or number in this title." };
+  }
+  if (normalized.includes("..")) {
+    return { ok: false, reason: "Titles cannot contain path traversal dots." };
+  }
+  if (WINDOWS_RESERVED_PATTERN.test(normalized)) {
+    return { ok: false, reason: "Choose a title that is not a reserved Windows filename." };
+  }
+  return { ok: true, stem: normalized };
 }
 
 export function buildPackRoot(packName: string): string {

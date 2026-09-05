@@ -202,6 +202,17 @@ describe("generateCaptureReviewPlan", () => {
       .toEqual(["native", "native", "heavy"]);
   });
 
+  it("uses a draft custom stem for the planned basename", () => {
+    const value = draft([
+      { id: "direct", media: media("source-name", "direct", { pageTitle: "Customer Lesson" }) },
+    ]);
+    value.items.direct.customStem = "Slaying Trailer";
+    const result = generate(value);
+    expect(result).toMatchObject({ ok: true });
+    if (!result.ok) return;
+    expect(result.plan.items[0].plannedRelativePath).toMatch(/\/Slaying Trailer\.mp4$/);
+  });
+
   it("blocks known oversize WebM and discloses the cap when source size is unknown", () => {
     const value = draft([
       {

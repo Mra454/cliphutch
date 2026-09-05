@@ -82,6 +82,26 @@ describe("reduceCaptureDraft", () => {
     });
   });
 
+  it("updates and clears a custom item stem", () => {
+    const draft = firstDraft();
+    const labelled = expectDraft(reduceCaptureDraft(draft, {
+      type: "set-item-custom-stem",
+      expectedRevision: 1,
+      at: 11,
+      itemId: "item-1",
+      customStem: "Slaying Trailer",
+    }));
+    expect(labelled.items["item-1"].customStem).toBe("Slaying Trailer");
+    const reset = expectDraft(reduceCaptureDraft(labelled, {
+      type: "set-item-custom-stem",
+      expectedRevision: 2,
+      at: 12,
+      itemId: "item-1",
+      customStem: null,
+    }));
+    expect(reset.items["item-1"].customStem).toBeUndefined();
+  });
+
   it("rejects a draft copy choice that does not address its immutable media", () => {
     const mismatched = item("item-1");
     mismatched.copyChoice = {

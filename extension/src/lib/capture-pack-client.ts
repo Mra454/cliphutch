@@ -76,6 +76,7 @@ export function addDetectedMediaToCaptureDraft(input: {
   tabId: number;
   mediaId: string;
   expectedRevision: number;
+  customStem?: string;
   commandId?: string;
 }): Promise<CaptureDraftClientResult> {
   return sendCaptureDraftRequest({
@@ -84,6 +85,7 @@ export function addDetectedMediaToCaptureDraft(input: {
     expectedRevision: input.expectedRevision,
     tabId: input.tabId,
     mediaId: input.mediaId,
+    ...(input.customStem === undefined ? {} : { customStem: input.customStem }),
   });
 }
 
@@ -167,6 +169,21 @@ export function replaceCaptureDraftMedia(input: {
     itemId: input.itemId,
     tabId: input.tabId,
     mediaId: input.mediaId,
+  });
+}
+
+export function setCaptureDraftItemCustomStem(input: {
+  itemId: string;
+  customStem: string | null;
+  expectedRevision: number;
+  commandId?: string;
+}): Promise<CaptureDraftClientResult> {
+  return sendCaptureDraftRequest({
+    type: "capture-draft-set-item-custom-stem",
+    commandId: input.commandId ?? createCaptureDraftCommandId(),
+    expectedRevision: input.expectedRevision,
+    itemId: input.itemId,
+    customStem: input.customStem,
   });
 }
 

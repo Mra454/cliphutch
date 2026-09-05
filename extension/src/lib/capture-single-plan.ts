@@ -24,6 +24,7 @@ export type CreateSingleCapturePlanInput = {
   generatedAt: number;
   filenameTemplate: FilenameTemplate;
   qualityChoice?: QualityChoiceV1;
+  customStem?: string;
 };
 
 export type CreateSingleCapturePlanResult =
@@ -92,6 +93,7 @@ export function createSingleCapturePlan(
           addedAt: input.generatedAt,
           sourceTabId: input.tabId,
           media,
+          ...(input.customStem === undefined ? {} : { customStem: input.customStem }),
         },
       },
       preferences: {
@@ -129,6 +131,7 @@ export function createSingleCapturePlan(
       : undefined;
     const filename = inferFilename(input.media, {
       template: input.filenameTemplate,
+      ...(input.customStem === undefined ? {} : { customStem: input.customStem }),
       ...(forcedExtension === undefined ? {} : { forcedExtension }),
       ...(input.qualityChoice?.mode === "stream" && input.qualityChoice.label
         ? { variantLabel: input.qualityChoice.label }

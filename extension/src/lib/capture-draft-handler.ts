@@ -114,6 +114,15 @@ function pageLabelAlreadyApplied(
   return matched;
 }
 
+function itemCustomStemAlreadyApplied(
+  draft: CaptureDraftV1 | null,
+  itemId: string,
+  customStem: string | null,
+): boolean {
+  if (!draft || !Object.prototype.hasOwnProperty.call(draft.items, itemId)) return false;
+  return (draft.items[itemId].customStem ?? null) === customStem;
+}
+
 function mediaReplacementAlreadyApplied(
   draft: CaptureDraftV1 | null,
   itemId: string,
@@ -208,6 +217,7 @@ export async function handleCaptureDraftUiRequest(
       itemId,
       addedAt: at,
       sourceTabId: request.tabId,
+      ...(request.customStem === undefined ? {} : { customStem: request.customStem }),
       media,
       copyChoice,
       ...(family === undefined ? {} : { family }),
@@ -361,6 +371,22 @@ export async function handleCaptureDraftUiRequest(
       at,
       pageUrl,
       label,
+    });
+  }
+
+  if (request.type === "capture-draft-set-item-custom-stem") {
+    if (itemCustomStemAlreadyApplied(current, request.itemId, request.customStem)) {
+      return { ok: true, changed: false, draft: current ? cloneCaptureDraft(current) : null };
+    }
+    if (request.expectedRevision !== (current?.revision ?? 0)) {
+      return revisionConflict(request.expectedRevision, current);
+    }
+    return dependencies.applyCommand({
+      type: "set-item-custom-stem",
+      expectedRevision: request.expectedRevision,
+      at,
+      itemId: request.itemId,
+      customStem: request.customStem,
     });
   }
 

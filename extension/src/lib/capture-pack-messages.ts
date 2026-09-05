@@ -1,4 +1,5 @@
 import { normalizeCapturePageFolderLabel } from "./capture-pack-types";
+import { validateCustomDownloadStem } from "./download-path";
 
 const CAPTURE_DRAFT_COMMAND_PREFIX = "capture-draft-";
 const UUID_PATTERN =
@@ -22,6 +23,7 @@ export type CaptureDraftAddRequest = {
   expectedRevision: number;
   tabId: number;
   mediaId: string;
+  customStem?: string;
 };
 
 export type CaptureDraftRemoveRequest = {
@@ -60,6 +62,14 @@ export type CaptureDraftLabelPageRequest = {
   label: string | null;
 };
 
+export type CaptureDraftSetItemCustomStemRequest = {
+  type: "capture-draft-set-item-custom-stem";
+  commandId: CaptureDraftCommandId;
+  expectedRevision: number;
+  itemId: string;
+  customStem: string | null;
+};
+
 export type CaptureDraftReplaceMediaRequest = {
   type: "capture-draft-replace-media";
   commandId: CaptureDraftCommandId;
@@ -84,6 +94,7 @@ export type CaptureDraftMutationRequest =
   | CaptureDraftClearRequest
   | CaptureDraftRenameRequest
   | CaptureDraftLabelPageRequest
+  | CaptureDraftSetItemCustomStemRequest
   | CaptureDraftReplaceMediaRequest
   | CaptureDraftSetManifestCsvRequest;
 
@@ -192,22 +203,37 @@ function parseCaptureDraftUiRequestUnsafe(value: unknown): CaptureDraftUiRequest
         "expectedRevision",
         "tabId",
         "mediaId",
+        "customStem",
+      ]) ?? exactDataRecord(value, [
+        "type",
+        "commandId",
+        "expectedRevision",
+        "tabId",
+        "mediaId",
       ]);
+      const customStem = record?.customStem === undefined
+        ? undefined
+        : typeof record.customStem === "string"
+          ? validateCustomDownloadStem(record.customStem)
+          : undefined;
       if (
         !record ||
         record.type !== "capture-draft-add" ||
         !mutationBase(record) ||
         !isSafeNonNegativeInteger(record.tabId) ||
-        !isSafeId(record.mediaId)
+        !isSafeId(record.mediaId) ||
+        (record.customStem !== undefined && (customStem === undefined || !customStem.ok))
       ) {
         return undefined;
       }
+      const customStemValue = customStem?.ok ? customStem.stem : undefined;
       return {
         type: "capture-draft-add",
         commandId: record.commandId,
         expectedRevision: record.expectedRevision,
         tabId: record.tabId,
         mediaId: record.mediaId,
+        ...(customStemValue === undefined ? {} : { customStem: customStemValue }),
       };
     }
     case "capture-draft-remove": {
@@ -325,6 +351,43 @@ function parseCaptureDraftUiRequestUnsafe(value: unknown): CaptureDraftUiRequest
         itemId: record.itemId,
         tabId: record.tabId,
         mediaId: record.mediaId,
+      };
+    }
+    case "capture-draft-set-item-custom-stem": {
+      const record = exactDataRecord(value, [
+        "type",
+        "commandId",
+        "expectedRevision",
+        "itemId",
+        "customStem",
+      ]);
+      const customStem = record?.customStem === null
+        ? null
+        : typeof record?.customStem === "string"
+          ? validateCustomDownloadStem(record.customStem)
+          : undefined;
+      if (
+        !record ||
+        record.type !== "capture-draft-set-item-custom-stem" ||
+        !mutationBase(record) ||
+        !isSafeId(record.itemId) ||
+        customStem === undefined ||
+        (customStem !== null && !customStem.ok)
+      ) {
+        return undefined;
+      }
+      const customStemValue = customStem === null
+        ? null
+        : customStem.ok
+          ? customStem.stem
+          : undefined;
+      if (customStemValue === undefined) return undefined;
+      return {
+        type: "capture-draft-set-item-custom-stem",
+        commandId: record.commandId,
+        expectedRevision: record.expectedRevision,
+        itemId: record.itemId,
+        customStem: customStemValue,
       };
     }
     case "capture-draft-set-manifest-csv": {

@@ -455,11 +455,13 @@ function filenameFor(
   media: MediaSnapshotV1,
   quality: QualityChoiceV1 | undefined,
   generatedAt: number,
+  customStem?: string,
 ): string {
   const forcedExtension = media.kind === "hls" || media.kind === "dash" || isWebm(media)
     ? ".mp4"
     : undefined;
   return inferFilename(detectedForFilename(media, generatedAt), {
+    ...(customStem === undefined ? {} : { customStem }),
     ...(forcedExtension === undefined ? {} : { forcedExtension }),
     ...(quality?.mode === "stream" && quality.policy.mode === "manual" && quality.label
       ? { variantLabel: quality.label }
@@ -618,6 +620,7 @@ export function generateCaptureReviewPlan(
           draftItem.media,
           resolved.readiness === "ready" ? resolved.quality : undefined,
           input.generatedAt,
+          draftItem.customStem,
         ),
       });
       rawPaths.push(plannedRelativePath);

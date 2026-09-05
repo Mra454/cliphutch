@@ -66,9 +66,16 @@ const requests = (): CaptureDraftUiRequest[] => [
     mediaId: "alternate-456",
   },
   {
-    type: "capture-draft-set-manifest-csv",
+    type: "capture-draft-set-item-custom-stem",
     commandId: COMMAND_ID,
     expectedRevision: 7,
+    itemId: "item-123",
+    customStem: "Slaying Trailer",
+  },
+  {
+    type: "capture-draft-set-manifest-csv",
+    commandId: COMMAND_ID,
+    expectedRevision: 8,
     enabled: true,
   },
 ];
@@ -96,6 +103,33 @@ describe("capture-draft UI request guard", () => {
       expect(parseCaptureDraftUiRequest(request)).toEqual(request);
       expect(parseCaptureDraftUiRequest(request)).not.toBe(request);
     }
+  });
+
+  it("accepts a safe custom stem on capture-draft-add", () => {
+    const request: CaptureDraftUiRequest = {
+      type: "capture-draft-add",
+      commandId: COMMAND_ID,
+      expectedRevision: 0,
+      tabId: 12,
+      mediaId: "media-1",
+      customStem: "Slaying Trailer",
+    };
+    expect(isCaptureDraftUiRequest(request)).toBe(true);
+    expect(parseCaptureDraftUiRequest(request)).toEqual(request);
+    expect(isCaptureDraftUiRequest({ ...request, customStem: "folder/name" })).toBe(false);
+  });
+
+  it("accepts set-item custom stem and reset requests", () => {
+    const request: CaptureDraftUiRequest = {
+      type: "capture-draft-set-item-custom-stem",
+      commandId: COMMAND_ID,
+      expectedRevision: 2,
+      itemId: "item-123",
+      customStem: null,
+    };
+    expect(isCaptureDraftUiRequest(request)).toBe(true);
+    expect(parseCaptureDraftUiRequest(request)).toEqual(request);
+    expect(isCaptureDraftUiRequest({ ...request, customStem: "folder/name" })).toBe(false);
   });
 
   it("distinguishes read-only get from mutating commands", () => {

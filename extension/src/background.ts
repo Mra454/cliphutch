@@ -690,6 +690,7 @@ type DownloadRequest = {
   // Resolution/quality label for the picked variant (e.g. "1080p"), threaded
   // through to the saved filename.
   variantLabel?: string;
+  customStem?: string;
   bypassSizeCap?: boolean;
 };
 type DownloadResponse =
@@ -1101,6 +1102,7 @@ async function handleSingleCaptureDownload(
     generatedAt,
     filenameTemplate: settings.filenameTemplate,
     qualityChoice: singleCaptureQuality(request, media),
+    ...(request.customStem === undefined ? {} : { customStem: request.customStem }),
   });
   if (!prepared.ok) {
     return {

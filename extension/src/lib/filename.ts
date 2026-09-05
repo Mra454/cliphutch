@@ -1,5 +1,6 @@
 import type { DetectedVideo, MediaKind } from "../types";
 import type { FilenameTemplate } from "./storage-local";
+import { validateCustomDownloadStem } from "./download-path";
 
 const RESERVED_NAMES = new Set([
   "CON", "PRN", "AUX", "NUL",
@@ -32,6 +33,11 @@ export type InferFilenameOptions = {
   // A resolution/quality label for the picked stream variant (e.g. "1080p").
   // Appended to the stem when it is not already present.
   variantLabel?: string;
+  // Customer-authored stem. The media kind still controls the extension.
+  customStem?: string;
+  // Count of different visible videos on this page with the same cleaned page
+  // title. Used only to avoid repeating a brand/site label as every filename.
+  sharedTitleCount?: number;
 };
 
 export function inferFilename(
@@ -57,7 +63,17 @@ export function inferFilename(
     KIND_DEFAULT_EXT[video.kind] ??
     ".mp4";
 
-  let stem = pickStem(video, { disp, basename, template: opts.template ?? "auto" });
+  const customStem = opts.customStem === undefined
+    ? undefined
+    : validateCustomDownloadStem(opts.customStem);
+  let stem = customStem?.ok
+    ? customStem.stem
+    : pickStem(video, {
+        disp,
+        basename,
+        template: opts.template ?? "auto",
+        sharedTitleCount: opts.sharedTitleCount,
+      });
   stem = appendVariantLabel(stem, opts.variantLabel);
   stem = stem.replace(/[. ]+$/, "");
   stem = sanitize(stem);
@@ -79,9 +95,21 @@ export function inferFilename(
 
 function pickStem(
   video: DetectedVideo,
-  ctx: { disp?: string; basename?: string; template: FilenameTemplate },
+  ctx: {
+    disp?: string;
+    basename?: string;
+    template: FilenameTemplate;
+    sharedTitleCount?: number;
+  },
 ): string {
-  const title = cleanTitle(video.pageTitle);
+  const cleanedTitle = cleanTitle(video.pageTitle);
+  const brandLikeTitle = cleanedTitle && titleLooksBrandLike({
+    cleanedTitle,
+    rawTitle: video.pageTitle,
+    pageUrl: video.pageUrl,
+    sharedTitleCount: ctx.sharedTitleCount,
+  });
+  const title = brandLikeTitle ? fallbackStem(video.pageUrl ?? video.url) : cleanedTitle;
   const dispStem = ctx.disp ? stripExtension(ctx.disp) : undefined;
   const basenameStem = ctx.basename ? stripExtension(ctx.basename) : undefined;
   const basenameIsManifest =
@@ -113,6 +141,45 @@ function pickStem(
       return fallbackStem(video.url);
     }
   }
+}
+
+function titleLooksBrandLike(input: {
+  cleanedTitle: string;
+  rawTitle?: string;
+  pageUrl?: string;
+  sharedTitleCount?: number;
+}): boolean {
+  if ((input.sharedTitleCount ?? 0) >= 2) return true;
+  if (!input.pageUrl) return false;
+  try {
+    const url = new URL(input.pageUrl);
+    const titleKey = titleKeyForComparison(input.cleanedTitle);
+    const registrable = registrableLabel(url.hostname);
+    if (registrable && titleKey === titleKeyForComparison(registrable)) return true;
+    const raw = input.rawTitle?.trim() ?? "";
+    const hasSeparator = /\s(?:[|:–—-])\s/.test(raw);
+    const siteRoot = (url.pathname === "" || url.pathname === "/") && !url.search && !url.hash;
+    return siteRoot && !hasSeparator && titleKey === titleKeyForComparison(raw);
+  } catch {
+    return false;
+  }
+}
+
+function titleKeyForComparison(value: string): string {
+  return value.normalize("NFKC").toLocaleLowerCase("en-US").replace(/[^a-z0-9]+/g, "");
+}
+
+function registrableLabel(hostname: string): string | undefined {
+  const labels = hostname.toLocaleLowerCase("en-US").replace(/\.$/, "").split(".").filter(Boolean);
+  if (labels.length === 0) return undefined;
+  if (labels.length === 1) return labels[0];
+  const last = labels[labels.length - 1];
+  const second = labels[labels.length - 2];
+  const commonSecondLevel = new Set(["co", "com", "net", "org", "gov", "edu"]);
+  if (last.length === 2 && commonSecondLevel.has(second) && labels.length >= 3) {
+    return labels[labels.length - 3];
+  }
+  return second;
 }
 
 // Segment/manifest artifacts and placeholder stems that carry no signal about
@@ -290,8 +357,9 @@ function hostSlug(rawUrl?: string): string | undefined {
 
 function fallbackStem(rawUrl?: string): string {
   const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+  const time = new Date().toISOString().slice(11, 16).replace(":", "");
   const host = hostSlug(rawUrl);
-  return host ? `${host}-${date}` : `download-${date}`;
+  return host ? `${host}-${date}-${time}` : `download-${date}-${time}`;
 }
 
 function extensionOf(name: string): string | undefined {

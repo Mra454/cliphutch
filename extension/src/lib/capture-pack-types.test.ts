@@ -248,6 +248,20 @@ describe("capture-pack runtime guards", () => {
     })).toBe(false);
   });
 
+  it("accepts only canonical custom item stems", () => {
+    const base = {
+      itemId: "item-1",
+      addedAt: 10,
+      media: media(),
+    };
+    expect(isCaptureDraftItemV1({ ...base, customStem: "Slaying Trailer" })).toBe(true);
+    expect(isCaptureDraftItemV1({ ...base, customStem: " Slaying Trailer " })).toBe(false);
+    expect(isCaptureDraftItemV1({ ...base, customStem: "x".repeat(141) })).toBe(false);
+    expect(isCaptureDraftItemV1({ ...base, customStem: "unsafe\nname" })).toBe(false);
+    expect(isCaptureDraftItemV1({ ...base, customStem: "folder/name" })).toBe(false);
+    expect(isCaptureDraftItemV1({ ...base, customStem: "..." })).toBe(false);
+  });
+
   it("accepts legacy draft items without a copy choice and strictly binds new choices to media", () => {
     const base = {
       itemId: "item-1",

@@ -4,6 +4,11 @@ import type { DashJob, DetectedVideo, DirectJob, HlsJob, WebmTranscodeJob } from
 import { partitionCoveredByManifests } from "../lib/manifest-coverage";
 import { inferFilename } from "../lib/filename";
 import {
+  CUSTOM_DOWNLOAD_STEM_LIMIT,
+  validateCustomDownloadStem,
+} from "../lib/download-path";
+import { selectCardStatusLine, type CardStatusLine } from "../lib/card-status";
+import {
   claimPendingIntent,
   clearPendingIntent,
   createDownloadCommandId,
@@ -30,6 +35,7 @@ import {
   renameCaptureDraft,
   replaceCaptureDraftMedia,
   setCaptureDraftManifestCsv,
+  setCaptureDraftItemCustomStem,
 } from "../lib/capture-pack-client";
 import { CAPTURE_DRAFT_STORAGE_KEY } from "../lib/capture-pack-storage";
 import type {
@@ -148,6 +154,7 @@ type FrozenQuickDownloadRequest = {
   variantId?: string;
   audioRenditionUrl?: string;
   variantLabel?: string;
+  customStem?: string;
   bypassSizeCap?: boolean;
 };
 
@@ -188,8 +195,12 @@ type AnyJob =
 
 // The name shown in the popup is the exact name the file will save under, so
 // the shelf and the download match. Extension is stripped for display.
-function displayName(v: DetectedVideo, template?: FilenameTemplate): string {
-  const name = inferFilename(v, { template });
+function displayName(
+  v: DetectedVideo,
+  template?: FilenameTemplate,
+  options: { customStem?: string; sharedTitleCount?: number } = {},
+): string {
+  const name = inferFilename(v, { template, ...options });
   const dot = name.lastIndexOf(".");
   return dot > 0 ? name.slice(0, dot) : name;
 }
@@ -433,6 +444,48 @@ const disabledButtonStyle: React.CSSProperties = {
   border: "1px solid #cbd8cf",
 };
 
+const headingInputStyle: React.CSSProperties = {
+  margin: 0,
+  minWidth: 0,
+  width: "100%",
+  fontSize: 13,
+  fontWeight: 700,
+  lineHeight: 1.25,
+  color: "#172018",
+  border: "1px solid transparent",
+  borderRadius: 4,
+  padding: "2px 3px",
+  background: "transparent",
+  overflow: "hidden",
+  textOverflow: "ellipsis",
+};
+
+const menuStyle: React.CSSProperties = {
+  position: "absolute",
+  right: 0,
+  bottom: "calc(100% + 4px)",
+  minWidth: 184,
+  zIndex: 20,
+  background: "#ffffff",
+  border: "1px solid #c8d8cc",
+  borderRadius: 6,
+  boxShadow: "0 6px 18px rgba(31, 42, 34, 0.14)",
+  padding: 4,
+};
+
+const menuItemStyle: React.CSSProperties = {
+  display: "block",
+  width: "100%",
+  textAlign: "left",
+  border: 0,
+  borderRadius: 4,
+  background: "transparent",
+  padding: "6px 8px",
+  fontSize: 11,
+  color: "#1f2a22",
+  cursor: "pointer",
+};
+
 const shelfLineStyle: React.CSSProperties = {
   height: 3,
   borderRadius: 999,
@@ -607,38 +660,39 @@ function DownloadSuccessRow({ v, job }: { v: DetectedVideo; job: AnyJob }) {
   );
 }
 
-function Diagnostics({ v, job }: { v: DetectedVideo; job: AnyJob | null }) {
-  const notes: string[] = [];
+function mediaInfoLine(v: DetectedVideo, job: AnyJob | null): string | null {
   if (isWebmDirectVideo(v)) {
-    notes.push(job?.source === "webm" && job.status === "complete" ? "WebM converted locally to MP4." : "WebM will be converted locally to MP4.");
+    return job ? null : "WebM will be converted locally to MP4.";
   }
   if (v.kind === "dash") {
-    notes.push(job?.source === "dash" && job.status === "complete" ? "Separate audio/video merged into one MP4." : "DASH may use separate audio/video tracks.");
+    return job ? null : "Separate audio/video merged into one MP4.";
   }
   if (v.kind === "hls") {
-    if (job?.source === "hls" && job.status === "complete" && job.containerExt === ".mp4") {
-      notes.push("HLS segments merged into MP4.");
-    } else if (job?.source === "hls" && job.status === "complete" && job.containerExt === ".ts") {
-      notes.push("Saved as transport stream because this HLS layout cannot be remuxed to MP4.");
-    } else {
-      notes.push("HLS stream will be assembled locally.");
-    }
+    return job ? null : "HLS stream will be assembled locally.";
   }
+  return null;
+}
+
+function jobBlockedLine(job: AnyJob | null): string | null {
   if (job && "errorCode" in job && job.errorCode === "ENCRYPTED") {
-    notes.push("This stream's encryption method is not supported.");
+    return "This stream's encryption method is not supported.";
   }
   if (job && "errorCode" in job && job.errorCode === "DRM_PROTECTED") {
-    notes.push("This stream is DRM-protected and cannot be downloaded.");
+    return "This stream is DRM-protected and cannot be downloaded.";
   }
   if (job && "errorCode" in job && job.errorCode === "MIXED_CONTAINER_AUDIO") {
-    notes.push("This stream pairs fMP4 video with non-fMP4 audio.");
+    return "This stream pairs fMP4 video with non-fMP4 audio.";
   }
-  if (notes.length === 0) return null;
+  return null;
+}
+
+function Diagnostics({ status }: { status: CardStatusLine | null }) {
+  if (!status) return null;
+  const role = status.kind === "error" ? "alert" : "status";
+  const style = status.kind === "error" ? errorBoxStyle : { ...noteBoxStyle, background: "#f7fbf8" };
   return (
-    <div style={{ ...noteBoxStyle, background: "#f7fbf8" }}>
-      {notes.map((note) => (
-        <div key={note}>{note}</div>
-      ))}
+    <div role={role} aria-live={status.kind === "error" ? "assertive" : "polite"} style={style}>
+      {status.text}
     </div>
   );
 }
@@ -703,6 +757,8 @@ function VideoCard({
   alternateError,
   tabId,
   settings,
+  customStem,
+  sharedTitleCount,
   videoLimitReached,
   captureJobs,
   captureWorkspaceError,
@@ -713,7 +769,9 @@ function VideoCard({
   quickCaptureReconcilePending,
   deferPreview,
   onSelect,
+  onCustomStemChange,
   onIncludedChange,
+  onCapturePackIntent,
   onIgnoreSource,
   onIgnorePage,
   onCaptureAccepted,
@@ -740,6 +798,8 @@ function VideoCard({
   alternateError?: string;
   tabId: number;
   settings: UserSettings;
+  customStem?: string;
+  sharedTitleCount: number;
   videoLimitReached: boolean;
   captureJobs: readonly CaptureJobV1[];
   captureWorkspaceError: string | null;
@@ -750,7 +810,9 @@ function VideoCard({
   quickCaptureReconcilePending: boolean;
   deferPreview: boolean;
   onSelect: (id: string) => Promise<boolean>;
-  onIncludedChange: (included: boolean) => void;
+  onCustomStemChange: (mediaId: string, customStem: string | undefined) => void;
+  onIncludedChange: (included: boolean, customStem?: string) => void;
+  onCapturePackIntent: () => void;
   onIgnoreSource: (host: string) => void;
   onIgnorePage: (host: string) => void;
   onCaptureAccepted: (jobId: string) => void;
@@ -767,7 +829,11 @@ function VideoCard({
 }) {
   const [showFull, setShowFull] = useState(settings.showFullUrlsByDefault);
   const [showAlternates, setShowAlternates] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [menuFocusIndex, setMenuFocusIndex] = useState(0);
   const [previewExpanded, setPreviewExpanded] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [titleError, setTitleError] = useState<string | null>(null);
   const [job, setJob] = useState<AnyJob | null>(null);
   const [directProgress, setDirectProgress] = useState<{ received: number; total?: number } | null>(null);
   const [immediateError, setImmediateError] = useState<string | null>(
@@ -794,6 +860,8 @@ function VideoCard({
   const previousSelectedIdRef = useRef(selectedId);
   const downloadButtonRef = useRef<HTMLButtonElement | null>(null);
   const immediateErrorRef = useRef<HTMLDivElement | null>(null);
+  const moreButtonRef = useRef<HTMLButtonElement | null>(null);
+  const menuItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   // The variant last handed to sendDownload, so a SIZE_CAP failure can be
   // retried with the cap bypassed without re-picking. HLS size estimates are
   // unknown up front, so the cap is only hit mid-fetch.
@@ -805,7 +873,9 @@ function VideoCard({
     : undefined;
   const recommendationUi = recommendation && recommendedCandidate
     ? (() => {
-        const candidateName = displayName(recommendedCandidate, settings.filenameTemplate);
+        const candidateName = displayName(recommendedCandidate, settings.filenameTemplate, {
+          sharedTitleCount,
+        });
         return {
           candidateName,
           presentation: createBestCopyRecommendationPresentation(candidateName, recommendation),
@@ -816,9 +886,11 @@ function VideoCard({
   const unavailableDraftSelection = selectionSource === "immutable-draft-unavailable";
   const unavailableQuickSelection = selectionSource === "quick-interaction-unavailable";
   const limitBlocked = videoLimitReached && !isStillImage(selected);
-  const selectedName = displayName(selected, settings.filenameTemplate);
+  const selectedName = displayName(selected, settings.filenameTemplate, {
+    customStem,
+    sharedTitleCount,
+  });
   const cardDomId = groupId.replace(/[^a-z0-9_-]/gi, "-");
-  const includeControlId = `capture-include-${cardDomId}`;
   const recommendationReasonId = `best-copy-reason-${cardDomId}`;
   const alternativesId = `best-copy-alternatives-${cardDomId}`;
   const quickStartOutcomeUnknown =
@@ -852,6 +924,16 @@ function VideoCard({
         ? "The copy used by this Quick Capture is no longer on the shelf. Actions remain locked while the frozen request may still be active."
         : "The copy used by this completed Quick Capture is no longer on the shelf. Choose an available copy to continue."
       : "Your selected copy is no longer on this shelf. ClipHutch will not switch to a recommendation automatically.";
+  const committedTitle = selectedName;
+  const customStemValidation = customStem === undefined
+    ? undefined
+    : validateCustomDownloadStem(customStem);
+  const safeCustomStem = customStemValidation?.ok ? customStemValidation.stem : undefined;
+
+  useEffect(() => {
+    setTitleDraft(committedTitle);
+    setTitleError(null);
+  }, [committedTitle, selected.id]);
 
   useEffect(() => {
     setShowFull(settings.showFullUrlsByDefault);
@@ -896,6 +978,7 @@ function VideoCard({
     setPendingVariantId(null);
     setAcceptedStart(null);
     setPreviewExpanded(false);
+    setMoreOpen(false);
     pendingRef.current = false;
     commandIdRef.current = null;
     frozenQuickMediaIdRef.current = null;
@@ -1064,6 +1147,7 @@ function VideoCard({
       variantId: variant?.id,
       audioRenditionUrl: variant?.audioRenditionUrl,
       variantLabel: variant ? variantFilenameLabel(variant) : undefined,
+      ...(safeCustomStem === undefined ? {} : { customStem: safeCustomStem }),
       bypassSizeCap,
     };
     commandIdRef.current = request.commandId;
@@ -1201,6 +1285,144 @@ function VideoCard({
     releasePending();
     setTimeout(() => downloadButtonRef.current?.focus(), 0);
   };
+
+  function commitTitleDraft() {
+    const validation = validateCustomDownloadStem(titleDraft);
+    if (!validation.ok) {
+      setTitleError(validation.reason);
+      return;
+    }
+    setTitleError(null);
+    if (validation.stem === displayName(selected, settings.filenameTemplate, { sharedTitleCount })) {
+      onCustomStemChange(selected.id, undefined);
+      return;
+    }
+    onCustomStemChange(selected.id, validation.stem);
+  }
+
+  function revertTitleDraft() {
+    setTitleDraft(committedTitle);
+    setTitleError(null);
+  }
+
+  function openMoreMenu() {
+    setMoreOpen(true);
+    setMenuFocusIndex(0);
+    requestAnimationFrame(() =>
+      menuItemRefs.current.find((item) => item && !item.disabled)?.focus());
+  }
+
+  function closeMoreMenu() {
+    setMoreOpen(false);
+    setTimeout(() => moreButtonRef.current?.focus(), 0);
+  }
+
+  function focusMenuItem(delta: number) {
+    const items = menuItemRefs.current.filter((item): item is HTMLButtonElement =>
+      Boolean(item && !item.disabled));
+    if (items.length === 0) return;
+    const nextIndex = (menuFocusIndex + delta + items.length) % items.length;
+    setMenuFocusIndex(nextIndex);
+    items[nextIndex]?.focus();
+  }
+
+  function onMoreButtonKeyDown(event: React.KeyboardEvent<HTMLButtonElement>) {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    openMoreMenu();
+  }
+
+  function onMenuKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeMoreMenu();
+      return;
+    }
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      focusMenuItem(1);
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      focusMenuItem(-1);
+    }
+  }
+
+  function progressStatusText(): string | null {
+    if (quickCapture.mode !== "none" && quickCapture.statusLabel) {
+      const progress = quickCapture.job?.progress;
+      const details = [
+        quickCapture.progressPercent !== null ? `${quickCapture.progressPercent}%` : undefined,
+        progress?.completed !== undefined && progress.total !== undefined
+          ? `${progress.completed}/${progress.total}`
+          : undefined,
+        progress?.bytes !== undefined ? fmtBytes(progress.bytes) : undefined,
+      ].filter((detail): detail is string => Boolean(detail));
+      return details.length > 0
+        ? `${quickCapture.statusLabel}: ${details.join(" · ")}`
+        : quickCapture.statusLabel;
+    }
+    if (!job) return null;
+    if (job.source === "direct" && job.status === "in_progress") {
+      const total = directProgress?.total;
+      const received = directProgress?.received ?? 0;
+      const pct = total ? Math.round((received / total) * 100) : null;
+      return pct !== null
+        ? `Downloading ${pct}% - ${fmtBytes(received)} / ${fmtBytes(total)}`
+        : received > 0
+          ? `Downloading ${fmtBytes(received)}`
+          : "Starting download";
+    }
+    if ((job.source === "hls" || job.source === "dash") && job.status === "running") {
+      const { done, total, bytes } = job.progress;
+      return total > 0
+        ? `Downloading ${done} of ${total} segments (${fmtBytes(bytes) ?? "0 B"})`
+        : `Starting ${job.source.toUpperCase()} download`;
+    }
+    if (job.source === "webm" && job.status === "running") {
+      const pct = Math.round(job.progress.ratio * 100);
+      return `${job.progress.message ?? "Converting WebM to MP4"}${pct > 0 ? ` ${pct}%` : ""}`;
+    }
+    if ((job.source === "hls" || job.source === "dash" || job.source === "webm") &&
+      (job.status === "delivery_pending" || job.status === "saving")) {
+      return job.source === "webm" ? "Saving MP4" : "Saving file";
+    }
+    return null;
+  }
+
+  function errorStatusText(): string | null {
+    if (titleError) return titleError;
+    if (selectionUnavailable) return unavailableSelectionMessage;
+    if (quickCaptureStartBlocked || previousStartUnresolved) {
+      return previousStartUnresolved && immediateError
+        ? immediateError
+        : "A previous start must be reconciled before another Quick Capture can begin.";
+    }
+    if (immediateError) return immediateError;
+    if (quickCapture.mode === "failed") {
+      return quickCapture.job?.error?.customerMessage ?? "Quick Capture failed.";
+    }
+    const blocked = jobBlockedLine(job);
+    if (blocked) return blocked;
+    if (job?.source === "direct" && job.status === "interrupted") {
+      return job.errorMessage ?? "Download interrupted.";
+    }
+    if ((job?.source === "hls" || job?.source === "dash") && job.status === "error") {
+      return job.errorMessage ?? "Download failed.";
+    }
+    if (job?.source === "webm" && job.status === "error") {
+      return job.errorMessage ?? "WebM conversion failed.";
+    }
+    return null;
+  }
+
+  function pendingStatusText(): string | null {
+    if (pendingPhase === "variants") return "Loading available qualities.";
+    if (pendingPhase === "download") return "Starting one download. Other actions are temporarily disabled.";
+    if (inclusionPending) return "Updating Capture Pack.";
+    return null;
+  }
 
   // Shared error UI for HLS/DASH jobs. On a SIZE_CAP failure, offer a one-click
   // retry that bypasses the cap with the same variant, since the size is only
@@ -1581,9 +1803,6 @@ function VideoCard({
       if (isWebmDirectVideo(selected)) {
         return (
           <>
-            <div style={noteBoxStyle}>
-              WebM will be transcoded to MP4 before saving. This can take a while.
-            </div>
             <button
               ref={downloadButtonRef}
               onClick={() => void onDownload()}
@@ -1857,6 +2076,140 @@ function VideoCard({
   const sourceHost = hostname(selected.url);
   const pageHost = pageLabel(selected);
   const alternateOptions = groupedAssets.filter((item) => item.id !== selected.id);
+  const statusLine = selectCardStatusLine({
+    progress: progressStatusText(),
+    error: errorStatusText(),
+    pending: pendingStatusText(),
+    info: mediaInfoLine(selected, job),
+    hasJob: Boolean(job) || quickCapture.mode !== "none",
+  });
+  const standaloneStatusLine =
+    titleError ||
+    (
+      !picker &&
+      pendingPhase === null &&
+      !limitBlocked &&
+      quickCapture.mode === "none" &&
+      !quickCaptureStartBlocked &&
+      !previousStartUnresolved &&
+      !acceptedStart &&
+      !immediateError &&
+      !job
+    )
+      ? statusLine
+      : null;
+  const sizeLine = selected.kind === "hls" || selected.kind === "dash"
+    ? null
+    : fmtBytes(selected.sizeBytes);
+  const menuItems: Array<{
+    key: string;
+    label: string;
+    ariaLabel?: string;
+    disabled?: boolean;
+    action: () => void;
+  }> = [
+    {
+      key: "capture-pack",
+      label: inclusionPending
+        ? "Updating Capture Pack..."
+        : included
+          ? "Remove from Capture Pack"
+          : "Add to Capture Pack",
+      ariaLabel: selectionUnavailable && included
+        ? "Remove the unavailable selected copy from Capture Pack"
+        : `${included ? "Remove" : "Add"} ${selectedName} ${included ? "from" : "to"} Capture Pack`,
+      disabled:
+        inclusionPending || alternatePendingId !== null || pendingPhase !== null || picker !== null ||
+        quickCaptureLocked || (selectionUnavailable && !included),
+      action: () => {
+        onCapturePackIntent();
+        onIncludedChange(!included, safeCustomStem);
+        setMoreOpen(false);
+      },
+    },
+    ...(selectionUnavailable ? [
+      ...(unavailableDraftSelection ? [{
+        key: "view-hutch",
+        label: "View Hutch",
+        action: () => {
+          onViewHutch();
+          setMoreOpen(false);
+        },
+      }] : []),
+      ...(unavailableQuickSelection ? [{
+        key: "view-activity",
+        label: "View Activity",
+        action: () => {
+          onViewActivity();
+          setMoreOpen(false);
+        },
+      }] : []),
+      ...(!unavailableQuickSelection || !quickInteractionInFlight ? [{
+        key: "use-displayed-copy",
+        label: unavailableDraftSelection ? "Replace with displayed copy" : "Use displayed copy",
+        disabled:
+          inclusionPending || alternatePendingId !== null || pendingPhase !== null ||
+          picker !== null || quickCaptureLocked ||
+          (unavailableQuickSelection && quickInteractionInFlight),
+        action: () => {
+          void onSelect(selected.id).then((selectedCopy) => {
+            if (!selectedCopy) return;
+            setPicker(null);
+            setImmediateError(null);
+            setImmediateErrorCode(null);
+            releasePending();
+            setMoreOpen(false);
+          });
+        },
+      }] : []),
+    ] : []),
+    {
+      key: "source-url",
+      label: showFull ? "Hide source URL" : "Show source URL",
+      disabled: pendingPhase !== null,
+      action: () => {
+        setShowFull((current) => !current);
+        setMoreOpen(false);
+      },
+    },
+    ...(sourceHost ? [{
+      key: "hide-source",
+      label: "Hide this source",
+      disabled: pendingPhase !== null || inclusionPending || alternatePendingId !== null || quickCaptureLocked,
+      action: () => {
+        onIgnoreSource(sourceHost);
+        setMoreOpen(false);
+      },
+    }] : []),
+    ...(pageHost ? [{
+      key: "ignore-site",
+      label: "Ignore this site",
+      disabled: pendingPhase !== null || quickCaptureLocked,
+      action: () => {
+        onIgnorePage(pageHost);
+        setMoreOpen(false);
+      },
+    }] : []),
+    ...(deferPreview && (canPreview(selected) || isStillImage(selected)) ? [{
+      key: "preview",
+      label: previewExpanded ? "Hide preview" : "Preview",
+      action: () => {
+        setPreviewExpanded((current) => !current);
+        setMoreOpen(false);
+      },
+    }] : []),
+    ...(alternateOptions.length > 0 ? [{
+      key: "alternates",
+      label: showAlternates
+        ? `Hide ${alternateOptions.length} alternative${alternateOptions.length === 1 ? "" : "s"}`
+        : `Show ${alternateOptions.length} alternative${alternateOptions.length === 1 ? "" : "s"}`,
+      disabled: pendingPhase !== null || quickCaptureLocked,
+      action: () => {
+        setShowAlternates((current) => !current);
+        setMoreOpen(false);
+      },
+    }] : []),
+  ];
 
   return (
     <article
@@ -1873,21 +2226,27 @@ function VideoCard({
         boxShadow: "0 1px 1px rgba(62, 48, 30, 0.06)",
       }}
     >
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
-        <h3
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto", alignItems: "center", gap: 6 }}>
+        <input
           id={`media-${selected.id}-heading`}
-          style={{
-            margin: 0,
-            minWidth: 0,
-            fontSize: 13,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-            color: "#172018",
+          value={titleDraft}
+          maxLength={CUSTOM_DOWNLOAD_STEM_LIMIT + 1}
+          onChange={(event) => setTitleDraft(event.currentTarget.value)}
+          onBlur={commitTitleDraft}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              commitTitleDraft();
+              event.currentTarget.blur();
+            } else if (event.key === "Escape") {
+              event.preventDefault();
+              revertTitleDraft();
+              event.currentTarget.blur();
+            }
           }}
-        >
-          {displayName(selected, settings.filenameTemplate)}
-        </h3>
+          aria-label={`Title for ${selectedName}`}
+          style={headingInputStyle}
+        />
         <span
           style={{
             fontSize: 10,
@@ -1902,278 +2261,134 @@ function VideoCard({
           {badgeText(selected)}
         </span>
       </div>
-      {recommendationUi ? (
-        <div
-          role="note"
-          aria-label={recommendationUi.presentation.ariaLabel}
-          aria-describedby={recommendationReasonId}
-          aria-current={
-            !selectionUnavailable && recommendation?.candidateId === selected.id
-              ? "true"
-              : undefined
-          }
-          style={{
-            ...noteBoxStyle,
-            marginTop: 7,
-            borderColor: "#9dbba5",
-            background: "#edf7f0",
-            color: "#244f3a",
-          }}
-        >
-          <div>
-            <strong>{recommendationUi.presentation.label}</strong>
-            {" · "}
-            {recommendationUi.candidateName}
-          </div>
-          <div id={recommendationReasonId} style={{ marginTop: 2 }}>
-            <div>{recommendationUi.presentation.reason}</div>
-            <div style={{ marginTop: 2, color: "#476653" }}>
-              {recommendationUi.presentation.availabilityNote}
-            </div>
-          </div>
-          {selectionUnavailable ? (
-            <div style={{ marginTop: 2 }}>
-              This recommendation has not replaced your unavailable choice.
-            </div>
-          ) : null}
-        </div>
-      ) : null}
-      {selectionUnavailable ? (
-        <div role="alert" style={{ ...errorBoxStyle, marginTop: 7 }}>
-          <div>{unavailableSelectionMessage}</div>
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 5 }}>
-            {unavailableDraftSelection ? (
-              <button type="button" onClick={onViewHutch} style={buttonStyle}>
-                View Hutch
-              </button>
-            ) : null}
-            {unavailableQuickSelection ? (
-              <button type="button" onClick={onViewActivity} style={buttonStyle}>
-                View Activity
-              </button>
-            ) : null}
-            {!unavailableQuickSelection || !quickInteractionInFlight ? (
-              <button
-                type="button"
-                disabled={
-                  inclusionPending || alternatePendingId !== null || pendingPhase !== null ||
-                  picker !== null || quickCaptureLocked ||
-                  (unavailableQuickSelection && quickInteractionInFlight)
-                }
-                onClick={() => {
-                  void onSelect(selected.id).then((selectedCopy) => {
-                    if (!selectedCopy) return;
-                    setPicker(null);
-                    setImmediateError(null);
-                    setImmediateErrorCode(null);
-                    releasePending();
-                  });
-                }}
-                style={
-                  inclusionPending || alternatePendingId !== null
-                    || pendingPhase !== null || picker !== null || quickCaptureLocked
-                    || (unavailableQuickSelection && quickInteractionInFlight)
-                    ? disabledButtonStyle
-                    : buttonStyle
-                }
-              >
-                {unavailableDraftSelection ? "Replace with displayed copy" : "Use displayed copy"}
-              </button>
-            ) : null}
-          </div>
-        </div>
-      ) : null}
-      <label
-        htmlFor={includeControlId}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 6,
-          marginTop: 7,
-          padding: "5px 7px",
-          borderRadius: 6,
-          border: included ? "1px solid #6d9979" : "1px solid #d5e0d8",
-          background: included ? "#edf7f0" : "#f8fbf9",
-          color: included ? "#244f3a" : "#4d5c51",
-          fontSize: 11,
-          fontWeight: 600,
-          cursor:
-            inclusionPending ? "wait" :
-              quickCaptureLocked || (selectionUnavailable && !included) ? "not-allowed" :
-                "pointer",
-        }}
-      >
-        <input
-          id={includeControlId}
-          type="checkbox"
-          checked={included}
-          disabled={
-            inclusionPending || alternatePendingId !== null || pendingPhase !== null || picker !== null ||
-            quickCaptureLocked || (selectionUnavailable && !included)
-          }
-          onChange={(event) => onIncludedChange(event.currentTarget.checked)}
-          aria-label={
-            selectionUnavailable && included
-              ? "Remove the unavailable selected copy from Capture Pack"
-              : `${included ? "Remove" : "Add"} ${selectedName} ${included ? "from" : "to"} Capture Pack`
-          }
-        />
-        {inclusionPending
-          ? "Updating Capture Pack…"
-          : selectionUnavailable && included
-            ? "Included copy is unavailable on this shelf"
-            : selectionUnavailable
-              ? "Choose an available copy before adding"
-              : included
-                ? "Included in Capture Pack"
-                : "Add to Capture Pack"}
-      </label>
-      {fmtBytes(selected.sizeBytes) !== undefined && (
-        <div style={{ color: "#6f7c72", fontSize: 11, marginTop: 2 }}>{fmtBytes(selected.sizeBytes)}</div>
-      )}
-      <div
-        style={{
-          display: "flex",
-          gap: 5,
-          flexWrap: "wrap",
-          alignItems: "center",
-          marginTop: 5,
-          color: "#6f7c72",
-          fontSize: 10,
-        }}
-      >
-        <span title={customerVisibleUrlTitle(selected.url, settings.showFullUrlsByDefault)}>
-          source: {sourceLabel(selected)}
-        </span>
-        {pageHost ? <span>page: {pageHost}</span> : null}
-        {sourceHost ? (
-          <button
-            onClick={() => onIgnoreSource(sourceHost)}
-            disabled={pendingPhase !== null || inclusionPending || alternatePendingId !== null || quickCaptureLocked}
-            title={`Hide media loaded from ${sourceHost}`}
-            style={{ ...buttonStyle, padding: "1px 5px", fontSize: 10 }}
-          >
-            Hide source
-          </button>
-        ) : null}
-        {pageHost ? (
-          <button
-            onClick={() => onIgnorePage(pageHost)}
-            disabled={pendingPhase !== null || quickCaptureLocked}
-            title={`Ignore pages on ${pageHost}`}
-            style={{ ...buttonStyle, padding: "1px 5px", fontSize: 10 }}
-          >
-            Ignore site
-          </button>
-        ) : null}
-      </div>
-      {alternateOptions.length > 0 ? (
-        <div style={{ ...noteBoxStyle, background: "#f7fbf8" }}>
-          <button
-            type="button"
-            aria-expanded={showAlternates}
-            aria-controls={alternativesId}
-            onClick={() => setShowAlternates((s) => !s)}
-            disabled={pendingPhase !== null || quickCaptureLocked}
-            style={{ ...buttonStyle, padding: "2px 6px", fontSize: 10, marginRight: 6 }}
-          >
-            {showAlternates ? "Hide" : "Show all"} {alternateOptions.length} alternative
-            {alternateOptions.length === 1 ? "" : "s"}
-          </button>
-          <span>
-            All verified related copies remain available for you to choose.
-          </span>
-          <div id={alternativesId} hidden={!showAlternates} style={{ marginTop: 5 }}>
-            {alternateOptions.map((alt) => (
-              <div
-                key={alt.id}
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "1fr auto auto",
-                  gap: 5,
-                  alignItems: "center",
-                  padding: "3px 0",
-                  borderTop: "1px solid #dfeae3",
-                }}
-              >
-                <div style={{ display: "flex", alignItems: "center", gap: 5, minWidth: 0 }}>
-                  <span
-                    title={customerVisibleUrlTitle(alt.url, settings.showFullUrlsByDefault)}
-                    style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-                  >
-                    {displayName(alt, settings.filenameTemplate)}
-                  </span>
-                  {alt.id === recommendation?.candidateId ? (
-                    <span
-                      style={{
-                        color: "#2f5f3a",
-                        fontWeight: 700,
-                        fontSize: 9,
-                        textTransform: "uppercase",
-                        flexShrink: 0,
-                      }}
-                    >
-                      Recommended
-                    </span>
-                  ) : null}
-                </div>
-                <span style={{ color: "#758277" }}>
-                  {[
-                    alt.width !== undefined && alt.height !== undefined
-                      ? `${alt.width}×${alt.height}`
-                      : undefined,
-                    fmtBytes(alt.sizeBytes) ?? badgeText(alt),
-                  ].filter((detail): detail is string => detail !== undefined).join(" · ")}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    void onSelect(alt.id).then((selectedAlternate) => {
-                      if (!selectedAlternate) return;
-                      setPicker(null);
-                      setImmediateError(null);
-                      setImmediateErrorCode(null);
-                      releasePending();
-                      setShowAlternates(false);
-                    });
-                  }}
-                  disabled={
-                    pendingPhase !== null || picker !== null || inclusionPending ||
-                    alternatePendingId !== null || quickCaptureLocked ||
-                    (unavailableQuickSelection && quickInteractionInFlight)
-                  }
-                  aria-label={
-                    included
-                      ? `Replace ${selectedName} in Capture Pack with ${displayName(alt, settings.filenameTemplate)}${alt.id === recommendation?.candidateId ? " (recommended)" : ""}`
-                      : `Select ${displayName(alt, settings.filenameTemplate)}${alt.id === recommendation?.candidateId ? " (recommended)" : ""}`
-                  }
-                  aria-describedby={
-                    alt.id === recommendation?.candidateId ? recommendationReasonId : undefined
-                  }
-                  style={{ ...buttonStyle, padding: "2px 6px", fontSize: 10 }}
-                >
-                  {alternatePendingId === alt.id ? "Replacing…" : included ? "Replace" : "Select"}
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
+      {sizeLine ? (
+        <div style={{ color: "#6f7c72", fontSize: 11, marginTop: 4 }}>{sizeLine}</div>
       ) : null}
       {alternateError ? (
         <div role="alert" aria-live="assertive" style={{ ...errorBoxStyle, marginTop: 6 }}>
           {alternateError}
         </div>
       ) : null}
-      <Diagnostics v={selected} job={job} />
-      {deferPreview && (canPreview(selected) || isStillImage(selected)) ? (
+      <Diagnostics status={standaloneStatusLine} />
+      {renderAction()}
+      <div style={{ position: "relative", marginTop: 7 }}>
         <button
+          ref={moreButtonRef}
           type="button"
-          aria-expanded={previewExpanded}
-          onClick={() => setPreviewExpanded((current) => !current)}
-          style={{ ...buttonStyle, marginTop: 7 }}
+          aria-haspopup="menu"
+          aria-expanded={moreOpen}
+          onClick={() => (moreOpen ? closeMoreMenu() : openMoreMenu())}
+          onKeyDown={onMoreButtonKeyDown}
+          style={buttonStyle}
         >
-          {previewExpanded ? "Hide preview" : "Preview"}
+          More
         </button>
+        {moreOpen ? (
+          <div role="menu" aria-label={`More actions for ${selectedName}`} onKeyDown={onMenuKeyDown} style={menuStyle}>
+            {menuItems.map((item, index) => (
+              <button
+                key={item.key}
+                ref={(node) => { menuItemRefs.current[index] = node; }}
+                type="button"
+                role="menuitem"
+                aria-label={item.ariaLabel}
+                disabled={item.disabled}
+                onFocus={() => setMenuFocusIndex(index)}
+                onClick={item.action}
+                style={{
+                  ...menuItemStyle,
+                  ...(item.disabled ? { color: "#7a847d", cursor: "not-allowed" } : {}),
+                }}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </div>
+      {showFull ? (
+        <div style={{ color: "#59675d", fontSize: 10, wordBreak: "break-all", marginTop: 7 }}>
+          <div title={customerVisibleUrlTitle(selected.url, showFull)}>
+            source: {sourceLabel(selected)}
+          </div>
+          {pageHost ? <div>page: {pageHost}</div> : null}
+          <div>{urlDisplay(selected.url, showFull)}</div>
+        </div>
+      ) : null}
+      {showAlternates ? (
+        <div id={alternativesId} style={{ ...noteBoxStyle, background: "#f7fbf8" }}>
+          {recommendationUi ? (
+            <div
+              role="note"
+              aria-label={recommendationUi.presentation.ariaLabel}
+              aria-describedby={recommendationReasonId}
+              aria-current={!selectionUnavailable && recommendation?.candidateId === selected.id ? "true" : undefined}
+              style={{ marginBottom: 5 }}
+            >
+              <strong>{recommendationUi.presentation.label}</strong>
+              {" · "}
+              {recommendationUi.candidateName}
+              <div id={recommendationReasonId} style={{ marginTop: 2 }}>
+                {recommendationUi.presentation.reason}
+              </div>
+            </div>
+          ) : null}
+          {alternateOptions.map((alt) => (
+            <div
+              key={alt.id}
+              style={{
+                display: "grid",
+                gridTemplateColumns: "minmax(0, 1fr) auto auto",
+                gap: 5,
+                alignItems: "center",
+                padding: "3px 0",
+                borderTop: "1px solid #dfeae3",
+              }}
+            >
+              <span
+                title={customerVisibleUrlTitle(alt.url, settings.showFullUrlsByDefault)}
+                style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+              >
+                {displayName(alt, settings.filenameTemplate, { sharedTitleCount })}
+              </span>
+              <span style={{ color: "#758277" }}>
+                {[
+                  alt.width !== undefined && alt.height !== undefined
+                    ? `${alt.width}×${alt.height}`
+                    : undefined,
+                  fmtBytes(alt.sizeBytes) ?? badgeText(alt),
+                ].filter((detail): detail is string => detail !== undefined).join(" · ")}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  void onSelect(alt.id).then((selectedAlternate) => {
+                    if (!selectedAlternate) return;
+                    setPicker(null);
+                    setImmediateError(null);
+                    setImmediateErrorCode(null);
+                    releasePending();
+                    setShowAlternates(false);
+                  });
+                }}
+                disabled={
+                  pendingPhase !== null || picker !== null || inclusionPending ||
+                  alternatePendingId !== null || quickCaptureLocked ||
+                  (unavailableQuickSelection && quickInteractionInFlight)
+                }
+                aria-label={
+                  included
+                    ? `Replace ${selectedName} in Capture Pack with ${displayName(alt, settings.filenameTemplate, { sharedTitleCount })}${alt.id === recommendation?.candidateId ? " (recommended)" : ""}`
+                    : `Select ${displayName(alt, settings.filenameTemplate, { sharedTitleCount })}${alt.id === recommendation?.candidateId ? " (recommended)" : ""}`
+                }
+                aria-describedby={alt.id === recommendation?.candidateId ? recommendationReasonId : undefined}
+                style={{ ...buttonStyle, padding: "2px 6px", fontSize: 10 }}
+              >
+                {alternatePendingId === alt.id ? "Replacing..." : included ? "Replace" : "Select"}
+              </button>
+            </div>
+          ))}
+        </div>
       ) : null}
       {!deferPreview || previewExpanded ? (
         <>
@@ -2181,25 +2396,6 @@ function VideoCard({
           <ImagePreview v={selected} />
         </>
       ) : null}
-      <div style={{ color: "#59675d", fontSize: 10, wordBreak: "break-all", marginTop: 7 }}>
-        {urlDisplay(selected.url, showFull)}{" "}
-        <button
-          onClick={() => setShowFull((s) => !s)}
-          disabled={pendingPhase !== null}
-          style={{
-            marginLeft: 4,
-            fontSize: 10,
-            padding: "1px 5px",
-            cursor: "pointer",
-            border: "1px solid #c8d6cc",
-            borderRadius: 4,
-            background: "#f7fbf8",
-          }}
-        >
-          {showFull ? "hide" : "show full URL"}
-        </button>
-      </div>
-      {renderAction()}
       <div style={{ ...shelfLineStyle, marginTop: 10 }} />
     </article>
   );
@@ -2230,6 +2426,8 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
   const [pendingCaptureGroupId, setPendingCaptureGroupId] = useState<string | null>(null);
   const [pendingCaptureAlternateId, setPendingCaptureAlternateId] = useState<string | null>(null);
   const [captureAlternateErrors, setCaptureAlternateErrors] = useState<Record<string, string>>({});
+  const [customStemsByMediaId, setCustomStemsByMediaId] = useState<Record<string, string | null>>({});
+  const [captureSummaryRevealed, setCaptureSummaryRevealed] = useState(false);
   const [captureView, setCaptureView] = useState<CaptureView>(
     surface === "sidepanel" ? "hutch" : "shelf",
   );
@@ -2924,6 +3122,17 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
   const videoGroups = groupMedia(visibleVideos);
   const stillGroups = groupMedia(visibleStills);
   const activeGroups = mediaFilter === "videos" ? videoGroups : stillGroups;
+  const sharedTitleCounts = (() => {
+    const byTitle = new Map<string, Set<string>>();
+    for (const item of visibleVideos) {
+      const key = item.pageTitle?.trim().toLocaleLowerCase("en-US");
+      if (!key) continue;
+      const set = byTitle.get(key) ?? new Set<string>();
+      set.add(item.id);
+      byTitle.set(key, set);
+    }
+    return byTitle;
+  })();
   const draftItems = captureDraft
     ? captureDraft.orderedItemIds.map((itemId) => captureDraft.items[itemId])
     : [];
@@ -2988,6 +3197,64 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
     return group.members.find((item) => item.id === model.selectedId) ?? group.primary;
   }
 
+  function sharedTitleCountFor(media: DetectedVideo): number {
+    const key = media.pageTitle?.trim().toLocaleLowerCase("en-US");
+    if (!key) return 1;
+    return sharedTitleCounts.get(key)?.size ?? 1;
+  }
+
+  function customStemForGroup(group: MediaGroup): string | undefined {
+    const selected = selectedForGroup(group);
+    const included = draftItemsForGroup(group).find((item) => item.media.mediaId === selected.id) ??
+      draftItemsForGroup(group)[0];
+    if (Object.prototype.hasOwnProperty.call(customStemsByMediaId, selected.id)) {
+      return customStemsByMediaId[selected.id] ?? undefined;
+    }
+    return included?.customStem;
+  }
+
+  function setCustomStemForMedia(mediaId: string, customStem: string | undefined): void {
+    setCustomStemsByMediaId((current) => {
+      const next = { ...current };
+      next[mediaId] = customStem ?? null;
+      return next;
+    });
+    void persistCustomStemForMedia(mediaId, customStem);
+  }
+
+  async function persistCustomStemForMedia(
+    mediaId: string,
+    customStem: string | undefined,
+  ): Promise<void> {
+    const item = draftItems.find((candidate) => candidate.media.mediaId === mediaId);
+    if (!item || !captureDraft) return;
+    if ((item.customStem ?? null) === (customStem ?? null)) return;
+    if (pendingCaptureGroupId !== null || captureRunPendingRef.current || captureRunOutcomeUnknown) {
+      return;
+    }
+    if (!claimPendingIntent(captureDraftMutationPendingRef)) return;
+    setCaptureDraftError(null);
+    try {
+      const result = await setCaptureDraftItemCustomStem({
+        itemId: item.itemId,
+        customStem: customStem ?? null,
+        expectedRevision: captureDraft.revision,
+      });
+      if (result.ok) {
+        setCaptureDraft(result.draft);
+        return;
+      }
+      if (result.draft !== null) setCaptureDraft(result.draft);
+      setCaptureDraftError(
+        result.reason === "revision_conflict"
+          ? "The Capture Pack changed in another ClipHutch window. Review the updated selection and try again."
+          : "ClipHutch could not rename this Capture Pack item.",
+      );
+    } finally {
+      clearPendingIntent(captureDraftMutationPendingRef);
+    }
+  }
+
   function clearCaptureAlternateError(groupId: string): void {
     setCaptureAlternateErrors((current) => {
       if (!Object.prototype.hasOwnProperty.call(current, groupId)) return current;
@@ -3050,7 +3317,11 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
     }
   }
 
-  async function setGroupIncluded(group: MediaGroup, include: boolean): Promise<void> {
+  async function setGroupIncluded(
+    group: MediaGroup,
+    include: boolean,
+    customStem?: string,
+  ): Promise<void> {
     if (
       tabId === null || pendingCaptureGroupId !== null || captureRunPendingRef.current ||
       captureRunOutcomeUnknown
@@ -3073,6 +3344,7 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
           tabId,
           mediaId: selectedForGroup(group).id,
           expectedRevision: captureDraft?.revision ?? 0,
+          ...(customStem === undefined ? {} : { customStem }),
         });
         if (result.ok) {
           setCaptureDraft(result.draft);
@@ -3957,6 +4229,8 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
           alternateError={captureAlternateErrors[group.groupId]}
           tabId={tabId}
           settings={settings}
+          customStem={customStemForGroup(group)}
+          sharedTitleCount={sharedTitleCountFor(selectedForGroup(group))}
           videoLimitReached={atLimit}
           captureJobs={captureJobs}
           captureWorkspaceError={captureWorkspaceError}
@@ -3970,7 +4244,9 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
           quickCaptureReconcilePending={quickCaptureReconcilePending}
           deferPreview={surface === "sidepanel"}
           onSelect={(id) => selectGroupMedia(group, id)}
-          onIncludedChange={(included) => void setGroupIncluded(group, included)}
+          onCustomStemChange={setCustomStemForMedia}
+          onIncludedChange={(included, customStem) => void setGroupIncluded(group, included, customStem)}
+          onCapturePackIntent={() => setCaptureSummaryRevealed(true)}
           onIgnoreSource={(host) => void ignoreSourceHost(host)}
           onIgnorePage={(host) => void ignorePageHost(host)}
           onCaptureAccepted={(jobId) => {
@@ -5006,16 +5282,17 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
       {captureDraftError ? (
         <div role="alert" style={errorBoxStyle}>{captureDraftError}</div>
       ) : null}
-      <section
-        aria-label="Capture Pack selection"
-        style={{
-          margin: "8px 0",
-          padding: "8px 9px",
-          border: "1px solid #bdd7c8",
-          borderRadius: 7,
-          background: "#f1f7f4",
-        }}
-      >
+      {draftItems.length > 0 || captureSummaryRevealed ? (
+        <section
+          aria-label="Capture Pack selection"
+          style={{
+            margin: "8px 0",
+            padding: "8px 9px",
+            border: "1px solid #bdd7c8",
+            borderRadius: 7,
+            background: "#f1f7f4",
+          }}
+        >
         <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
           <div>
             <strong style={{ color: "#244f3a" }}>Capture Pack</strong>
@@ -5075,7 +5352,8 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
             </button>
           </div>
         ) : null}
-      </section>
+        </section>
+      ) : null}
       {manifestPartition.covered.length > 0 ? (
         <div
           style={{

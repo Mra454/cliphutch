@@ -1,4 +1,5 @@
 import { withKeyLock } from "./session-jobs";
+import { validateCustomDownloadStem } from "./download-path";
 import {
   CAPTURE_PACK_SCHEMA_VERSION,
   isCaptureDraftItemV1,
@@ -57,6 +58,13 @@ export type CaptureDraftCommand =
       at: number;
       pageUrl: string;
       label: string | null;
+    }
+  | {
+      type: "set-item-custom-stem";
+      expectedRevision: number;
+      at: number;
+      itemId: string;
+      customStem: string | null;
     }
   | {
       type: "replace-media";
@@ -213,6 +221,9 @@ function cloneItem(item: CaptureDraftItemV1): CaptureDraftItemV1 {
     ...(item.pageFolderLabel === undefined
       ? {}
       : { pageFolderLabel: item.pageFolderLabel }),
+    ...(item.customStem === undefined
+      ? {}
+      : { customStem: item.customStem }),
     media: cloneMedia(item.media),
     family: item.family ? { familyId: item.family.familyId } : undefined,
     ...(item.copyChoice === undefined
@@ -414,12 +425,13 @@ function itemForMediaReplacement(
   };
   const previousPageUrl = normalizedHttpPageUrl(current.media.pageUrl);
   const nextPageUrl = normalizedHttpPageUrl(media.pageUrl);
+  if (current.customStem !== undefined) next.customStem = current.customStem;
   if (!nextPageUrl) return next;
 
   if (previousPageUrl === nextPageUrl && current.pageFolderLabel !== undefined) {
     next.pageFolderLabel = current.pageFolderLabel;
-    return next;
   }
+  if (previousPageUrl === nextPageUrl && current.pageFolderLabel !== undefined) return next;
 
   const targetPagePeerId = draft.orderedItemIds.find((itemId) =>
     itemId !== current.itemId &&
@@ -571,6 +583,13 @@ export function reduceCaptureDraft(
   }
   if (command.type === "set-manifest-csv" && typeof command.enabled !== "boolean") {
     return failure("invalid_draft", current);
+  }
+  if (
+    command.type === "set-item-custom-stem" &&
+    command.customStem !== null &&
+    !validateCustomDownloadStem(command.customStem).ok
+  ) {
+    return failure("invalid_item", current);
   }
 
   if (!current) {
@@ -744,6 +763,27 @@ export function reduceCaptureDraft(
     if (!matched || !changed) {
       return { ok: true, changed: false, draft: cloneCaptureDraft(current) };
     }
+    const candidate = changedDraft(current, command.at, { items });
+    return candidate
+      ? enforceCandidateLimits(candidate, current, limits)
+      : failure("revision_exhausted", current);
+  }
+
+  if (command.type === "set-item-custom-stem") {
+    if (!Object.prototype.hasOwnProperty.call(current.items, command.itemId)) {
+      return failure("item_not_found", current);
+    }
+    const existing = current.items[command.itemId];
+    if ((existing.customStem ?? null) === command.customStem) {
+      return { ok: true, changed: false, draft: cloneCaptureDraft(current) };
+    }
+    const items = Object.fromEntries(current.orderedItemIds.map((itemId) => {
+      const next = cloneItem(current.items[itemId]);
+      if (itemId !== command.itemId) return [itemId, next] as const;
+      if (command.customStem === null) delete next.customStem;
+      else next.customStem = command.customStem;
+      return [itemId, next] as const;
+    }));
     const candidate = changedDraft(current, command.at, { items });
     return candidate
       ? enforceCandidateLimits(candidate, current, limits)

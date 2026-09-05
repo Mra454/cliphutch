@@ -138,4 +138,33 @@ describe("createSingleCapturePlan", () => {
     expect(pageTitle.plan.items[0]?.plannedRelativePath).toMatch(/\/Customer Lesson\.mp4$/);
     expect(urlBasename.plan.items[0]?.plannedRelativePath).toMatch(/\/source-name\.mp4$/);
   });
+
+  it("uses a safe custom stem for the planned basename", () => {
+    const result = createSingleCapturePlan({
+      commandId,
+      tabId: 9,
+      generatedAt: 20,
+      filenameTemplate: "urlBasename",
+      customStem: "Slaying Trailer",
+      media: {
+        id: "media-name",
+        kind: "hls",
+        url: "https://cdn.example/source-name.m3u8",
+        pageUrl: "https://example.test/lesson",
+        pageTitle: "Customer Lesson",
+        detectedAt: 10,
+        provenance: ["network"],
+      },
+      qualityChoice: {
+        mode: "stream",
+        variantKind: "hls",
+        variantUrl: "https://cdn.example/1080.m3u8",
+        policy: { mode: "manual" },
+        estimateConfidence: "unknown",
+      },
+    });
+    expect(result).toMatchObject({ ok: true });
+    if (!result.ok) throw new Error("expected plan");
+    expect(result.plan.items[0]?.plannedRelativePath).toMatch(/\/Slaying Trailer\.mp4$/);
+  });
 });

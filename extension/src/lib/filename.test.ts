@@ -10,7 +10,7 @@ const mk = (partial: Partial<DetectedVideo>): DetectedVideo => ({
   ...partial,
 });
 
-const DATE = /\d{4}-\d{2}-\d{2}/;
+const DATE_TIME = /\d{4}-\d{2}-\d{2}-\d{4}/;
 
 describe("inferFilename — priority chain (auto)", () => {
   it("uses Content-Disposition filename when present", () => {
@@ -25,12 +25,12 @@ describe("inferFilename — priority chain (auto)", () => {
 
   it("falls back to host+date when URL has no path", () => {
     const out = inferFilename(mk({ url: "https://a.example" }));
-    expect(out).toMatch(new RegExp(`^a-example-${DATE.source}\\.mp4$`));
+    expect(out).toMatch(new RegExp(`^a-example-${DATE_TIME.source}\\.mp4$`));
   });
 
   it("uses host+date and image extension for images with no basename", () => {
     const out = inferFilename(mk({ kind: "image", url: "https://a.example" }));
-    expect(out).toMatch(new RegExp(`^a-example-${DATE.source}\\.jpg$`));
+    expect(out).toMatch(new RegExp(`^a-example-${DATE_TIME.source}\\.jpg$`));
   });
 
   it("hls: prefers pageTitle over manifest-shaped basename, mp4 container", () => {
@@ -43,6 +43,45 @@ describe("inferFilename — priority chain (auto)", () => {
         }),
       ),
     ).toBe("Michael Alexander Reel.mp4");
+  });
+
+  it("hls: uses host date time fallback when a root page title is the site label", () => {
+    const out = inferFilename(
+      mk({
+        kind: "hls",
+        url: "https://video.squarespace-cdn.com/123e4567-e89b-42d3-a456-426614174000/playlist.m3u8",
+        pageUrl: "https://ferret-buffalo-z6hz.squarespace.com/",
+        pageTitle: "Squarespace",
+      }),
+    );
+    expect(out).toMatch(/^ferret-buffalo-z6hz-squarespace-com-\d{4}-\d{2}-\d{2}-\d{4}\.mp4$/);
+  });
+
+  it("hls: treats a shared repeated title as brand-like when hinted by the popup", () => {
+    const out = inferFilename(
+      mk({
+        kind: "hls",
+        url: "https://cdn.example.test/123e4567-e89b-42d3-a456-426614174000/playlist.m3u8",
+        pageUrl: "https://videos.example.test/gallery",
+        pageTitle: "Gallery",
+      }),
+      { sharedTitleCount: 2 },
+    );
+    expect(out).toMatch(/^videos-example-test-\d{4}-\d{2}-\d{2}-\d{4}\.mp4$/);
+  });
+
+  it("hls: keeps a normal single-video page title", () => {
+    expect(
+      inferFilename(
+        mk({
+          kind: "hls",
+          url: "https://cdn.example.test/123e4567-e89b-42d3-a456-426614174000/playlist.m3u8",
+          pageUrl: "https://videos.example.test/gallery",
+          pageTitle: "Slaying Trailer",
+        }),
+        { sharedTitleCount: 1 },
+      ),
+    ).toBe("Slaying Trailer.mp4");
   });
 
   it("dash: prefers pageTitle over manifest-shaped basename", () => {
@@ -59,7 +98,7 @@ describe("inferFilename — priority chain (auto)", () => {
 
   it("hls: falls back to host+date when no pageTitle and basename is a manifest", () => {
     const out = inferFilename(mk({ kind: "hls", url: "https://cdn/v/abc/playlist.m3u8" }));
-    expect(out).toMatch(new RegExp(`^cdn-${DATE.source}\\.mp4$`));
+    expect(out).toMatch(new RegExp(`^cdn-${DATE_TIME.source}\\.mp4$`));
   });
 
   it("hls: keeps a named .m3u8 basename but saves as mp4", () => {
@@ -259,12 +298,18 @@ describe("inferFilename — template overrides", () => {
 
   it("timestamp forces a host+date name", () => {
     expect(inferFilename(v, { template: "timestamp" })).toMatch(
-      new RegExp(`^cdn-${DATE.source}\\.mp4$`),
+      new RegExp(`^cdn-${DATE_TIME.source}\\.mp4$`),
     );
   });
 
   it("auto trusts the server Content-Disposition name", () => {
     expect(inferFilename(v, { template: "auto" })).toBe("server-named.mp4");
+  });
+
+  it("customStem wins over template, URL, and title", () => {
+    expect(inferFilename(v, { template: "urlBasename", customStem: "Slaying Trailer" })).toBe(
+      "Slaying Trailer.mp4",
+    );
   });
 });
 
@@ -397,12 +442,12 @@ describe("inferFilename — length truncation", () => {
 describe("inferFilename — empty / fallback", () => {
   it("empty Content-Disposition + no URL path → host+date fallback", () => {
     const out = inferFilename(mk({ contentDisposition: 'filename=""', url: "https://a" }));
-    expect(out).toMatch(new RegExp(`^a-${DATE.source}\\.mp4$`));
+    expect(out).toMatch(new RegExp(`^a-${DATE_TIME.source}\\.mp4$`));
   });
 
   it("fallback name uses kind default extension", () => {
     const out = inferFilename(mk({ kind: "hls", url: "https://a" }));
-    expect(out).toMatch(new RegExp(`^a-${DATE.source}\\.mp4$`));
+    expect(out).toMatch(new RegExp(`^a-${DATE_TIME.source}\\.mp4$`));
   });
 });
 

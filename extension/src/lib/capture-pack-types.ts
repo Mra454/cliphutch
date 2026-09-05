@@ -1,4 +1,4 @@
-import { isSafeRelativeDownloadPath } from "./download-path";
+import { isSafeRelativeDownloadPath, validateCustomDownloadStem } from "./download-path";
 import {
   MAX_VARIANT_BANDWIDTH,
   MAX_VARIANT_DIMENSION,
@@ -158,6 +158,8 @@ export type CaptureDraftItemV1 = {
   sourceTabId?: number;
   /** Canonical, customer-authored folder label shared by one exact source page. */
   pageFolderLabel?: string;
+  /** Customer-authored item filename stem. The planner still owns the extension. */
+  customStem?: string;
   media: MediaSnapshotV1;
   family?: MediaFamilyRefV1;
   /** Optional only for drafts written before copy recommendations shipped. */
@@ -360,6 +362,13 @@ function isCanonicalCapturePageFolderLabel(value: unknown): value is string | un
   if (value === undefined) return true;
   const normalized = normalizeCapturePageFolderLabel(value);
   return typeof normalized === "string" && normalized === value;
+}
+
+function isCanonicalCustomStem(value: unknown): value is string | undefined {
+  if (value === undefined) return true;
+  if (typeof value !== "string") return false;
+  const normalized = validateCustomDownloadStem(value);
+  return normalized.ok && normalized.stem === value;
 }
 
 function isHttpUrl(value: unknown): value is string {
@@ -759,6 +768,7 @@ function isCaptureDraftItemV1Unsafe(value: unknown): value is CaptureDraftItemV1
       isFiniteNonNegative(record.addedAt) &&
       isOptionalSafeNonNegativeInteger(record.sourceTabId) &&
       isCanonicalCapturePageFolderLabel(record.pageFolderLabel) &&
+      isCanonicalCustomStem(record.customStem) &&
       isMediaSnapshotV1(record.media) &&
       (record.family === undefined || isMediaFamilyRefV1(record.family)) &&
       (record.copyChoice === undefined || (
