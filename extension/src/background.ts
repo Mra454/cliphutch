@@ -694,7 +694,7 @@ type DownloadRequest = {
 };
 type DownloadResponse =
   | { ok: true; downloadId?: number; jobId?: string }
-  | { ok: false; error: string; code?: string };
+  | { ok: false; error: string; code?: string; cleanupPending?: true };
 
 const MAX_STORED_DOWNLOAD_COMMANDS = 200;
 
@@ -825,6 +825,7 @@ function reconcileQuickCaptureStartIntent(
         preparedLease: quickLease,
         dependencies: quickCaptureRunDependencies(),
       });
+      if (!response.ok && response.cleanupPending) updateCaptureCleanupRetry(true);
       if (!response.ok && response.pending) throw new QuickCaptureStartPendingError();
       return response;
     },
@@ -846,6 +847,7 @@ function quickCaptureRunDependencies() {
         now: () => Date.now(),
         retireClaimedCaptureHeaderLease,
       }),
+    scheduleCaptureLeaseExpiryAlarm: () => scheduleCaptureLeaseExpiryAlarm(),
     scheduleCaptureQueueDrain,
   };
 }
@@ -1177,6 +1179,7 @@ async function handleSingleCaptureDownload(
       preparedLease: quickLease,
       dependencies: quickCaptureRunDependencies(),
     });
+    if (!response.ok && response.cleanupPending) updateCaptureCleanupRetry(true);
     if (!response.ok && response.pending) throw new QuickCaptureStartPendingError();
     return response;
   });

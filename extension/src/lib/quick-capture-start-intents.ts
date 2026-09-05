@@ -170,7 +170,7 @@ type CanonicalCreateInput = {
   identity: QuickCaptureStartIdentityV1;
   plan: CaptureReviewPlanV1;
   licensed: boolean;
-  headerLease?: QuickCaptureStartHeaderLeaseV1 | null;
+  headerLease: QuickCaptureStartHeaderLeaseV1 | null;
 };
 
 function invalidInput(message: string): QuickCaptureStartIntentFailure {
@@ -481,17 +481,19 @@ function parseCreateInput(value: unknown): CanonicalCreateInput | undefined {
   if (!record || !identity || typeof record.licensed !== "boolean") return undefined;
   const plan = canonicalQuickCapturePlan(record.plan, identity);
   if (!plan) return undefined;
-  const headerLease = Object.prototype.hasOwnProperty.call(record, "headerLease")
+  const hasHeaderLease = Object.prototype.hasOwnProperty.call(record, "headerLease");
+  const parsedHeaderLease = hasHeaderLease
     ? canonicalQuickCaptureHeaderLease(record.headerLease, identity, plan)
-    : undefined;
-  if (headerLease === undefined && Object.prototype.hasOwnProperty.call(record, "headerLease")) {
+    : null;
+  if (parsedHeaderLease === undefined) {
     return undefined;
   }
+  const headerLease: QuickCaptureStartHeaderLeaseV1 | null = parsedHeaderLease;
   return {
     identity,
     plan,
     licensed: record.licensed,
-    ...(Object.prototype.hasOwnProperty.call(record, "headerLease") ? { headerLease } : {}),
+    headerLease,
   };
 }
 
@@ -643,10 +645,7 @@ function requestMatches(
 ): boolean {
   return intent.commandId === input.identity.commandId &&
     plansEqual(intent.plan, input.plan) &&
-    (
-      input.headerLease === undefined ||
-      headerLeasesEqual(intent.headerLease, input.headerLease)
-    );
+    headerLeasesEqual(intent.headerLease ?? null, input.headerLease);
 }
 
 /** The first licensed value is intentionally excluded from request identity. */
@@ -1000,7 +999,7 @@ export async function createQuickCaptureStartIntent(
       plan: cloneCaptureReviewPlan(input.plan),
       createdAt: input.plan.generatedAt,
       status: "pending",
-      ...(input.headerLease === undefined ? {} : { headerLease: cloneHeaderLease(input.headerLease) }),
+      headerLease: cloneHeaderLease(input.headerLease),
     };
     const source = { ...read.index.records, [intent.commandId]: intent };
     const built = buildIndex(source, intent.commandId);

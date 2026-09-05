@@ -1,4 +1,4 @@
-import type { CaptureJobV1, CaptureReviewPlanV1, MediaSnapshotV1 } from "./capture-pack-types";
+import type { CaptureJobV1, CaptureReviewPlanV1 } from "./capture-pack-types";
 import type {
   EnqueueCaptureRunInput,
   EnqueueCaptureRunResult,
@@ -19,7 +19,7 @@ import {
 
 export type QuickCaptureRunResponse =
   | { ok: true; jobId: string }
-  | { ok: false; code: string; error: string; pending?: true };
+  | { ok: false; code: string; error: string; pending?: true; cleanupPending?: true };
 
 export type QuickCaptureRunDependencies = {
   now(): number;
@@ -49,21 +49,16 @@ export type QuickCaptureRunDependencies = {
     now: number;
   }): Promise<GetClaimedCaptureHeaderLeaseResult>;
   retireQuickCaptureHeaderLease(lease: QuickCaptureStartHeaderLeaseV1): Promise<boolean>;
+  scheduleCaptureLeaseExpiryAlarm(): unknown;
   scheduleCaptureQueueDrain(): void | Promise<void>;
 };
 
-function planMediaCouldNeedQuickLease(media: MediaSnapshotV1): boolean {
-  if (media.kind === "hls" || media.kind === "dash") return true;
-  if (media.kind !== "direct") return false;
-  const contentType = media.contentType?.toLowerCase() ?? "";
-  return contentType.includes("webm") || /\.webm(?:[?#]|$)/i.test(media.url);
-}
-
-function sourceAuthExpired(): QuickCaptureRunResponse {
+function sourceAuthExpired(cleanupPending = false): QuickCaptureRunResponse {
   return {
     ok: false,
     code: "SOURCE_AUTH_EXPIRED",
     error: QUICK_CAPTURE_SOURCE_AUTH_EXPIRED_MESSAGE,
+    ...(cleanupPending ? { cleanupPending: true } : {}),
   };
 }
 
@@ -107,9 +102,13 @@ async function failClosedSourceAuthExpired(
   dependencies: QuickCaptureRunDependencies,
   lease?: QuickCaptureStartHeaderLeaseV1,
 ): Promise<QuickCaptureRunResponse> {
-  if (lease) await dependencies.retireQuickCaptureHeaderLease(lease);
+  let cleanupPending = false;
+  if (lease && !await dependencies.retireQuickCaptureHeaderLease(lease)) {
+    cleanupPending = true;
+    await dependencies.scheduleCaptureLeaseExpiryAlarm();
+  }
   if (!await abandonPendingIntent(intent, dependencies)) return outcomeUnknown();
-  return sourceAuthExpired();
+  return sourceAuthExpired(cleanupPending);
 }
 
 async function validateRestartLease(
@@ -128,6 +127,8 @@ function intentLease(
   intent: QuickCaptureStartIntentV1,
   preparedLease: QuickCaptureStartHeaderLeaseV1 | null | undefined,
 ): QuickCaptureStartHeaderLeaseV1 | null | undefined {
+  // Persisted absence is legacy-only and predates header-dependent Quick starts;
+  // explicit null is the new non-header marker, while objects must validate.
   return preparedLease === undefined ? intent.headerLease : preparedLease;
 }
 
@@ -137,10 +138,6 @@ export async function reconcileQuickCaptureRunStart(input: {
   dependencies: QuickCaptureRunDependencies;
 }): Promise<QuickCaptureRunResponse> {
   const lease = intentLease(input.intent, input.preparedLease);
-  const media = input.intent.plan.items[0]?.media;
-  if (lease === undefined && media && planMediaCouldNeedQuickLease(media)) {
-    return failClosedSourceAuthExpired(input.intent, input.dependencies);
-  }
   if (lease && input.preparedLease === undefined) {
     const valid = await validateRestartLease(lease, input.dependencies);
     if (!valid) {
@@ -154,7 +151,7 @@ export async function reconcileQuickCaptureRunStart(input: {
     licensed: input.intent.licensed,
     runId: input.intent.runId,
     now: input.intent.createdAt,
-    ...(lease ? { headerLeaseIdsByItemId: lease.headerLeaseIdsByItemId } : {}),
+    headerLeaseIdsByItemId: lease ? lease.headerLeaseIdsByItemId : {},
   });
   if (!result.ok) {
     if (lease && !await input.dependencies.retireQuickCaptureHeaderLease(lease)) {

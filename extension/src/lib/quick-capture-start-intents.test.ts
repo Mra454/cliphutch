@@ -258,6 +258,15 @@ describe("Quick Capture start intent journal", () => {
     });
   });
 
+  it("serializes freshly created non-header intents with a null header lease field", async () => {
+    const result = await createQuickCaptureStartIntent(input());
+    expect(result).toMatchObject({
+      ok: true,
+      intent: { headerLease: null },
+    });
+    expect(currentIndex().records[command()]).toHaveProperty("headerLease", null);
+  });
+
   it("conflicts on any same-command plan change", async () => {
     await createQuickCaptureStartIntent(input());
     const changed = input();

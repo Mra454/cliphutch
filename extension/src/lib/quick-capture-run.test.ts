@@ -18,6 +18,7 @@ const commandId = `download-${uuid}`;
 const identity = deriveQuickCaptureStartIdentity(commandId)!;
 
 function plan(kind: "direct" | "hls" = "hls"): CaptureReviewPlanV1 {
+  const streamUrl = "https://cdn.example.test/video/master.m3u8";
   return {
     schemaVersion: 1,
     planId: identity.planId,
@@ -31,9 +32,9 @@ function plan(kind: "direct" | "hls" = "hls"): CaptureReviewPlanV1 {
       media: {
         mediaId: "media-1",
         kind,
-        url: kind === "hls"
-          ? "https://cdn.example.test/video/master.m3u8"
-          : "https://cdn.example.test/video.mp4",
+        url: kind === "direct"
+          ? "https://cdn.example.test/video.mp4"
+          : streamUrl,
         detectedAt: 1_000,
         pageUrl: "https://page.example.test/watch",
         provenance: ["network"],
@@ -49,8 +50,8 @@ function plan(kind: "direct" | "hls" = "hls"): CaptureReviewPlanV1 {
         ? {
             mode: "stream",
             policy: { mode: "manual" },
-            variantKind: "hls",
-            variantUrl: "https://cdn.example.test/video/master.m3u8",
+            variantKind: kind,
+            variantUrl: streamUrl,
             estimateConfidence: "unknown",
           }
         : { mode: "direct" },
@@ -64,6 +65,13 @@ function plan(kind: "direct" | "hls" = "hls"): CaptureReviewPlanV1 {
       requiredFreeVideoSlots: 1,
     },
   };
+}
+
+function webmPlan(): CaptureReviewPlanV1 {
+  const webm = plan("direct");
+  webm.items[0]!.media.url = "https://cdn.example.test/video.webm";
+  webm.items[0]!.media.contentType = "video/webm";
+  return webm;
 }
 
 function lease(): ClaimedQuickCaptureHeaderLease {
@@ -131,6 +139,7 @@ function job(state: CaptureJobV1["state"] = "queued"): CaptureJobV1 {
 function deps(): QuickCaptureRunDependencies & {
   enqueued: EnqueueCaptureRunInput[];
   retired: ClaimedQuickCaptureHeaderLease[];
+  scheduleCaptureLeaseExpiryAlarm: ReturnType<typeof vi.fn>;
 } {
   const enqueued: EnqueueCaptureRunInput[] = [];
   const retired: ClaimedQuickCaptureHeaderLease[] = [];
@@ -199,11 +208,12 @@ function deps(): QuickCaptureRunDependencies & {
       return true;
     }),
     scheduleCaptureQueueDrain: vi.fn(async () => undefined),
+    scheduleCaptureLeaseExpiryAlarm: vi.fn(async () => true),
   };
 }
 
 describe("reconcileQuickCaptureRunStart", () => {
-  it("validates a persisted restart lease and passes its item map into enqueue", async () => {
+  it("new-shape object valid passes lease map through", async () => {
     const d = deps();
     await expect(reconcileQuickCaptureRunStart({ intent: intent(), dependencies: d }))
       .resolves.toEqual({ ok: true, jobId: "capture-job:v1:job" });
@@ -226,7 +236,7 @@ describe("reconcileQuickCaptureRunStart", () => {
       reason: "lease_expired" as const,
       leaseId: `capture-header-lease-v1:${uuid}`,
     }],
-  ])("fails closed and retires when a restart lease is %s", async (_name, claimed) => {
+  ])("new-shape object %s fails closed and retires", async (_name, claimed) => {
     const d = deps();
     d.getClaimedCaptureHeaderLease = vi.fn(async () => claimed);
     await expect(reconcileQuickCaptureRunStart({ intent: intent(), dependencies: d }))
@@ -237,6 +247,30 @@ describe("reconcileQuickCaptureRunStart", () => {
       });
     expect(d.enqueueCaptureRun).not.toHaveBeenCalled();
     expect(d.retired).toHaveLength(1);
+    expect(d.abandonQuickCaptureStartIntent).toHaveBeenCalledWith({
+      commandId,
+      plan: plan(),
+    });
+  });
+
+  it("returns cleanup pending and rearms lease expiry cleanup when restart retire fails", async () => {
+    const d = deps();
+    d.getClaimedCaptureHeaderLease = vi.fn(async () => ({
+      ok: false as const,
+      reason: "lease_expired" as const,
+      leaseId: `capture-header-lease-v1:${uuid}`,
+    }));
+    d.retireQuickCaptureHeaderLease = vi.fn(async (input) => {
+      d.retired.push(input);
+      return false;
+    });
+    await expect(reconcileQuickCaptureRunStart({ intent: intent(), dependencies: d }))
+      .resolves.toMatchObject({
+        ok: false,
+        code: "SOURCE_AUTH_EXPIRED",
+        cleanupPending: true,
+      });
+    expect(d.scheduleCaptureLeaseExpiryAlarm).toHaveBeenCalledTimes(1);
     expect(d.abandonQuickCaptureStartIntent).toHaveBeenCalledWith({
       commandId,
       plan: plan(),
@@ -259,13 +293,34 @@ describe("reconcileQuickCaptureRunStart", () => {
     expect(d.retired).toHaveLength(1);
   });
 
-  it("old-shape non-header intents still reconcile", async () => {
+  it("old-shape public HLS intent reconciles without a lease field", async () => {
     const d = deps();
-    const oldIntent = intent({ plan: plan("direct") });
+    const oldIntent = intent({ plan: plan("hls") });
     delete (oldIntent as Partial<QuickCaptureStartIntentV1>).headerLease;
     await expect(reconcileQuickCaptureRunStart({ intent: oldIntent, dependencies: d }))
       .resolves.toEqual({ ok: true, jobId: "capture-job:v1:job" });
     expect(d.getClaimedCaptureHeaderLease).not.toHaveBeenCalled();
+    expect(d.enqueued[0]!.headerLeaseIdsByItemId).toEqual({});
+  });
+
+  it("old-shape WebM intent reconciles without a lease field", async () => {
+    const d = deps();
+    const oldIntent = intent({ plan: webmPlan() });
+    delete (oldIntent as Partial<QuickCaptureStartIntentV1>).headerLease;
+    await expect(reconcileQuickCaptureRunStart({ intent: oldIntent, dependencies: d }))
+      .resolves.toEqual({ ok: true, jobId: "capture-job:v1:job" });
+    expect(d.getClaimedCaptureHeaderLease).not.toHaveBeenCalled();
+    expect(d.enqueued[0]!.headerLeaseIdsByItemId).toEqual({});
+  });
+
+  it("new-shape null enqueues with an empty lease map", async () => {
+    const d = deps();
+    await expect(reconcileQuickCaptureRunStart({
+      intent: intent({ plan: plan("direct"), headerLease: null }),
+      dependencies: d,
+    })).resolves.toEqual({ ok: true, jobId: "capture-job:v1:job" });
+    expect(d.getClaimedCaptureHeaderLease).not.toHaveBeenCalled();
+    expect(d.enqueued[0]!.headerLeaseIdsByItemId).toEqual({});
   });
 });
 
