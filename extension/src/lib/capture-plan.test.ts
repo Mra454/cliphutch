@@ -490,7 +490,7 @@ describe("generateCaptureReviewPlan", () => {
     expect(first.ok && first.plan.items.map((item) => item.plannedRelativePath)).toEqual([
       "ClipHutch/Research Pack/example.test - Research Page/clip.mp4",
       "ClipHutch/Research Pack/example.test - Research Page/CLIP (2).mp4",
-      "ClipHutch/Research Pack/example.test - Research Page/_cliphutch-manifest.json",
+      "ClipHutch/Research Pack/example.test - Research Page/_cliphutch-manifest.mp4",
     ]);
     expect(first.ok && first.plan.items.some((item) =>
       item.plannedRelativePath === "ClipHutch/Research Pack/_cliphutch-manifest.json"))

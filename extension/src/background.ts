@@ -51,6 +51,10 @@ import {
   type PersistentCommandRecord,
   type PersistentCommandStore,
 } from "./lib/download-intent";
+import {
+  parseDownloadRequest,
+  type DownloadRequest,
+} from "./lib/download-request-message";
 import { handleCaptureDraftUiRequest } from "./lib/capture-draft-handler";
 import {
   claimCaptureHeaderLeaseBatch,
@@ -677,22 +681,6 @@ async function findVideo(tabId: number, videoId: string): Promise<DetectedVideo 
   return list.find((v) => v.id === videoId);
 }
 
-type DownloadRequest = {
-  type: "download";
-  commandId: string;
-  tabId: number;
-  videoId: string;
-  variantId?: string;
-  // HLS only: resolved URL of the audio rendition matched to the picked
-  // variant. When set, downloadHls fetches it in parallel with the video and
-  // muxes both into a single MP4.
-  audioRenditionUrl?: string;
-  // Resolution/quality label for the picked variant (e.g. "1080p"), threaded
-  // through to the saved filename.
-  variantLabel?: string;
-  customStem?: string;
-  bypassSizeCap?: boolean;
-};
 type DownloadResponse =
   | { ok: true; downloadId?: number; jobId?: string }
   | { ok: false; error: string; code?: string; cleanupPending?: true };
@@ -1481,7 +1469,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (m.type === "download") {
     if (!isTrustedExtensionPageSender(sender)) return false;
-    void handleDownloadRequest(message as DownloadRequest).then(sendResponse);
+    const downloadRequest = parseDownloadRequest(message);
+    if (!downloadRequest) {
+      sendResponse({
+        ok: false,
+        code: "INVALID_COMMAND",
+        error: "This download request is missing a valid customer-intent identifier.",
+      });
+      return false;
+    }
+    void handleDownloadRequest(downloadRequest).then(sendResponse);
     return true;
   }
   if (m.type === "list-variants") {

@@ -84,6 +84,20 @@ describe("inferFilename — priority chain (auto)", () => {
     ).toBe("Slaying Trailer.mp4");
   });
 
+  it("hls: keeps a single root-page title when it is not the site label", () => {
+    expect(
+      inferFilename(
+        mk({
+          kind: "hls",
+          url: "https://cdn.example.test/123e4567-e89b-42d3-a456-426614174000/playlist.m3u8",
+          pageUrl: "https://videos.example.test/",
+          pageTitle: "Launch Film",
+        }),
+        { sharedTitleCount: 1 },
+      ),
+    ).toBe("Launch Film.mp4");
+  });
+
   it("dash: prefers pageTitle over manifest-shaped basename", () => {
     expect(
       inferFilename(
@@ -390,7 +404,7 @@ describe("inferFilename — Unicode", () => {
 });
 
 describe("inferFilename — extension handling", () => {
-  it("forcedExtension replaces existing extension (foo.mp4 → foo.ts)", () => {
+  it("forcedExtension replaces existing extension (foo.mp4 -> foo.ts)", () => {
     expect(
       inferFilename(mk({ contentDisposition: 'filename="foo.mp4"' }), { forcedExtension: ".ts" }),
     ).toBe("foo.ts");
@@ -420,6 +434,57 @@ describe("inferFilename — extension handling", () => {
     expect(
       inferFilename(mk({ kind: "hls", url: "https://cdn/named-clip.m3u8" })),
     ).toBe("named-clip.mp4");
+  });
+
+  it("forces a custom direct video served as download.exe to the detected video/mp4 extension", () => {
+    expect(
+      inferFilename(
+        mk({ url: "https://cdn.example/download.exe", contentType: "video/mp4" }),
+        { customStem: "Slaying Trailer" },
+      ),
+    ).toBe("Slaying Trailer.mp4");
+  });
+
+  it("ignores a chained unsafe URL extension for direct video", () => {
+    const filename = inferFilename(
+      mk({ url: "https://cdn.example/x.mp4.exe", contentType: "video/mp4" }),
+    );
+    expect(filename).toMatch(/\.mp4$/);
+    expect(filename).not.toMatch(/\.exe$/);
+  });
+
+  it("ignores an unsafe Content-Disposition extension for direct video", () => {
+    expect(
+      inferFilename(
+        mk({
+          url: "https://cdn.example/video",
+          contentDisposition: 'attachment; filename="a.scr"',
+          contentType: "video/mp4",
+        }),
+      ),
+    ).toBe("a.mp4");
+  });
+
+  it("keeps a legitimate direct video extension matching the detected content type", () => {
+    expect(
+      inferFilename(mk({ url: "https://cdn.example/clip.mov", contentType: "video/quicktime" })),
+    ).toBe("clip.mov");
+  });
+
+  it("keeps an allowed image extension matching the detected content type", () => {
+    expect(
+      inferFilename(mk({
+        kind: "image",
+        url: "https://cdn.example/logo.svg",
+        contentType: "image/svg+xml",
+      })),
+    ).toBe("logo.svg");
+  });
+
+  it("falls back to mp4 for direct video with an unknown content type", () => {
+    expect(
+      inferFilename(mk({ url: "https://cdn.example/download.bin", contentType: "video/custom" })),
+    ).toBe("download.mp4");
   });
 });
 

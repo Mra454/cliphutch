@@ -1,4 +1,4 @@
-export type CardStatusKind = "progress" | "error" | "pending" | "info";
+export type CardStatusKind = "progress" | "pending" | "error" | "complete" | "info";
 
 export type CardStatusLine = {
   kind: CardStatusKind;
@@ -7,8 +7,9 @@ export type CardStatusLine = {
 
 export type CardStatusInput = {
   progress?: string | null;
-  error?: string | null;
   pending?: string | null;
+  error?: string | null;
+  complete?: string | null;
   info?: string | null;
   hasJob?: boolean;
 };
@@ -22,11 +23,14 @@ export function selectCardStatusLine(input: CardStatusInput): CardStatusLine | n
   const progress = clean(input.progress);
   if (progress) return { kind: "progress", text: progress };
 
+  const pending = clean(input.pending);
+  if (pending) return { kind: "pending", text: pending };
+
   const error = clean(input.error);
   if (error) return { kind: "error", text: error };
 
-  const pending = clean(input.pending);
-  if (pending) return { kind: "pending", text: pending };
+  const complete = clean(input.complete);
+  if (complete) return { kind: "complete", text: complete };
 
   if (input.hasJob) return null;
   const info = clean(input.info);

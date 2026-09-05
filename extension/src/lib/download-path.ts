@@ -12,6 +12,8 @@ const CONTROL_TEST_PATTERN = /[\x00-\x1f\x7f-\x9f]/;
 const INVALID_SEGMENT_PATTERN = /[\\/:*?"<>|]/g;
 const INVALID_SEGMENT_TEST_PATTERN = /[\\/:*?"<>|]/;
 const WINDOWS_RESERVED_PATTERN = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
+const CUSTOM_DOWNLOAD_STEM_EDGE_REASON =
+  "Titles cannot start with a dot or end with a dot or space.";
 
 export const CUSTOM_DOWNLOAD_STEM_LIMIT = DEFAULT_FILENAME_LIMIT;
 
@@ -45,6 +47,7 @@ function cleanSegment(value: string): string {
     .replace(CONTROL_PATTERN, "_")
     .replace(INVALID_SEGMENT_PATTERN, "_")
     .replace(/\.\.+/g, "_")
+    .replace(/^\.+/g, "_")
     .replace(/\s+/g, " ")
     .trim()
     .replace(/[. ]+$/g, "");
@@ -82,6 +85,24 @@ export function sanitizePathSegment(
   return fitUsableSegment(cleanSegment(traversalOnly ? "" : raw), fallback, maxLength);
 }
 
+export function sanitizeDownloadStem(
+  value: string,
+  options: { fallback?: string; maxLength?: number } = {},
+): string {
+  const fallback = options.fallback ?? "download";
+  const maxLength = normalizeSegmentLimit(options.maxLength, DEFAULT_FILENAME_LIMIT);
+  const raw = String(value ?? "")
+    .normalize("NFC")
+    .replace(BIDI_CONTROL_PATTERN, "")
+    .replace(CONTROL_PATTERN, "_")
+    .trim()
+    .replace(/[. ]+$/g, "")
+    .replace(/\.\.+[\\/]?/g, "_")
+    .replace(INVALID_SEGMENT_PATTERN, "_")
+    .replace(/^\.+/g, "_");
+  return fitUsableSegment(raw, fallback, maxLength);
+}
+
 function splitFilename(filename: string): { stem: string; extension: string } {
   const lastDot = filename.lastIndexOf(".");
   if (lastDot <= 0 || lastDot === filename.length - 1) {
@@ -103,37 +124,41 @@ export function sanitizeDownloadFilename(
   const cleaned = sanitizePathSegment(value, { fallback, maxLength: Math.max(maxLength, 256) });
   const { stem, extension } = splitFilename(cleaned);
   const stemLimit = Math.max(1, maxLength - Array.from(extension).length);
-  const safeStem = sanitizePathSegment(stem, { fallback, maxLength: stemLimit });
+  const safeStem = sanitizeDownloadStem(stem, { fallback, maxLength: stemLimit });
   return `${safeStem}${extension}`;
 }
 
 export function validateCustomDownloadStem(value: string): CustomDownloadStemValidation {
-  const normalized = String(value ?? "").normalize("NFC").trim().replace(/[. ]+$/g, "");
-  if (Array.from(normalized).length > CUSTOM_DOWNLOAD_STEM_LIMIT) {
+  const raw = String(value ?? "").normalize("NFC");
+  const trimmed = raw.trim();
+  if (Array.from(trimmed).length > CUSTOM_DOWNLOAD_STEM_LIMIT) {
     return { ok: false, reason: "Titles must be 140 characters or fewer." };
   }
-  if (BIDI_CONTROL_TEST_PATTERN.test(normalized) || CONTROL_TEST_PATTERN.test(normalized)) {
+  if (BIDI_CONTROL_TEST_PATTERN.test(raw) || CONTROL_TEST_PATTERN.test(raw)) {
     return {
       ok: false,
       reason: "Remove control or direction-formatting characters from this title.",
     };
   }
-  if (/[\\/]/.test(normalized)) {
+  if (/[\\/]/.test(trimmed)) {
     return { ok: false, reason: "Titles cannot contain path separators." };
   }
-  if (INVALID_SEGMENT_TEST_PATTERN.test(normalized)) {
+  if (INVALID_SEGMENT_TEST_PATTERN.test(trimmed)) {
     return { ok: false, reason: "Titles cannot contain characters Chrome rejects in filenames." };
   }
-  if (!/[\p{L}\p{N}]/u.test(normalized) || normalized === "." || normalized === "..") {
+  if (!/[\p{L}\p{N}]/u.test(trimmed) || trimmed === "." || trimmed === "..") {
     return { ok: false, reason: "Use at least one letter or number in this title." };
   }
-  if (normalized.includes("..")) {
+  if (trimmed.startsWith(".") || raw.trimEnd() !== raw || trimmed.endsWith(".")) {
+    return { ok: false, reason: CUSTOM_DOWNLOAD_STEM_EDGE_REASON };
+  }
+  if (trimmed.includes("..")) {
     return { ok: false, reason: "Titles cannot contain path traversal dots." };
   }
-  if (WINDOWS_RESERVED_PATTERN.test(normalized)) {
+  if (WINDOWS_RESERVED_PATTERN.test(trimmed)) {
     return { ok: false, reason: "Choose a title that is not a reserved Windows filename." };
   }
-  return { ok: true, stem: normalized };
+  return { ok: true, stem: trimmed };
 }
 
 export function buildPackRoot(packName: string): string {
@@ -187,6 +212,7 @@ function isCanonicalSegment(segment: string, maxLength: number): boolean {
     segment === segment.normalize("NFC") &&
     Array.from(segment).length <= maxLength &&
     segment === segment.trim() &&
+    !segment.startsWith(".") &&
     !segment.endsWith(".") &&
     segment !== "." &&
     segment !== ".." &&

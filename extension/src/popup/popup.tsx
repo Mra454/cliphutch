@@ -14,6 +14,7 @@ import {
   createDownloadCommandId,
 } from "../lib/download-intent";
 import { groupMedia, type MediaGroup } from "../lib/media-identity";
+import { sharedCleanTitleCountsByMediaId } from "../lib/shared-title-counts";
 import type { BestCopyRecommendationV1 } from "../lib/best-copy";
 import {
   bestCopySelectionChangeCanResetQuickState,
@@ -596,70 +597,6 @@ function downloadFormat(v: DetectedVideo, job: AnyJob): string {
   return badgeText(v);
 }
 
-function DownloadSuccessRow({ v, job }: { v: DetectedVideo; job: AnyJob }) {
-  const [filename, setFilename] = useState<string | null>(null);
-  const downloadId = job.downloadId;
-
-  useEffect(() => {
-    let cancelled = false;
-    if (downloadId === undefined) {
-      setFilename(null);
-      return;
-    }
-    void chrome.downloads.search({ id: downloadId }).then((items) => {
-      if (cancelled) return;
-      const path = items[0]?.filename;
-      setFilename(path ? path.split(/[\\/]/).pop() ?? path : null);
-    }).catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [downloadId]);
-
-  return (
-    <div
-      style={{
-        marginTop: 6,
-        padding: "6px 8px",
-        border: "1px solid #bdd7c8",
-        borderRadius: 6,
-        background: "#f1f7f4",
-        display: "grid",
-        gridTemplateColumns: "1fr auto",
-        gap: 6,
-        alignItems: "center",
-      }}
-    >
-      <div role="status" aria-live="polite" style={{ minWidth: 0 }}>
-        <div style={{ color: "#244f3a", fontSize: 11, fontWeight: 650 }}>
-          Saved {downloadFormat(v, job)}
-        </div>
-        <div
-          title={filename ?? displayName(v)}
-          style={{
-            color: "#536156",
-            fontSize: 10,
-            overflow: "hidden",
-            textOverflow: "ellipsis",
-            whiteSpace: "nowrap",
-          }}
-        >
-          {filename ?? displayName(v)}
-        </div>
-      </div>
-      {downloadId !== undefined ? (
-        <button
-          onClick={() => chrome.downloads.show(downloadId)}
-          aria-label={`Show ${filename ?? displayName(v)} in folder`}
-          style={buttonStyle}
-        >
-          Show in folder
-        </button>
-      ) : null}
-    </div>
-  );
-}
-
 function mediaInfoLine(v: DetectedVideo, job: AnyJob | null): string | null {
   if (isWebmDirectVideo(v)) {
     return job ? null : "WebM will be converted locally to MP4.";
@@ -862,6 +799,7 @@ function VideoCard({
   const immediateErrorRef = useRef<HTMLDivElement | null>(null);
   const moreButtonRef = useRef<HTMLButtonElement | null>(null);
   const menuItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const titleEscapeRef = useRef(false);
   // The variant last handed to sendDownload, so a SIZE_CAP failure can be
   // retried with the cap bypassed without re-picking. HLS size estimates are
   // unknown up front, so the cap is only hit mid-fetch.
@@ -1287,6 +1225,10 @@ function VideoCard({
   };
 
   function commitTitleDraft() {
+    if (titleEscapeRef.current) {
+      titleEscapeRef.current = false;
+      return;
+    }
     const validation = validateCustomDownloadStem(titleDraft);
     if (!validation.ok) {
       setTitleError(validation.reason);
@@ -1303,6 +1245,14 @@ function VideoCard({
   function revertTitleDraft() {
     setTitleDraft(committedTitle);
     setTitleError(null);
+  }
+
+  function escapeTitleDraft() {
+    // Title editing has three exits: Enter commits before blur, Tab/blur
+    // commits from the blur handler, and Escape marks a revert before blur so
+    // the restored draft is not immediately committed as a custom title.
+    titleEscapeRef.current = true;
+    revertTitleDraft();
   }
 
   function openMoreMenu() {
@@ -1350,7 +1300,10 @@ function VideoCard({
   }
 
   function progressStatusText(): string | null {
-    if (quickCapture.mode !== "none" && quickCapture.statusLabel) {
+    if (
+      (quickCapture.mode === "active" || quickCapture.mode === "awaiting_workspace") &&
+      quickCapture.statusLabel
+    ) {
       const progress = quickCapture.job?.progress;
       const details = [
         quickCapture.progressPercent !== null ? `${quickCapture.progressPercent}%` : undefined,
@@ -1393,7 +1346,11 @@ function VideoCard({
 
   function errorStatusText(): string | null {
     if (titleError) return titleError;
+    if (alternateError) return alternateError;
     if (selectionUnavailable) return unavailableSelectionMessage;
+    if (limitBlocked) {
+      return "Free video limit reached. Video actions are disabled; still-image downloads remain available.";
+    }
     if (quickCaptureStartBlocked || previousStartUnresolved) {
       return previousStartUnresolved && immediateError
         ? immediateError
@@ -1403,6 +1360,11 @@ function VideoCard({
     if (quickCapture.mode === "failed") {
       return quickCapture.job?.error?.customerMessage ?? "Quick Capture failed.";
     }
+    if (quickCapture.mode === "outcome_unknown") {
+      return quickCapture.job?.error?.customerMessage ??
+        "Chrome may already have accepted this file. Check Activity before starting it again.";
+    }
+    if (captureWorkspaceError && quickCapture.mode !== "none") return captureWorkspaceError;
     const blocked = jobBlockedLine(job);
     if (blocked) return blocked;
     if (job?.source === "direct" && job.status === "interrupted") {
@@ -1421,6 +1383,18 @@ function VideoCard({
     if (pendingPhase === "variants") return "Loading available qualities.";
     if (pendingPhase === "download") return "Starting one download. Other actions are temporarily disabled.";
     if (inclusionPending) return "Updating Capture Pack.";
+    if (acceptedStart && !job) return "ClipHutch accepted this download start.";
+    return null;
+  }
+
+  function completeStatusText(): string | null {
+    if (quickCapture.mode === "complete") return quickCapture.statusLabel ?? "Saved";
+    if (quickCapture.mode === "cancelled") return quickCapture.statusLabel ?? "Cancelled";
+    if (!job) return null;
+    if (job.status === "complete") return `Saved ${downloadFormat(selected, job)}`;
+    if (job.status === "cancelled") {
+      return job.source === "webm" ? "Transcode cancelled." : "Download cancelled.";
+    }
     return null;
   }
 
@@ -1429,13 +1403,8 @@ function VideoCard({
   // known once the download exceeds it mid-fetch.
   const renderStreamError = (
     failed: { errorMessage?: string; errorCode?: string },
-    fallbackMsg: string,
   ) => (
     <>
-      <div role="alert" style={errorBoxStyle}>
-        {failed.errorMessage ?? fallbackMsg}
-        {failed.errorCode ? <span style={{ opacity: 0.6 }}> [{failed.errorCode}]</span> : null}
-      </div>
       {failed.errorCode === "SIZE_CAP" ? (
         <button
           onClick={retryOverSizeCap}
@@ -1452,11 +1421,6 @@ function VideoCard({
       >
         {pendingPhase ? "Retrying…" : "Retry"}
       </button>
-      {pendingPhase ? (
-        <div role="status" aria-live="polite" style={{ marginTop: 5, fontSize: 11, color: "#444" }}>
-          Starting one download. Other actions are temporarily disabled.
-        </div>
-      ) : null}
     </>
   );
 
@@ -1480,14 +1444,9 @@ function VideoCard({
     return (
       <div style={{ marginTop: 6 }} aria-busy={pendingPhase === "download"}>
         {quickCaptureLocked ? (
-          <>
-            <div role="alert" style={errorBoxStyle}>
-              Resolve the previous start in Activity before choosing a quality.
-            </div>
-            <button type="button" onClick={onViewActivity} style={{ ...buttonStyle, marginTop: 6 }}>
-              View Activity
-            </button>
-          </>
+          <button type="button" onClick={onViewActivity} style={{ ...buttonStyle, marginTop: 6 }}>
+            View Activity
+          </button>
         ) : null}
         <div style={{ fontSize: 11, color: "#444", marginBottom: 4 }}>
           Choose quality:
@@ -1554,11 +1513,6 @@ function VideoCard({
         >
           Cancel
         </button>
-        {pendingPhase ? (
-          <div role="status" aria-live="polite" style={{ marginTop: 5, fontSize: 11, color: "#444" }}>
-            Starting the selected quality. Other actions are temporarily disabled.
-          </div>
-        ) : null}
       </div>
     );
   }
@@ -1568,78 +1522,51 @@ function VideoCard({
 
     const actionDisabled =
       pendingPhase !== null || limitBlocked || selectionUnavailable || quickCaptureLocked;
-    const pendingNotice = pendingPhase ? (
-      <div role="status" aria-live="polite" style={{ marginTop: 5, fontSize: 11, color: "#444" }}>
-        {pendingPhase === "variants"
-          ? "Loading available qualities…"
-          : "Starting one download. Other actions are temporarily disabled."}
-      </div>
-    ) : null;
-    const limitNotice = limitBlocked ? (
-      <div role="status" style={{ ...noteBoxStyle, background: "#fffaf0", color: "#6b5428" }}>
-        Free video limit reached. Video actions are disabled; still-image downloads remain available.
-      </div>
-    ) : null;
     const downloadAgain = (
-      <>
-        <button
-          ref={downloadButtonRef}
-          onClick={() => void onDownload()}
-          disabled={actionDisabled}
-          aria-label={`Download ${selectedName} again`}
-          style={{ ...(actionDisabled ? disabledButtonStyle : buttonStyle), marginTop: 6 }}
-        >
-          {pendingPhase ? "Starting again…" : "Download again"}
-        </button>
-        {pendingNotice}
-        {limitNotice}
-      </>
+      <button
+        ref={downloadButtonRef}
+        onClick={() => void onDownload()}
+        disabled={actionDisabled}
+        aria-label={`Download ${selectedName} again`}
+        style={{ ...(actionDisabled ? disabledButtonStyle : buttonStyle), marginTop: 6 }}
+      >
+        {pendingPhase ? "Starting again…" : "Download again"}
+      </button>
+    );
+    const activityButton = (
+      <button
+        type="button"
+        onClick={onViewActivity}
+        style={{ ...buttonStyle, marginTop: 6 }}
+      >
+        View Activity
+      </button>
+    );
+    const completedDownloadId = job?.downloadId;
+    const showInFolderButton = completedDownloadId !== undefined ? (
+      <button
+        onClick={() => chrome.downloads.show(completedDownloadId)}
+        aria-label={`Show ${selectedName} in folder`}
+        style={{ ...buttonStyle, marginTop: 6 }}
+      >
+        Show in folder
+      </button>
+    ) : null;
+    const progressBar = (value: number, max: number, label: string) => (
+      <progress
+        value={value}
+        max={max}
+        aria-label={label}
+        style={{ width: "100%", marginTop: 6 }}
+      />
     );
 
     if (quickCapture.mode !== "none") {
       const captureJob = quickCapture.job;
-      const progress = captureJob?.progress;
-      const progressDetails = [
-        progress?.completed !== undefined && progress.total !== undefined
-          ? `${progress.completed}/${progress.total}`
-          : undefined,
-        progress?.bytes !== undefined ? fmtBytes(progress.bytes) : undefined,
-      ].filter((detail): detail is string => Boolean(detail));
-      const status = (
-        <div role="status" aria-live="polite" style={{ ...noteBoxStyle, marginTop: 6 }}>
-          <strong>{quickCapture.statusLabel}</strong>
-          {quickCapture.progressPercent !== null
-            ? ` · ${quickCapture.progressPercent}%`
-            : progressDetails.length > 0
-              ? ` · ${progressDetails.join(" · ")}`
-              : null}
-          {quickCapture.progressPercent !== null ? (
-            <progress
-              value={quickCapture.progressPercent}
-              max={100}
-              aria-label={`${quickCapture.statusLabel ?? "Quick Capture"} ${selectedName}`}
-              style={{ display: "block", width: "100%", marginTop: 4 }}
-            />
-          ) : null}
-        </div>
-      );
-      const activityButton = (
-        <button
-          type="button"
-          onClick={onViewActivity}
-          style={{ ...buttonStyle, marginTop: 6 }}
-        >
-          View Activity
-        </button>
-      );
 
       if (quickCapture.mode === "failed") {
         return (
           <>
-            <div role="alert" style={errorBoxStyle}>
-              {captureJob?.error?.customerMessage ?? "Quick Capture failed."}
-              {captureJob?.error?.code ? <span style={{ opacity: 0.6 }}> [{captureJob.error.code}]</span> : null}
-            </div>
             {activityButton}
             {quickCapture.canRetry ? (
               <button
@@ -1653,7 +1580,6 @@ function VideoCard({
                 {pendingPhase ? "Retrying…" : "Retry"}
               </button>
             ) : null}
-            {limitNotice}
           </>
         );
       }
@@ -1661,7 +1587,6 @@ function VideoCard({
       if (quickCapture.mode === "cancelled") {
         return (
           <>
-            {status}
             {activityButton}
             <button
               ref={downloadButtonRef}
@@ -1673,7 +1598,6 @@ function VideoCard({
             >
               {pendingPhase ? "Starting…" : "Try again"}
             </button>
-            {limitNotice}
           </>
         );
       }
@@ -1681,7 +1605,6 @@ function VideoCard({
       if (quickCapture.mode === "complete") {
         return (
           <>
-            {status}
             {activityButton}
             {downloadAgain}
           </>
@@ -1690,17 +1613,13 @@ function VideoCard({
 
       return (
         <>
-          {quickCapture.mode === "outcome_unknown" ? (
-            <div role="alert" style={errorBoxStyle}>
-              {captureJob?.error?.customerMessage ??
-                "Chrome may already have accepted this file. Check Activity before starting it again."}
-            </div>
-          ) : status}
-          {captureWorkspaceError ? (
-            <div role="alert" style={{ ...errorBoxStyle, marginTop: 6 }}>
-              {captureWorkspaceError}
-            </div>
-          ) : null}
+          {quickCapture.progressPercent !== null
+            ? progressBar(
+                quickCapture.progressPercent,
+                100,
+                `${quickCapture.statusLabel ?? "Quick Capture"} ${selectedName}`,
+              )
+            : null}
           {activityButton}
           {quickCapture.canCancel && captureJob ? (
             <button
@@ -1718,31 +1637,13 @@ function VideoCard({
 
     if (quickCaptureStartBlocked || previousStartUnresolved) {
       return (
-        <>
-          <div role="alert" style={errorBoxStyle}>
-            {previousStartUnresolved && immediateError
-              ? immediateError
-              : "A previous start must be reconciled before another Quick Capture can begin."}
-          </div>
-          <button
-            type="button"
-            onClick={onViewActivity}
-            style={{ ...buttonStyle, marginTop: 6 }}
-          >
-            View Activity
-          </button>
-        </>
+        activityButton
       );
     }
 
     if (acceptedStart && !job) {
       return (
-        <>
-          <div role="status" aria-live="polite" style={noteBoxStyle}>
-            ClipHutch accepted this download start.
-          </div>
-          {downloadAgain}
-        </>
+        downloadAgain
       );
     }
 
@@ -1751,14 +1652,6 @@ function VideoCard({
       if (quickStartOutcomeUnknown) {
         return (
           <>
-            <div
-              ref={immediateErrorRef}
-              role="alert"
-              tabIndex={-1}
-              style={errorBoxStyle}
-            >
-              {immediateError}
-            </div>
             <button
               ref={downloadButtonRef}
               type="button"
@@ -1774,14 +1667,6 @@ function VideoCard({
       }
       return (
         <>
-          <div
-            ref={immediateErrorRef}
-            role="alert"
-            tabIndex={-1}
-            style={errorBoxStyle}
-          >
-            {immediateError}
-          </div>
           {immediateRetryable ? (
             <button
               ref={downloadButtonRef}
@@ -1793,8 +1678,6 @@ function VideoCard({
               {pendingPhase ? "Retrying…" : "Retry"}
             </button>
           ) : null}
-          {pendingNotice}
-          {limitNotice}
         </>
       );
     }
@@ -1812,8 +1695,6 @@ function VideoCard({
             >
               {pendingPhase === "variants" ? "Loading qualities…" : pendingPhase ? "Starting…" : "Convert to MP4"}
             </button>
-            {pendingNotice}
-            {limitNotice}
           </>
         );
       }
@@ -1828,8 +1709,6 @@ function VideoCard({
           >
             {pendingPhase === "variants" ? "Loading qualities…" : pendingPhase ? "Starting…" : "Download"}
           </button>
-          {pendingNotice}
-          {limitNotice}
         </>
       );
     }
@@ -1844,35 +1723,20 @@ function VideoCard({
             <span role="status" aria-live="polite" style={visuallyHiddenStyle}>
               Download in progress for {selectedName}.
             </span>
-            <div style={{ fontSize: 11, color: "#444" }}>
-              {pct !== null
-                ? `Downloading ${pct}% - ${fmtBytes(received)} / ${fmtBytes(total)}`
-                : received > 0
-                  ? `Downloading… ${fmtBytes(received)}`
-                  : "Starting…"}
-            </div>
-            {total ? (
-              <progress
-                value={received}
-                max={total}
-                aria-label={`Downloading ${selectedName}`}
-                style={{ width: "100%", marginTop: 3 }}
-              />
-            ) : null}
+            {pct !== null && total ? progressBar(received, total, `Downloading ${selectedName}`) : null}
           </div>
         );
       }
       if (job.status === "complete") {
         return (
           <>
-            <DownloadSuccessRow v={selected} job={job} />
+            {showInFolderButton}
             {downloadAgain}
           </>
         );
       }
       return (
         <>
-          <div role="alert" style={errorBoxStyle}>{job.errorMessage ?? "Download interrupted."}</div>
           <button
             ref={downloadButtonRef}
             onClick={() => void onDownload()}
@@ -1881,8 +1745,6 @@ function VideoCard({
           >
             {pendingPhase ? "Retrying…" : "Retry"}
           </button>
-          {pendingNotice}
-          {limitNotice}
         </>
       );
     }
@@ -1900,10 +1762,7 @@ function VideoCard({
             <span role="status" aria-live="polite" style={visuallyHiddenStyle}>
               HLS download in progress for {selectedName}.
             </span>
-            <div style={{ fontSize: 11, color: "#444" }}>{text}</div>
-            {pct !== null ? (
-              <progress value={done} max={total} aria-label={`Downloading ${selectedName}`} style={{ width: "100%", marginTop: 3 }} />
-            ) : null}
+            {text && pct !== null ? progressBar(done, total, `Downloading ${selectedName}`) : null}
             <button onClick={onCancelHls} style={{ ...buttonStyle, marginTop: 4 }}>
               Cancel
             </button>
@@ -1911,16 +1770,12 @@ function VideoCard({
         );
       }
       if (job.status === "delivery_pending" || job.status === "saving") {
-        return (
-          <div role="status" aria-live="polite" style={{ marginTop: 6, fontSize: 11, color: "#444" }}>
-            Saving file…
-          </div>
-        );
+        return null;
       }
       if (job.status === "complete") {
         return (
           <>
-            <DownloadSuccessRow v={selected} job={job} />
+            {showInFolderButton}
             {downloadAgain}
           </>
         );
@@ -1928,7 +1783,6 @@ function VideoCard({
       if (job.status === "cancelled") {
         return (
           <>
-            <div role="status" style={noteBoxStyle}>Download cancelled.</div>
             <button
               ref={downloadButtonRef}
               onClick={() => void onDownload()}
@@ -1937,26 +1791,20 @@ function VideoCard({
             >
               {pendingPhase ? "Starting…" : "Try again"}
             </button>
-            {pendingNotice}
-            {limitNotice}
           </>
         );
       }
-      return renderStreamError(job, "Download failed.");
+      return renderStreamError(job);
     }
 
     if (job.source === "webm") {
       if (job.status === "running") {
-        const pct = Math.round(job.progress.ratio * 100);
         return (
           <div style={{ marginTop: 6 }}>
             <span role="status" aria-live="polite" style={visuallyHiddenStyle}>
               WebM conversion in progress for {selectedName}.
             </span>
-            <div style={{ fontSize: 11, color: "#444" }}>
-              {job.progress.message ?? "Transcoding WebM to MP4"} {pct > 0 ? `${pct}%` : ""}
-            </div>
-            <progress value={job.progress.ratio} max={1} aria-label={`Converting ${selectedName} to MP4`} style={{ width: "100%", marginTop: 3 }} />
+            {progressBar(job.progress.ratio, 1, `Converting ${selectedName} to MP4`)}
             <button onClick={onCancelWebm} style={{ ...buttonStyle, marginTop: 4 }}>
               Cancel
             </button>
@@ -1964,16 +1812,12 @@ function VideoCard({
         );
       }
       if (job.status === "delivery_pending" || job.status === "saving") {
-        return (
-          <div role="status" aria-live="polite" style={{ marginTop: 6, fontSize: 11, color: "#444" }}>
-            Saving MP4…
-          </div>
-        );
+        return null;
       }
       if (job.status === "complete") {
         return (
           <>
-            <DownloadSuccessRow v={selected} job={job} />
+            {showInFolderButton}
             {downloadAgain}
           </>
         );
@@ -1981,7 +1825,6 @@ function VideoCard({
       if (job.status === "cancelled") {
         return (
           <>
-            <div role="status" style={noteBoxStyle}>Transcode cancelled.</div>
             <button
               ref={downloadButtonRef}
               onClick={() => void onDownload()}
@@ -1990,17 +1833,11 @@ function VideoCard({
             >
               {pendingPhase ? "Starting…" : "Try again"}
             </button>
-            {pendingNotice}
-            {limitNotice}
           </>
         );
       }
       return (
         <>
-          <div role="alert" style={errorBoxStyle}>
-            {job.errorMessage ?? "WebM transcode failed."}
-            {job.errorCode ? <span style={{ opacity: 0.6 }}> [{job.errorCode}]</span> : null}
-          </div>
           <button
             ref={downloadButtonRef}
             onClick={() => void onDownload()}
@@ -2009,8 +1846,6 @@ function VideoCard({
           >
             {pendingPhase ? "Retrying…" : "Retry"}
           </button>
-          {pendingNotice}
-          {limitNotice}
         </>
       );
     }
@@ -2028,10 +1863,7 @@ function VideoCard({
           <span role="status" aria-live="polite" style={visuallyHiddenStyle}>
             DASH download in progress for {selectedName}.
           </span>
-          <div style={{ fontSize: 11, color: "#444" }}>{text}</div>
-          {pct !== null ? (
-            <progress value={done} max={total} aria-label={`Downloading ${selectedName}`} style={{ width: "100%", marginTop: 3 }} />
-          ) : null}
+          {text && pct !== null ? progressBar(done, total, `Downloading ${selectedName}`) : null}
           <button onClick={onCancelDash} style={{ ...buttonStyle, marginTop: 4 }}>
             Cancel
           </button>
@@ -2039,16 +1871,12 @@ function VideoCard({
       );
     }
     if (job.status === "delivery_pending" || job.status === "saving") {
-      return (
-        <div role="status" aria-live="polite" style={{ marginTop: 6, fontSize: 11, color: "#444" }}>
-          Muxing video + audio into one MP4…
-        </div>
-      );
+      return null;
     }
     if (job.status === "complete") {
       return (
         <>
-          <DownloadSuccessRow v={selected} job={job} />
+          {showInFolderButton}
           {downloadAgain}
         </>
       );
@@ -2056,7 +1884,6 @@ function VideoCard({
     if (job.status === "cancelled") {
       return (
         <>
-          <div role="status" style={noteBoxStyle}>Download cancelled.</div>
           <button
             ref={downloadButtonRef}
             onClick={() => void onDownload()}
@@ -2065,12 +1892,10 @@ function VideoCard({
           >
             {pendingPhase ? "Starting…" : "Try again"}
           </button>
-          {pendingNotice}
-          {limitNotice}
         </>
       );
     }
-    return renderStreamError(job, "Download failed.");
+    return renderStreamError(job);
   }
 
   const sourceHost = hostname(selected.url);
@@ -2078,26 +1903,12 @@ function VideoCard({
   const alternateOptions = groupedAssets.filter((item) => item.id !== selected.id);
   const statusLine = selectCardStatusLine({
     progress: progressStatusText(),
-    error: errorStatusText(),
     pending: pendingStatusText(),
+    error: errorStatusText(),
+    complete: completeStatusText(),
     info: mediaInfoLine(selected, job),
-    hasJob: Boolean(job) || quickCapture.mode !== "none",
+    hasJob: Boolean(job) || quickCapture.mode !== "none" || Boolean(picker),
   });
-  const standaloneStatusLine =
-    titleError ||
-    (
-      !picker &&
-      pendingPhase === null &&
-      !limitBlocked &&
-      quickCapture.mode === "none" &&
-      !quickCaptureStartBlocked &&
-      !previousStartUnresolved &&
-      !acceptedStart &&
-      !immediateError &&
-      !job
-    )
-      ? statusLine
-      : null;
   const sizeLine = selected.kind === "hls" || selected.kind === "dash"
     ? null
     : fmtBytes(selected.sizeBytes);
@@ -2240,7 +2051,7 @@ function VideoCard({
               event.currentTarget.blur();
             } else if (event.key === "Escape") {
               event.preventDefault();
-              revertTitleDraft();
+              escapeTitleDraft();
               event.currentTarget.blur();
             }
           }}
@@ -2264,12 +2075,7 @@ function VideoCard({
       {sizeLine ? (
         <div style={{ color: "#6f7c72", fontSize: 11, marginTop: 4 }}>{sizeLine}</div>
       ) : null}
-      {alternateError ? (
-        <div role="alert" aria-live="assertive" style={{ ...errorBoxStyle, marginTop: 6 }}>
-          {alternateError}
-        </div>
-      ) : null}
-      <Diagnostics status={standaloneStatusLine} />
+      <Diagnostics status={statusLine} />
       {renderAction()}
       <div style={{ position: "relative", marginTop: 7 }}>
         <button
@@ -3122,17 +2928,7 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
   const videoGroups = groupMedia(visibleVideos);
   const stillGroups = groupMedia(visibleStills);
   const activeGroups = mediaFilter === "videos" ? videoGroups : stillGroups;
-  const sharedTitleCounts = (() => {
-    const byTitle = new Map<string, Set<string>>();
-    for (const item of visibleVideos) {
-      const key = item.pageTitle?.trim().toLocaleLowerCase("en-US");
-      if (!key) continue;
-      const set = byTitle.get(key) ?? new Set<string>();
-      set.add(item.id);
-      byTitle.set(key, set);
-    }
-    return byTitle;
-  })();
+  const sharedTitleCounts = sharedCleanTitleCountsByMediaId(visibleMedia);
   const draftItems = captureDraft
     ? captureDraft.orderedItemIds.map((itemId) => captureDraft.items[itemId])
     : [];
@@ -3198,9 +2994,7 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
   }
 
   function sharedTitleCountFor(media: DetectedVideo): number {
-    const key = media.pageTitle?.trim().toLocaleLowerCase("en-US");
-    if (!key) return 1;
-    return sharedTitleCounts.get(key)?.size ?? 1;
+    return sharedTitleCounts.get(media.id) ?? 1;
   }
 
   function customStemForGroup(group: MediaGroup): string | undefined {

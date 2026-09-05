@@ -128,6 +128,17 @@ describe("validateCustomDownloadStem", () => {
     });
   });
 
+  it("normalizes canonically equivalent customer stems consistently", () => {
+    expect(validateCustomDownloadStem("Cafe\u0301")).toEqual({
+      ok: true,
+      stem: "Café",
+    });
+    expect(validateCustomDownloadStem("Café")).toEqual({
+      ok: true,
+      stem: "Café",
+    });
+  });
+
   it("rejects stems over the download basename limit", () => {
     expect(validateCustomDownloadStem("x".repeat(141))).toEqual({
       ok: false,
@@ -158,5 +169,30 @@ describe("validateCustomDownloadStem", () => {
       ok: false,
       reason: "Use at least one letter or number in this title.",
     });
+  });
+
+  it.each([".profile", "title.", "title "])(
+    "rejects custom stems with leading dots or trailing dots/spaces: %s",
+    (input) => {
+      expect(validateCustomDownloadStem(input)).toEqual({
+        ok: false,
+        reason: "Titles cannot start with a dot or end with a dot or space.",
+      });
+    },
+  );
+
+  it.each(["CON", "PRN", "AUX", "NUL", "COM1", "LPT1"])(
+    "rejects reserved Windows custom stem %s",
+    (input) => {
+      expect(validateCustomDownloadStem(input)).toEqual({
+        ok: false,
+        reason: "Choose a title that is not a reserved Windows filename.",
+      });
+    },
+  );
+
+  it("keeps extension-like text only as part of the stem when it is valid", () => {
+    expect(validateCustomDownloadStem("evil.exe")).toEqual({ ok: true, stem: "evil.exe" });
+    expect(validateCustomDownloadStem("x.mp4.exe")).toEqual({ ok: true, stem: "x.mp4.exe" });
   });
 });

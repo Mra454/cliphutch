@@ -1,6 +1,6 @@
 import type { DetectedVideo, MediaKind } from "../types";
 import type { FilenameTemplate } from "./storage-local";
-import { validateCustomDownloadStem } from "./download-path";
+import { sanitizeDownloadStem, validateCustomDownloadStem } from "./download-path";
 
 const RESERVED_NAMES = new Set([
   "CON", "PRN", "AUX", "NUL",
@@ -10,20 +10,29 @@ const RESERVED_NAMES = new Set([
   "LPT6", "LPT7", "LPT8", "LPT9",
 ]);
 
-const KIND_DEFAULT_EXT: Record<MediaKind, string> = {
-  direct: ".mp4",
-  // HLS is always assembled and muxed into an MP4 before saving now; the disk
-  // save path forces ".mp4" via forcedExtension, but this default matters for
-  // the display-name path in the popup, so it must not say ".ts".
-  hls: ".mp4",
-  dash: ".mp4",
-  image: ".jpg",
-};
-
 const MAX_LEN = 200;
 
 // Playlist/manifest extensions are never the saved container.
 const STREAM_EXTS = new Set([".m3u8", ".mpd"]);
+const DIRECT_CONTENT_TYPE_EXTS = new Map<string, string>([
+  ["video/mp4", ".mp4"],
+  ["video/webm", ".webm"],
+  ["video/quicktime", ".mov"],
+  ["video/x-m4v", ".m4v"],
+  ["video/x-matroska", ".mkv"],
+  ["audio/mpeg", ".mp3"],
+  ["audio/mp4", ".m4a"],
+]);
+const IMAGE_CONTENT_TYPE_EXTS = new Map<string, string>([
+  ["image/jpeg", ".jpg"],
+  ["image/jpg", ".jpg"],
+  ["image/png", ".png"],
+  ["image/gif", ".gif"],
+  ["image/webp", ".webp"],
+  ["image/avif", ".avif"],
+  ["image/svg+xml", ".svg"],
+  ["image/bmp", ".bmp"],
+]);
 
 export type InferFilenameOptions = {
   forcedExtension?: string;
@@ -56,12 +65,10 @@ export function inferFilename(
   const basenameExt = basename ? extensionOf(basename) : undefined;
   const usableBasenameExt =
     basenameExt && !STREAM_EXTS.has(basenameExt) ? basenameExt : undefined;
+  const extensionPolicy = mediaExtensionPolicy(video, forcedExt);
   const targetExt =
-    forcedExt ??
-    dispExt ??
-    usableBasenameExt ??
-    KIND_DEFAULT_EXT[video.kind] ??
-    ".mp4";
+    firstAllowedExtension([dispExt, usableBasenameExt], extensionPolicy.allowed) ??
+    extensionPolicy.fallback;
 
   const customStem = opts.customStem === undefined
     ? undefined
@@ -75,8 +82,10 @@ export function inferFilename(
         sharedTitleCount: opts.sharedTitleCount,
       });
   stem = appendVariantLabel(stem, opts.variantLabel);
-  stem = stem.replace(/[. ]+$/, "");
-  stem = sanitize(stem);
+  stem = sanitizeDownloadStem(stem, {
+    fallback: fallbackStem(video.pageUrl ?? video.url),
+    maxLength: MAX_LEN,
+  });
 
   if (stem && RESERVED_NAMES.has(stem.toUpperCase())) {
     stem = "_" + stem;
@@ -156,10 +165,8 @@ function titleLooksBrandLike(input: {
     const titleKey = titleKeyForComparison(input.cleanedTitle);
     const registrable = registrableLabel(url.hostname);
     if (registrable && titleKey === titleKeyForComparison(registrable)) return true;
-    const raw = input.rawTitle?.trim() ?? "";
-    const hasSeparator = /\s(?:[|:–—-])\s/.test(raw);
-    const siteRoot = (url.pathname === "" || url.pathname === "/") && !url.search && !url.hash;
-    return siteRoot && !hasSeparator && titleKey === titleKeyForComparison(raw);
+    const fullHostSansTld = hostnameSansTld(url.hostname);
+    return Boolean(fullHostSansTld && titleKey === titleKeyForComparison(fullHostSansTld));
   } catch {
     return false;
   }
@@ -180,6 +187,13 @@ function registrableLabel(hostname: string): string | undefined {
     return labels[labels.length - 3];
   }
   return second;
+}
+
+function hostnameSansTld(hostname: string): string | undefined {
+  const labels = hostname.toLocaleLowerCase("en-US").replace(/\.$/, "").split(".").filter(Boolean);
+  if (labels.length === 0) return undefined;
+  if (labels.length === 1) return labels[0];
+  return labels.slice(0, -1).join(".");
 }
 
 // Segment/manifest artifacts and placeholder stems that carry no signal about
@@ -314,7 +328,7 @@ const PLATFORM_SUFFIXES = new Set([
   "bitchute", "odysee", "loom", "vidyard", "brightcove", "jwplayer",
 ]);
 
-function cleanTitle(title?: string): string | undefined {
+export function cleanTitle(title?: string): string | undefined {
   if (!title) return undefined;
   const t = title.trim();
   if (!t) return undefined;
@@ -378,10 +392,38 @@ function normalizeExt(ext?: string): string | undefined {
   return ext.startsWith(".") ? ext.toLowerCase() : "." + ext.toLowerCase();
 }
 
-function sanitize(s: string): string {
-  let out = s.normalize("NFC");
-  out = out.replace(/\.\.+[\\/]?/g, "_");
-  // eslint-disable-next-line no-control-regex
-  out = out.replace(/[\\/:*?"<>|\x00-\x1f]/g, "_");
-  return out.trim();
+function normalizeContentType(value?: string): string | undefined {
+  const type = value?.split(";")[0]?.trim().toLocaleLowerCase("en-US");
+  return type || undefined;
+}
+
+function mediaExtensionPolicy(
+  video: DetectedVideo,
+  forcedExt: string | undefined,
+): { fallback: string; allowed: ReadonlySet<string> } {
+  if (forcedExt) {
+    return { fallback: forcedExt, allowed: new Set([forcedExt]) };
+  }
+  if (video.kind === "hls" || video.kind === "dash") {
+    return { fallback: ".mp4", allowed: new Set([".mp4"]) };
+  }
+  const contentType = normalizeContentType(video.contentType);
+  if (video.kind === "image") {
+    const fallback = contentType ? IMAGE_CONTENT_TYPE_EXTS.get(contentType) ?? ".jpg" : ".jpg";
+    const allowed = contentType === "image/jpeg" || contentType === "image/jpg"
+      ? new Set([".jpg", ".jpeg"])
+      : new Set([fallback]);
+    return { fallback, allowed };
+  }
+  const fallback = contentType ? DIRECT_CONTENT_TYPE_EXTS.get(contentType) ?? ".mp4" : ".mp4";
+  return { fallback, allowed: new Set([fallback]) };
+}
+
+function firstAllowedExtension(
+  candidates: Array<string | undefined>,
+  allowed: ReadonlySet<string>,
+): string | undefined {
+  return candidates.find((candidate): candidate is string =>
+    candidate !== undefined && allowed.has(candidate)
+  );
 }
