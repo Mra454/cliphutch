@@ -4307,10 +4307,13 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
                       captureRunOutcomeUnknown
                     }
                     aria-describedby={`${inputId}-source`}
-                    onChange={(event) => setCapturePageLabelInputs((current) => ({
-                      ...current,
-                      [group.pageUrl]: event.currentTarget.value,
-                    }))}
+                    onChange={(event) => {
+                      const value = event.currentTarget.value;
+                      setCapturePageLabelInputs((current) => ({
+                        ...current,
+                        [group.pageUrl]: value,
+                      }));
+                    }}
                     onKeyDown={(event) => {
                       if (event.key === "Enter" && changed) {
                         event.preventDefault();
