@@ -8,6 +8,8 @@ const required = [
   "fixtures/dash-test/audio.m4a",
   "../fixtures/video-test-page/hls-simple/segment0.ts",
   "../fixtures/video-test-page/hls-encrypted/segment0.ts",
+  "../fixtures/video-test-page/hls-master-separate-audio-ts/video/segment0.ts",
+  "../fixtures/video-test-page/hls-master-separate-audio-ts/audio/segment0.ts",
 ];
 
 for (const path of required) {

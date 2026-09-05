@@ -8,7 +8,6 @@ import {
   EmptyManifestError,
   HlsDownloadError,
   LiveStreamError,
-  MixedContainerAudioError,
   NetworkError,
   ParseError,
   SizeCapError,
@@ -18,7 +17,7 @@ import {
 import { classifyHlsManifestForDrm } from "../lib/drm";
 import { HLS_SEGMENT_FETCH_CONCURRENCY } from "../lib/constants";
 import { inspectFmp4Init, muxFmp4 } from "./dash-mux";
-import { transmuxTsAudioToFmp4, transmuxTsToMp4 } from "./ts-audio-to-fmp4";
+import { transmuxTsAudioToFmp4, transmuxTsToMp4, transmuxTsVideoToFmp4 } from "./ts-audio-to-fmp4";
 import {
   buildHlsCryptoPlan,
   createKeyCache,
@@ -45,8 +44,7 @@ export type DownloadHlsOptions = {
   // Takes precedence over the highest-bandwidth auto-pick.
   variantUrl?: string;
   // Resolved URI of a separate audio rendition to download in parallel and
-  // mux into the output MP4. Required for separate-audio variants. Both the
-  // video variant and the audio rendition must be fMP4 (Stage 1 limitation).
+  // mux into the output MP4. Required for separate-audio variants.
   audioUrl?: string;
   /** Require the fresh master to name this exact video/default-audio tuple. */
   exactVariantSelection?: boolean;
@@ -485,11 +483,6 @@ export async function downloadHls(
     audioInit = detectFmp4Init(audioSegments, audioPlan);
     audioBaseUrl = audioRenditionUrl;
 
-    // Separate MPEG-TS audio can be transmuxed to fMP4 before muxing. The
-    // selected video variant still needs to be fMP4 for the final MP4 muxer.
-    if (!videoInit) {
-      throw new MixedContainerAudioError();
-    }
   }
 
   // === Step 3: size cap estimate ===
@@ -607,6 +600,17 @@ export async function downloadHls(
     // into a single MP4.
     if (audioRenditionUrl && videoInitBytes) {
       const videoBytes = concatBuffers([videoInitBytes, ...videoBuffers]);
+      const audioBytes = audioInitBytes
+        ? concatBuffers([audioInitBytes, ...audioBuffers])
+        : transmuxTsAudioToFmp4(audioBuffers);
+      const muxed = await muxFmp4(videoBytes, audioBytes);
+      return new Blob([muxed as BlobPart], { type: "video/mp4" });
+    }
+
+    // Branch A2: separate-audio MPEG-TS video + fMP4 or MPEG-TS AAC audio —
+    // transmux any TS side to fMP4, then mux into a single MP4.
+    if (audioRenditionUrl && !videoInit) {
+      const videoBytes = transmuxTsVideoToFmp4(videoBuffers);
       const audioBytes = audioInitBytes
         ? concatBuffers([audioInitBytes, ...audioBuffers])
         : transmuxTsAudioToFmp4(audioBuffers);

@@ -49,8 +49,7 @@ export type HlsMediaPlaylistDisabledCodeV1 =
   | "invalid_duration"
   | "discontinuity"
   | "init_map_change"
-  | "raw_aac"
-  | "separate_audio_requires_fmp4";
+  | "raw_aac";
 
 type HlsMediaPlaylistInspectionBaseV1 = {
   hasInitMap: boolean;
@@ -69,11 +68,6 @@ export type HlsMediaPlaylistInspectionV1 =
       disabledReason: VariantDisabledReasonV1;
       code: HlsMediaPlaylistDisabledCodeV1;
     });
-
-export type InspectHlsMediaPlaylistOptionsV1 = {
-  /** Stage 1 can mux separate HLS audio only when video is fMP4. */
-  requireFmp4VideoForSeparateAudio?: boolean;
-};
 
 function hlsFailure(
   code: HlsMediaPlaylistDisabledCodeV1,
@@ -129,7 +123,6 @@ function declaredHlsDurations(text: string): number[] | undefined {
  */
 export function inspectHlsMediaPlaylistV1(
   text: string,
-  options: InspectHlsMediaPlaylistOptionsV1 = {},
 ): HlsMediaPlaylistInspectionV1 {
   if (text.length > HLS_MEDIA_PLAYLIST_CHAR_LIMIT) {
     return hlsFailure("manifest_too_large", "unsupported_manifest_shape");
@@ -188,12 +181,6 @@ export function inspectHlsMediaPlaylistV1(
   }
   if (durationSec <= 0) {
     return hlsFailure("invalid_duration", "invalid_media", facts);
-  }
-  if (options.requireFmp4VideoForSeparateAudio && !hasInitMap) {
-    return hlsFailure("separate_audio_requires_fmp4", "unsupported_audio", {
-      ...facts,
-      durationSec,
-    });
   }
   return { supported: true, hasInitMap, durationSec, container };
 }
@@ -467,7 +454,7 @@ export function hlsRawVariantOptionV1(
 
   const separateAudioFailure = variant.audioRenditionUri === undefined
     ? undefined
-    : !video.hasInitMap || audio === undefined
+    : audio === undefined
       ? "unsupported_audio"
       : !audio.supported
         ? audio.disabledReason === "drm" || audio.disabledReason === "live"

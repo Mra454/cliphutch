@@ -133,23 +133,16 @@ describe("inspectHlsMediaPlaylistV1", () => {
     });
   });
 
-  it("requires fMP4 video when a separate audio rendition will be muxed", () => {
-    expect(
-      inspectHlsMediaPlaylistV1(TS_VOD, {
-        requireFmp4VideoForSeparateAudio: true,
-      }),
-    ).toMatchObject({
-      supported: false,
-      code: "separate_audio_requires_fmp4",
-      disabledReason: "unsupported_audio",
+  it("supports TS video when a separate audio rendition will be muxed", () => {
+    expect(inspectHlsMediaPlaylistV1(TS_VOD)).toMatchObject({
+      supported: true,
       durationSec: 10.5,
       container: "video/mp2t",
     });
-    expect(
-      inspectHlsMediaPlaylistV1(FMP4_VOD, {
-        requireFmp4VideoForSeparateAudio: true,
-      }),
-    ).toMatchObject({ supported: true, container: "video/mp4" });
+    expect(inspectHlsMediaPlaylistV1(FMP4_VOD)).toMatchObject({
+      supported: true,
+      container: "video/mp4",
+    });
   });
 
   it("does not misclassify a declared raw AAC rendition as MPEG-TS", () => {
@@ -370,9 +363,7 @@ unfamiliar.m3u8
 #EXT-X-STREAM-INF:BANDWIDTH=2400000,AVERAGE-BANDWIDTH=1800000,RESOLUTION=1280x720,AUDIO="aud"
 video.m3u8?token=one
 `);
-    const video = inspectHlsMediaPlaylistV1(FMP4_VOD, {
-      requireFmp4VideoForSeparateAudio: true,
-    });
+    const video = inspectHlsMediaPlaylistV1(FMP4_VOD);
     const audio = inspectHlsMediaPlaylistV1(
       FMP4_VOD.replace("#EXTINF:4.5,", "#EXTINF:6,"),
     );
@@ -404,9 +395,7 @@ video.m3u8?token=${token}
       return hlsRawVariantOptionV1(
         variant,
         `https://cdn.example.test/master.m3u8?master=${token}`,
-        inspectHlsMediaPlaylistV1(FMP4_VOD, {
-          requireFmp4VideoForSeparateAudio: true,
-        }),
+        inspectHlsMediaPlaylistV1(FMP4_VOD),
         inspectHlsMediaPlaylistV1(FMP4_VOD),
       );
     };
@@ -431,7 +420,7 @@ video.m3u8?token=${token}
     }
   });
 
-  it("supports TS separate audio with fMP4 video but rejects separate audio with TS video", () => {
+  it("supports separate TS audio with fMP4 or TS video", () => {
     const [variant] = parseMasterVariants(`#EXTM3U
 #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="Main",DEFAULT=YES,URI="audio.m3u8"
 #EXT-X-STREAM-INF:BANDWIDTH=1000000,AUDIO="aud"
@@ -450,13 +439,16 @@ video.m3u8
       durationSec: 10.5,
     });
 
-    expect(
-      hlsRawVariantOptionV1(
-        variant,
-        "https://cdn.example.test/master.m3u8",
-        inspectHlsMediaPlaylistV1(TS_VOD),
-        tsAudio,
-      ),
-    ).toMatchObject({ disabledReason: "unsupported_audio" });
+    const tsVideo = hlsRawVariantOptionV1(
+      variant,
+      "https://cdn.example.test/master.m3u8",
+      inspectHlsMediaPlaylistV1(TS_VOD),
+      tsAudio,
+    );
+    expect(tsVideo?.disabledReason).toBeUndefined();
+    expect(tsVideo).toMatchObject({
+      container: "video/mp2t",
+      durationSec: 10.5,
+    });
   });
 });

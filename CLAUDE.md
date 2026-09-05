@@ -80,7 +80,7 @@ Open release work:
 
 ## Option C + product-improvement work — branch not yet merged
 
-Active branch: **`option-c-stage-1-separate-audio`** (pushed, ahead of master, **no PRs open** when checked on 2026-08-28). Goal was: download a single playable MP4 containing the selected video variant plus the default audio rendition for separate-audio HLS (Squarespace, Apple advanced fMP4, modern Vimeo non-DRM, Wistia). That shipped, then a larger product-improvement pass (2026-07-02/03) landed on the same branch off a 4-agent audit + Codex-reviewed plan.
+Active branch: **`option-c-stage-1-separate-audio`** (pushed, ahead of master, **no PRs open** when checked on 2026-08-28). Goal was: download a single playable MP4 containing the selected video variant plus the default audio rendition for separate-audio HLS, including fMP4 and MPEG-TS video with supported AAC audio (Squarespace, Apple advanced fMP4, modern Vimeo non-DRM, Wistia). The first fMP4 scope shipped, then a larger product-improvement pass (2026-07-02/03) landed on the same branch off a 4-agent audit + Codex-reviewed plan.
 
 **Shipped (all committed, 295 tests pass, build + audit clean):**
 
@@ -88,6 +88,7 @@ Active branch: **`option-c-stage-1-separate-audio`** (pushed, ahead of master, *
 |---|---|---|
 | Stage 1 / 2A | `02fb183`, `178a184` | separate-audio fMP4 + fMP4 (`muxFmp4`, `MixedContainerAudioError`); byte-range segment fetch (`fetchByteRange`, `ByteRange*Error`) |
 | Stage 2B/2C | inside `cbd2b1e` (5/14 v0.1.1 resubmission) | `mux.js`, `transmuxTsAudioToFmp4()`, mixed fMP4-video + MPEG-TS-audio path |
+| TS video + separate audio | (this branch, uncommitted) | `transmuxTsVideoToFmp4` + mux branch A2; inspection no longer requires fMP4 video for separate audio |
 | Naming (Track A) | `6be9b5d`, `d96df5d` | machine-noise demotion in `lib/filename.ts` (hashes/UUIDs/camera/`hash_res`/generic-manifest stems lose to page title); `"auto"` FilenameTemplate default; honors the Options filenameTemplate setting; host+date fallback; resolution qualifier; popup preview = saved name |
 | Reliability (Track C) | `315fddc`, `ce9505c`, `8cf6493` | `lib/session-jobs` serialized job writes + terminal guards (stuck-"running" fix); segment pools abort siblings on first failure; lost-completion reconcile; quota charged once on completion, not kickoff |
 | Recovery (B2) | `b36b85c`, `2d180a0`, `e31e447`, `60bbfd6` | redirect-resolved URL classification; per-tab `addOrUpdateVideo` mutex; `RawAacAudioError` ADTS sniff; WebM DNR header replay; SIZE_CAP "Download anyway"; captured headers persisted to `chrome.storage.session` (`lib/captured-headers`) + deterministic FNV-1a rule IDs surviving SW restart |

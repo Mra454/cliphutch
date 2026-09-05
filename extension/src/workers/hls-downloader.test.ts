@@ -14,6 +14,16 @@ vi.mock("./dash-mux", () => ({
 
 vi.mock("./ts-audio-to-fmp4", () => ({
   transmuxTsAudioToFmp4: vi.fn(() => new Uint8Array([0x61, 0x75, 0x64, 0x69, 0x6f])),
+  transmuxTsVideoToFmp4: vi.fn((segments: Uint8Array[]) => {
+    const total = segments.reduce((sum, seg) => sum + seg.length, 0);
+    const output = new Uint8Array(total);
+    let offset = 0;
+    for (const segment of segments) {
+      output.set(segment, offset);
+      offset += segment.length;
+    }
+    return output;
+  }),
   transmuxTsToMp4: vi.fn((segments: Uint8Array[]) => {
     const total = segments.reduce((sum, seg) => sum + seg.length, 0);
     const output = new Uint8Array(total);
@@ -29,7 +39,7 @@ vi.mock("./ts-audio-to-fmp4", () => ({
 import { downloadHls } from "./hls-downloader";
 import { muxFmp4 } from "./dash-mux";
 import { HLS_SEGMENT_FETCH_CONCURRENCY } from "../lib/constants";
-import { transmuxTsAudioToFmp4, transmuxTsToMp4 } from "./ts-audio-to-fmp4";
+import { transmuxTsAudioToFmp4, transmuxTsToMp4, transmuxTsVideoToFmp4 } from "./ts-audio-to-fmp4";
 import {
   AccessDeniedError,
   ByteRangeOutOfBoundsError,
@@ -418,6 +428,7 @@ segment.ts
 
 describe("downloadHls — happy path", () => {
   it("simple VOD: fetches segments, transmuxes MPEG-TS, returns MP4 Blob", async () => {
+    vi.mocked(transmuxTsToMp4).mockClear();
     const f = makeFetch({
       "https://a/p.m3u8": { body: SIMPLE_VOD },
       "https://a/seg0.ts": { body: SEG_BYTES },
@@ -689,6 +700,142 @@ a0.ts
 
     expect(blob.type).toBe("video/mp4");
     expect(transmuxTsAudioToFmp4).toHaveBeenCalledWith([SEG]);
+  });
+});
+
+describe("downloadHls — separate-audio MPEG-TS video", () => {
+  const MASTER = `#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",NAME="English",DEFAULT=YES,URI="audio.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=1500000,RESOLUTION=1280x720,AUDIO="aac"
+video.m3u8
+`;
+  const VIDEO_TS = `#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-TARGETDURATION:2
+#EXTINF:2.0,
+v0.ts
+#EXTINF:2.0,
+v1.ts
+#EXT-X-ENDLIST
+`;
+  const AUDIO_TS = `#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-TARGETDURATION:2
+#EXTINF:2.0,
+a0.ts
+#EXTINF:2.0,
+a1.ts
+#EXT-X-ENDLIST
+`;
+  const AUDIO_FMP4 = `#EXTM3U
+#EXT-X-VERSION:6
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXT-X-TARGETDURATION:2
+#EXT-X-MAP:URI="ainit.mp4"
+#EXTINF:2.0,
+a0.m4s
+#EXT-X-ENDLIST
+`;
+  const V0 = new Uint8Array([0x76, 0x30]);
+  const V1 = new Uint8Array([0x76, 0x31, 0x31]);
+  const A0 = new Uint8Array([0x61, 0x30]);
+  const A1 = new Uint8Array([0x61, 0x31]);
+  const A_INIT = new Uint8Array([0x61, 0x69, 0x6e, 0x69, 0x74]);
+  const A_M4S = new Uint8Array([0x61, 0x6d, 0x34, 0x73]);
+
+  it("transmuxes TS video and TS audio before muxing into one MP4", async () => {
+    vi.mocked(muxFmp4).mockClear();
+    vi.mocked(transmuxTsVideoToFmp4).mockClear();
+    vi.mocked(transmuxTsAudioToFmp4).mockClear();
+    vi.mocked(transmuxTsToMp4).mockClear();
+
+    const f = makeFetch({
+      "https://a/master.m3u8": { body: MASTER },
+      "https://a/video.m3u8": { body: VIDEO_TS },
+      "https://a/audio.m3u8": { body: AUDIO_TS },
+      "https://a/v0.ts": { body: V0 },
+      "https://a/v1.ts": { body: V1 },
+      "https://a/a0.ts": { body: A0 },
+      "https://a/a1.ts": { body: A1 },
+    });
+
+    const blob = await downloadHls("https://a/master.m3u8", {
+      onProgress: noProgress,
+      signal: noSignal,
+      sizeCapBytes: cap,
+      fetchImpl: f,
+    });
+
+    expect(blob.type).toBe("video/mp4");
+    expect(transmuxTsVideoToFmp4).toHaveBeenCalledWith([V0, V1]);
+    expect(transmuxTsAudioToFmp4).toHaveBeenCalledWith([A0, A1]);
+    expect(muxFmp4).toHaveBeenCalledWith(
+      new Uint8Array([0x76, 0x30, 0x76, 0x31, 0x31]),
+      new Uint8Array([0x61, 0x75, 0x64, 0x69, 0x6f]),
+    );
+    expect(transmuxTsToMp4).not.toHaveBeenCalled();
+  });
+
+  it("transmuxes TS video and concatenates fMP4 audio before muxing", async () => {
+    vi.mocked(muxFmp4).mockClear();
+    vi.mocked(transmuxTsVideoToFmp4).mockClear();
+    vi.mocked(transmuxTsAudioToFmp4).mockClear();
+    vi.mocked(transmuxTsToMp4).mockClear();
+
+    const f = makeFetch({
+      "https://a/master.m3u8": { body: MASTER },
+      "https://a/video.m3u8": { body: VIDEO_TS },
+      "https://a/audio.m3u8": { body: AUDIO_FMP4 },
+      "https://a/v0.ts": { body: V0 },
+      "https://a/v1.ts": { body: V1 },
+      "https://a/ainit.mp4": { body: A_INIT },
+      "https://a/a0.m4s": { body: A_M4S },
+    });
+
+    const blob = await downloadHls("https://a/master.m3u8", {
+      onProgress: noProgress,
+      signal: noSignal,
+      sizeCapBytes: cap,
+      fetchImpl: f,
+    });
+
+    expect(blob.type).toBe("video/mp4");
+    expect(transmuxTsVideoToFmp4).toHaveBeenCalledWith([V0, V1]);
+    expect(transmuxTsAudioToFmp4).not.toHaveBeenCalled();
+    expect(muxFmp4).toHaveBeenCalledWith(
+      new Uint8Array([0x76, 0x30, 0x76, 0x31, 0x31]),
+      new Uint8Array([0x61, 0x69, 0x6e, 0x69, 0x74, 0x61, 0x6d, 0x34, 0x73]),
+    );
+    expect(transmuxTsToMp4).not.toHaveBeenCalled();
+  });
+
+  it("keeps MPEG-TS embedded audio on Branch C when there is no audio rendition", async () => {
+    vi.mocked(muxFmp4).mockClear();
+    vi.mocked(transmuxTsVideoToFmp4).mockClear();
+    vi.mocked(transmuxTsAudioToFmp4).mockClear();
+    vi.mocked(transmuxTsToMp4).mockClear();
+
+    const f = makeFetch({
+      "https://a/video.m3u8": { body: VIDEO_TS },
+      "https://a/v0.ts": { body: V0 },
+      "https://a/v1.ts": { body: V1 },
+    });
+
+    const blob = await downloadHls("https://a/video.m3u8", {
+      onProgress: noProgress,
+      signal: noSignal,
+      sizeCapBytes: cap,
+      fetchImpl: f,
+    });
+
+    expect(blob.type).toBe("video/mp4");
+    expect(transmuxTsToMp4).toHaveBeenCalledWith([V0, V1]);
+    expect(transmuxTsVideoToFmp4).not.toHaveBeenCalled();
+    expect(transmuxTsAudioToFmp4).not.toHaveBeenCalled();
+    expect(muxFmp4).not.toHaveBeenCalled();
   });
 });
 

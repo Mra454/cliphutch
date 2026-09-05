@@ -56,6 +56,32 @@ export function transmuxTsAudioToFmp4(segments: Uint8Array[]): Uint8Array {
   return concatBuffers([audioInit, ...audioParts]);
 }
 
+export function transmuxTsVideoToFmp4(segments: Uint8Array[]): Uint8Array {
+  const transmuxer = new mux.mp4.Transmuxer({
+    keepOriginalTimestamps: true,
+    remux: false,
+  });
+  const videoParts: Uint8Array[] = [];
+  let videoInit: Uint8Array | undefined;
+
+  transmuxer.on("data", (segment) => {
+    if (segment.type !== "video") return;
+    videoInit ??= segment.initSegment;
+    videoParts.push(segment.data);
+  });
+
+  for (const seg of segments) {
+    transmuxer.push(seg);
+  }
+  transmuxer.flush();
+
+  if (!videoInit || videoParts.length === 0) {
+    throw new UnsupportedTsCodecError();
+  }
+
+  return concatBuffers([videoInit, ...videoParts]);
+}
+
 export function transmuxTsToMp4(segments: Uint8Array[]): Uint8Array {
   const transmuxer = new mux.mp4.Transmuxer();
   const parts: Uint8Array[] = [];

@@ -849,9 +849,7 @@ export class StreamVariantFetchRuntimeV1 {
         getText(videoUrl),
         audioUrl === undefined ? Promise.resolve(undefined) : getText(audioUrl),
       ]).then(([videoText, audioText]) => {
-        const video = inspectHlsMediaPlaylistV1(videoText, {
-          requireFmp4VideoForSeparateAudio: audioUrl !== undefined,
-        });
+        const video = inspectHlsMediaPlaylistV1(videoText);
         const audio = audioText === undefined
           ? undefined
           : inspectHlsMediaPlaylistV1(audioText);

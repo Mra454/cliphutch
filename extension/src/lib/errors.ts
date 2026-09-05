@@ -9,16 +9,6 @@ export class HlsDownloadError extends Error {
   }
 }
 
-export class MixedContainerAudioError extends HlsDownloadError {
-  constructor() {
-    super(
-      "MIXED_CONTAINER_AUDIO",
-      "This stream pairs fMP4 video with non-fMP4 audio. ClipHutch does not yet mux across container types.",
-    );
-    this.name = "MixedContainerAudioError";
-  }
-}
-
 export class UnsupportedTsCodecError extends HlsDownloadError {
   constructor() {
     super(

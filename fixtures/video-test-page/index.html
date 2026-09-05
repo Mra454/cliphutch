@@ -133,6 +133,34 @@
       </p>
     </section>
 
+    <section>
+      <h2>8. HLS — MPEG-TS video with separate MPEG-TS audio</h2>
+      <p>
+        Master uses a default <code>EXT-X-MEDIA TYPE=AUDIO</code> rendition.
+        Both video and audio playlists contain real MPEG-TS segments.
+      </p>
+      <button data-fetch="hls-master-separate-audio-ts/master.m3u8">Fetch master.m3u8</button>
+      <span class="status"></span>
+      <p class="expect">
+        <strong>Expect:</strong> download completes and the MP4 plays with
+        sound.
+      </p>
+    </section>
+
+    <section>
+      <h2>9. HLS — AES-128 MPEG-TS video with separate MPEG-TS audio</h2>
+      <p>
+        Master uses a default audio rendition. The video and audio playlists
+        are encrypted with separate AES-128 keys and sequence-derived IVs.
+      </p>
+      <button data-fetch="hls-master-separate-audio-ts-aes/master.m3u8">Fetch master.m3u8</button>
+      <span class="status"></span>
+      <p class="expect">
+        <strong>Expect:</strong> download completes and the MP4 plays with
+        sound.
+      </p>
+    </section>
+
     <script>
       document.querySelectorAll("button[data-fetch]").forEach((btn) => {
         const status = btn.nextElementSibling;
