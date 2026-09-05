@@ -1,6 +1,7 @@
 import type { DetectedVideo, MediaKind, MediaProvenance } from "../types";
 
 export const MAX_MEDIA_PROVENANCE_ENTRIES = 5;
+export const MAX_MEDIA_CHILD_URLS = 100;
 
 const MAX_ID_LENGTH = 256;
 const MAX_URL_LENGTH = 16_384;
@@ -101,6 +102,46 @@ function normalizePageUrl(value: unknown): string | undefined {
   }
 }
 
+function normalizeChildUrl(value: unknown): string | undefined {
+  const url = normalizeMediaUrl(value);
+  if (!url) return undefined;
+  try {
+    const parsed = new URL(url);
+    parsed.username = "";
+    parsed.password = "";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.href.length <= MAX_URL_LENGTH ? parsed.href : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeChildUrls(value: unknown, kind: MediaKind): string[] | undefined {
+  if (kind !== "hls" || !Array.isArray(value)) return undefined;
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+  if (
+    !lengthDescriptor ||
+    !("value" in lengthDescriptor) ||
+    !Number.isSafeInteger(lengthDescriptor.value) ||
+    lengthDescriptor.value < 0 ||
+    lengthDescriptor.value > MAX_MEDIA_CHILD_URLS
+  ) {
+    return undefined;
+  }
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (let index = 0; index < lengthDescriptor.value; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+    if (!descriptor || !("value" in descriptor)) return undefined;
+    const childUrl = normalizeChildUrl(descriptor.value);
+    if (!childUrl || seen.has(childUrl)) continue;
+    seen.add(childUrl);
+    result.push(childUrl);
+  }
+  return result.length > 0 ? result : undefined;
+}
+
 function finiteTimestamp(value: unknown): number | undefined {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
     ? value
@@ -186,6 +227,7 @@ export function normalizeDetectedVideo(value: unknown): DetectedVideo | undefine
       : [inferredProvenance(kind, contentType, contentDisposition, sizeBytes)];
     const familyId = boundedIdentifier(record.familyId);
     const hasCapturedReplayHeaders = record.hasCapturedReplayHeaders === true;
+    const childUrls = normalizeChildUrls(record.childUrls, kind);
 
     return {
       id,
@@ -203,11 +245,27 @@ export function normalizeDetectedVideo(value: unknown): DetectedVideo | undefine
       height,
       provenance,
       ...(hasCapturedReplayHeaders ? { hasCapturedReplayHeaders: true } : {}),
+      ...(childUrls === undefined ? {} : { childUrls }),
       familyId,
     };
   } catch {
     return undefined;
   }
+}
+
+function unionChildUrls(
+  left: readonly string[] | undefined,
+  right: readonly string[] | undefined,
+): string[] | undefined {
+  const result: string[] = [];
+  const seen = new Set<string>();
+  for (const value of [...(left ?? []), ...(right ?? [])]) {
+    if (seen.has(value)) continue;
+    seen.add(value);
+    result.push(value);
+    if (result.length >= MAX_MEDIA_CHILD_URLS) break;
+  }
+  return result.length > 0 ? result : undefined;
 }
 
 function unionProvenance(
@@ -311,6 +369,12 @@ export function mergeDetectedVideo(
         ? { hasCapturedReplayHeaders: true }
         : {}
     ),
+    ...(existing.kind === "hls"
+      ? (() => {
+          const childUrls = unionChildUrls(existing.childUrls, incoming.childUrls);
+          return childUrls === undefined ? {} : { childUrls };
+        })()
+      : {}),
     // Once assigned, family identity is immutable. Conflicting later evidence
     // clears it rather than moving the customer's selected group to a false
     // family. Metadata/network observations without a family do not clear it.

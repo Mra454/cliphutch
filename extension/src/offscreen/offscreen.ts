@@ -79,6 +79,7 @@ export type ListVariantsResult =
       kind: "hls" | "dash";
       variants: VariantOption[];
       durationSec?: number;
+      childUrls?: string[];
     }
   | { ok: false; error: string; code?: "TIMEOUT" | "MANIFEST_TOO_LARGE" | "FETCH_FAILED" };
 
@@ -406,7 +407,7 @@ async function listVariants(msg: ListVariantsMessage): Promise<ListVariantsResul
         // Variant playlist (no STREAM-INF). One implicit variant — the URL itself.
         return { ok: true, kind: "hls", variants: [{ id: msg.url, bandwidth: 0 }] };
       }
-      const parsed = parseMasterVariants(text);
+      const parsed = parseMasterVariants(text, msg.url);
       const variants: VariantOption[] = parsed.map((v) => ({
         id: new URL(v.uri, msg.url).href,
         bandwidth: v.bandwidth,
@@ -417,7 +418,16 @@ async function listVariants(msg: ListVariantsMessage): Promise<ListVariantsResul
           ? new URL(v.audioRenditionUri, msg.url).href
           : undefined,
       }));
-      return { ok: true, kind: "hls", variants };
+      const childUrls = [...new Set(parsed.flatMap((variant) => [
+        variant.identityInput?.uri,
+        variant.defaultAudioRendition?.identityUri ?? variant.audioRendition?.identityUri,
+      ].filter((url): url is string => Boolean(url))))];
+      return {
+        ok: true,
+        kind: "hls",
+        variants,
+        ...(childUrls.length === 0 ? {} : { childUrls }),
+      };
     }
 
     const manifest = parseMpd(text, msg.url);

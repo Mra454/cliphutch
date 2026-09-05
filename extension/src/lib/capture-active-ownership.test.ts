@@ -105,6 +105,7 @@ describe("active capture ownership", () => {
     expect(activeJobOwnsQuickPlan(leasedJob, plan)).toBe(false);
     expect(activeJobOwnsQuickPlan(leasedJob, plan, "lease-1")).toBe(true);
     expect(activeJobOwnsQuickPlan(leasedJob, plan, "lease-2")).toBe(false);
+    expect(activeJobOwnsQuickPlan(leasedJob, plan, leasedJob.snapshot.headerLeaseId)).toBe(true);
 
     const stream = createSingleCapturePlan({
       commandId: COMMAND,

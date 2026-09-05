@@ -88,6 +88,7 @@ import {
   type WorkspaceRoute,
   type WorkspaceSurface,
 } from "../lib/workspace-ui";
+import { isImmediateStartErrorRetryable } from "../lib/start-error-policy";
 
 type VariantOption = {
   id: string;
@@ -1522,6 +1523,7 @@ function VideoCard({
     }
 
     if (immediateError) {
+      const immediateRetryable = isImmediateStartErrorRetryable(immediateErrorCode);
       if (quickStartOutcomeUnknown) {
         return (
           <>
@@ -1556,15 +1558,17 @@ function VideoCard({
           >
             {immediateError}
           </div>
-          <button
-            ref={downloadButtonRef}
-            onClick={() => void onDownload()}
-            disabled={actionDisabled}
-            aria-label={`Retry downloading ${selectedName}`}
-            style={{ ...(actionDisabled ? disabledButtonStyle : buttonStyle), marginTop: 6 }}
-          >
-            {pendingPhase ? "Retrying…" : "Retry"}
-          </button>
+          {immediateRetryable ? (
+            <button
+              ref={downloadButtonRef}
+              onClick={() => void onDownload()}
+              disabled={actionDisabled}
+              aria-label={`Retry downloading ${selectedName}`}
+              style={{ ...(actionDisabled ? disabledButtonStyle : buttonStyle), marginTop: 6 }}
+            >
+              {pendingPhase ? "Retrying…" : "Retry"}
+            </button>
+          ) : null}
           {pendingNotice}
           {limitNotice}
         </>

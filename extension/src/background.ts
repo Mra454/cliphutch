@@ -54,6 +54,7 @@ import {
 import { handleCaptureDraftUiRequest } from "./lib/capture-draft-handler";
 import {
   claimCaptureHeaderLeaseBatch,
+  claimCaptureHeaderLease,
   createCaptureHeaderLease,
   getCaptureHeaderLease,
   getClaimedCaptureHeaderLease,
@@ -143,6 +144,12 @@ import { executeNativeCaptureJob } from "./lib/capture-native-runtime";
 import { preflightCaptureNativeSources } from "./lib/capture-native-preflight";
 import { verifyCaptureNativeMedia } from "./lib/capture-native-verification";
 import { createSingleCapturePlan } from "./lib/capture-single-plan";
+import {
+  prepareQuickCaptureHeaderLease,
+  retirePreparedQuickCaptureHeaderLease,
+  quickCaptureDownloadNeedsHeaderLease,
+  type ClaimedQuickCaptureHeaderLease,
+} from "./lib/quick-capture-lease";
 import {
   activeJobOwnsQuickPlan,
   activeRunOwnsReviewPlan,
@@ -803,6 +810,7 @@ function quickCaptureJobResponse(job: CaptureJobV1): DownloadResponse {
 
 async function reconcileQuickCaptureStartIntentUnlocked(
   intent: QuickCaptureStartIntentV1,
+  quickLease?: ClaimedQuickCaptureHeaderLease | null,
 ): Promise<DownloadResponse> {
   const result = await enqueueCaptureRun({
     plan: intent.plan,
@@ -810,8 +818,17 @@ async function reconcileQuickCaptureStartIntentUnlocked(
     licensed: intent.licensed,
     runId: intent.runId,
     now: intent.createdAt,
+    ...(quickLease ? { headerLeaseIdsByItemId: quickLease.headerLeaseIdsByItemId } : {}),
   });
   if (!result.ok) {
+    const quickLeaseReleased = await retirePreparedQuickCaptureHeaderLease(
+      quickLease,
+      {
+        now: () => Date.now(),
+        retireClaimedCaptureHeaderLease,
+      },
+    );
+    if (!quickLeaseReleased) throw new QuickCaptureStartPendingError();
     if (intent.status === "pending" && !result.releaseFailed) {
       const abandoned = await abandonQuickCaptureStartIntent({
         commandId: intent.commandId,
@@ -854,10 +871,11 @@ async function reconcileQuickCaptureStartIntentUnlocked(
 
 function reconcileQuickCaptureStartIntent(
   intent: QuickCaptureStartIntentV1,
+  quickLease?: ClaimedQuickCaptureHeaderLease | null,
 ): Promise<DownloadResponse> {
   return withKeyLock(
     CAPTURE_DRAFT_ACCEPTANCE_LOCK_KEY,
-    () => reconcileQuickCaptureStartIntentUnlocked(intent),
+    () => reconcileQuickCaptureStartIntentUnlocked(intent, quickLease),
   );
 }
 
@@ -983,6 +1001,7 @@ type ListVariantsResponse =
       variants: VariantOption[];
       durationSec?: number;
       sizeCapBytes: number;
+      childUrls?: string[];
     }
   | { ok: false; error: string };
 
@@ -1013,7 +1032,7 @@ async function findActiveQuickCaptureJob(
     for (const jobId of run.orderedJobIds) {
       const read = await getCaptureJob(jobId);
       if (!read.ok) return { ok: false };
-      if (read.job && activeJobOwnsQuickPlan(read.job, plan)) {
+      if (read.job && activeJobOwnsQuickPlan(read.job, plan, read.job.snapshot.headerLeaseId)) {
         return { ok: true, job: read.job };
       }
     }
@@ -1052,17 +1071,6 @@ async function handleSingleCaptureDownload(
       ok: false,
       code: "PREVIOUS_START_UNRESOLVED",
       error: "Reconcile the previous Capture Pack start before starting another download.",
-    };
-  }
-
-  if (
-    (media.kind === "hls" || media.kind === "dash" || isWebmDirectVideo(media)) &&
-    media.hasCapturedReplayHeaders
-  ) {
-    return {
-      ok: false,
-      code: "ADD_TO_HUTCH_REQUIRED",
-      error: "This source uses temporary page access. Add it to Hutch and Review it so ClipHutch can freeze that access safely.",
     };
   }
 
@@ -1145,12 +1153,64 @@ async function handleSingleCaptureDownload(
     const activeOwner = await findActiveQuickCaptureJob(prepared.plan);
     if (!activeOwner.ok) throw new QuickCaptureStartPendingError();
     if (activeOwner.job) return quickCaptureJobResponse(activeOwner.job);
+    let quickLease: ClaimedQuickCaptureHeaderLease | null = null;
+    if (quickCaptureDownloadNeedsHeaderLease(media)) {
+      let preparedJob: CaptureJobV1 | undefined;
+      try {
+        preparedJob = prepareCaptureJobs(prepared.plan, {
+          runId: `capture-run:v1:${prepared.commandUuid}`,
+        })[0];
+      } catch {
+        preparedJob = undefined;
+      }
+      if (!preparedJob) {
+        return {
+          ok: false,
+          code: "SOURCE_AUTH_FREEZE_FAILED",
+          error: "ClipHutch could not freeze this page's access for the download. Reload the page and try again.",
+        };
+      }
+      const preparedLease = await prepareQuickCaptureHeaderLease({
+        commandId: request.commandId,
+        sourceTabId: request.tabId,
+        media,
+        plan: prepared.plan,
+        job: preparedJob,
+        dependencies: {
+          now: () => Date.now(),
+          hasReplayableHeaders,
+          getCapturedHeaderEntry,
+          createCaptureHeaderLease,
+          claimCaptureHeaderLease,
+          releaseCaptureHeaderLease,
+          retireClaimedCaptureHeaderLease,
+          cleanupSweptCaptureLeaseDnrOwners: (leaseIds) =>
+            cleanupSweptCaptureLeaseDnrOwners(leaseIds, {
+              listOwners: listCaptureDnrOwners,
+              removeOwner: (owner) => removeCaptureLeasedHeaderRule(owner.jobKey, owner.leaseId),
+            }),
+          scheduleCaptureLeaseExpiryAlarm: () => scheduleCaptureLeaseExpiryAlarm(),
+        },
+      });
+      if (!preparedLease.ok) {
+        return { ok: false, code: preparedLease.code, error: preparedLease.error };
+      }
+      quickLease = preparedLease.lease;
+    }
     const created = await createQuickCaptureStartIntent({
       commandId: request.commandId,
       plan: prepared.plan,
       licensed: await isLicensed(),
     });
     if (!created.ok) {
+      const quickLeaseReleased = await retirePreparedQuickCaptureHeaderLease(
+        quickLease,
+        {
+          now: () => Date.now(),
+          retireClaimedCaptureHeaderLease,
+        },
+      );
+      if (!quickLeaseReleased) throw new QuickCaptureStartPendingError();
       if (created.reason === "unresolved_intent") {
         return {
           ok: false,
@@ -1167,7 +1227,7 @@ async function handleSingleCaptureDownload(
       }
       throw new QuickCaptureStartPendingError();
     }
-    return reconcileQuickCaptureStartIntentUnlocked(created.intent);
+    return reconcileQuickCaptureStartIntentUnlocked(created.intent, quickLease);
   });
 }
 
@@ -1509,10 +1569,17 @@ async function handleListVariantsRequest(
       type: "list-variants-start",
       url: video.url,
       kind: video.kind,
-    })) as { ok: true; kind: "hls" | "dash"; variants: VariantOption[]; durationSec?: number } | { ok: false; error: string };
+    })) as { ok: true; kind: "hls" | "dash"; variants: VariantOption[]; durationSec?: number; childUrls?: string[] } | { ok: false; error: string };
 
     if (!result || result.ok === false) {
       return { ok: false, error: (result && "error" in result && result.error) || "Manifest fetch failed" };
+    }
+
+    if (video.kind === "hls" && result.childUrls && result.childUrls.length > 0) {
+      await withKeyLock(
+        CAPTURE_DRAFT_ACCEPTANCE_LOCK_KEY,
+        () => addOrUpdateVideo(req.tabId, { ...video, childUrls: result.childUrls }),
+      );
     }
 
     const settings = await getSettings();

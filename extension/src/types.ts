@@ -31,6 +31,11 @@ export type DetectedVideo = {
    * to silently downgrade this record to a public source.
    */
   hasCapturedReplayHeaders?: boolean;
+  /**
+   * Query-redacted HLS child playlist URLs discovered from a parsed master.
+   * This is shelf presentation metadata only; execution revalidates manifests.
+   */
+  childUrls?: string[];
   // Only set for an authoritative family (for example, one img/srcset tree).
   // Filename, title, and CDN-directory similarities are not family evidence.
   familyId?: string;

@@ -108,10 +108,11 @@
       review/run context only in <code>chrome.storage.session</code>. They remain
       available if the source tab navigates or closes, then clear on browser
       restart, extension update, or <strong>Clear Hutch</strong>. If a selected
-      source needs approved replay headers, those headers may be copied into a
-      session-only item lease for no more than 60 minutes; the lease is never
-      used for previews, sent to ClipHutch, written to disk, or included in a
-      capture manifest.
+      source or stream download needs approved replay headers, those headers
+      may be copied into a session-only item lease for no more than 60 minutes.
+      The lease is never used for previews, sent to ClipHutch, written to disk,
+      or included in a capture manifest; a download's lease is released when
+      that download finishes.
     </p>
     <p class="lede" style="margin-top: 0.75em;">
       Every normal Capture Pack automatically saves a required, redacted
