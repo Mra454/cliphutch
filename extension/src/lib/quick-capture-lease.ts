@@ -64,6 +64,7 @@ export type PrepareQuickCaptureHeaderLeaseResult =
       ok: false;
       code: typeof QUICK_CAPTURE_SOURCE_AUTH_FREEZE_FAILED;
       error: typeof QUICK_CAPTURE_SOURCE_AUTH_FREEZE_MESSAGE;
+      cleanupPending?: true;
     };
 
 export function quickCaptureDownloadNeedsHeaderLease(media: DetectedVideo): boolean {
@@ -126,12 +127,15 @@ function quickCaptureLeaseBinding(input: {
 async function releaseDraftOwner(
   binding: CaptureHeaderLeaseBindingV1,
   dependencies: QuickCaptureLeaseDependencies,
-): Promise<void> {
-  await dependencies.releaseCaptureHeaderLease({
+): Promise<boolean> {
+  const released = await dependencies.releaseCaptureHeaderLease({
     ...binding,
     owner: { kind: "draft_item" },
     now: dependencies.now(),
   });
+  if (released.ok) return true;
+  await dependencies.scheduleCaptureLeaseExpiryAlarm();
+  return false;
 }
 
 export async function prepareQuickCaptureHeaderLease(input: {
@@ -166,8 +170,8 @@ export async function prepareQuickCaptureHeaderLease(input: {
     !await input.dependencies.cleanupSweptCaptureLeaseDnrOwners(created.sweptExpiredLeaseIds) ||
     !await input.dependencies.scheduleCaptureLeaseExpiryAlarm()
   ) {
-    await releaseDraftOwner(binding, input.dependencies);
-    return failure();
+    const released = await releaseDraftOwner(binding, input.dependencies);
+    return released ? failure() : { ...failure(), cleanupPending: true };
   }
 
   const owner = {
@@ -181,8 +185,8 @@ export async function prepareQuickCaptureHeaderLease(input: {
     now: input.dependencies.now(),
   });
   if (!claimed.ok) {
-    await releaseDraftOwner(binding, input.dependencies);
-    return failure();
+    const released = await releaseDraftOwner(binding, input.dependencies);
+    return released ? failure() : { ...failure(), cleanupPending: true };
   }
 
   return {

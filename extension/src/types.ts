@@ -36,6 +36,8 @@ export type DetectedVideo = {
    * This is shelf presentation metadata only; execution revalidates manifests.
    */
   childUrls?: string[];
+  /** Sticky shelf hint set when this HLS record was parsed as a master playlist. */
+  parsedAsMaster?: boolean;
   // Only set for an authoritative family (for example, one img/srcset tree).
   // Filename, title, and CDN-directory similarities are not family evidence.
   familyId?: string;

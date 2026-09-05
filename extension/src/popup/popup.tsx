@@ -1045,6 +1045,8 @@ function VideoCard({
     onFreezeQuickSelection(selected.id);
     commandIdRef.current = commandId;
     setPendingPhase(phase);
+    setImmediateError(null);
+    setImmediateErrorCode(null);
     setAcceptedStart(null);
     return commandId;
   }

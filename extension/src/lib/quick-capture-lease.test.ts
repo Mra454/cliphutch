@@ -264,6 +264,37 @@ describe("prepareQuickCaptureHeaderLease", () => {
     }));
   });
 
+  it("marks cleanup pending and rearms expiry cleanup when draft-owner release fails", async () => {
+    const d = deps();
+    d.claimCaptureHeaderLease = vi.fn(async () => ({
+      ok: false as const,
+      reason: "lease_conflict" as const,
+      leaseId: `capture-header-lease-v1:${uuid}`,
+    }));
+    d.releaseCaptureHeaderLease = vi.fn(async () => ({
+      ok: false as const,
+      reason: "storage_unavailable" as const,
+      operation: "set" as const,
+      commitState: "unknown" as const,
+      message: "set failed",
+    }));
+
+    await expect(prepareQuickCaptureHeaderLease({
+      commandId,
+      sourceTabId: 7,
+      media: detected(),
+      plan: plan(),
+      job: job(),
+      dependencies: d,
+    })).resolves.toEqual({
+      ok: false,
+      code: QUICK_CAPTURE_SOURCE_AUTH_FREEZE_FAILED,
+      error: QUICK_CAPTURE_SOURCE_AUTH_FREEZE_MESSAGE,
+      cleanupPending: true,
+    });
+    expect(d.scheduleCaptureLeaseExpiryAlarm).toHaveBeenCalledTimes(2);
+  });
+
   it("does not create or claim a lease for non-header sources", async () => {
     const d = deps();
     const result = await prepareQuickCaptureHeaderLease({

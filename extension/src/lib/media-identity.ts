@@ -228,6 +228,7 @@ export function normalizeDetectedVideo(value: unknown): DetectedVideo | undefine
     const familyId = boundedIdentifier(record.familyId);
     const hasCapturedReplayHeaders = record.hasCapturedReplayHeaders === true;
     const childUrls = normalizeChildUrls(record.childUrls, kind);
+    const parsedAsMaster = kind === "hls" && record.parsedAsMaster === true;
 
     return {
       id,
@@ -246,6 +247,7 @@ export function normalizeDetectedVideo(value: unknown): DetectedVideo | undefine
       provenance,
       ...(hasCapturedReplayHeaders ? { hasCapturedReplayHeaders: true } : {}),
       ...(childUrls === undefined ? {} : { childUrls }),
+      ...(parsedAsMaster ? { parsedAsMaster: true } : {}),
       familyId,
     };
   } catch {
@@ -372,7 +374,14 @@ export function mergeDetectedVideo(
     ...(existing.kind === "hls"
       ? (() => {
           const childUrls = unionChildUrls(existing.childUrls, incoming.childUrls);
-          return childUrls === undefined ? {} : { childUrls };
+          return {
+            ...(childUrls === undefined ? {} : { childUrls }),
+            ...(
+              existing.parsedAsMaster === true || incoming.parsedAsMaster === true
+                ? { parsedAsMaster: true }
+                : {}
+            ),
+          };
         })()
       : {}),
     // Once assigned, family identity is immutable. Conflicting later evidence

@@ -12,6 +12,7 @@ import type { DetectedVideo } from "../types";
 
 const DEDICATED_SEGMENT_EXTENSIONS = new Set(["ts", "m4s", "cmfv", "cmfa"]);
 const INIT_SEGMENT_PATTERN = /^(?:init|initialization)(?:[-_.][^/]*)?\.(?:mp4|m4v)$/i;
+const MASTER_LIKE_HLS_STEMS = new Set(["master", "index", "playlist", "manifest", "main"]);
 
 export type ManifestCoveragePartition = {
   visible: DetectedVideo[];
@@ -60,6 +61,27 @@ function hasHlsChildren(video: DetectedVideo): boolean {
   return video.kind === "hls" && Array.isArray(video.childUrls) && video.childUrls.length > 0;
 }
 
+function isMasterLikeHlsRecord(video: DetectedVideo): boolean {
+  if (video.kind !== "hls") return false;
+  try {
+    const basename = new URL(video.url).pathname.split("/").pop() ?? "";
+    const stem = basename.includes(".")
+      ? basename.slice(0, basename.lastIndexOf("."))
+      : basename;
+    return MASTER_LIKE_HLS_STEMS.has(stem.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+function isKnownHlsMaster(video: DetectedVideo): boolean {
+  return video.kind === "hls" && (
+    hasHlsChildren(video) ||
+    video.parsedAsMaster === true ||
+    isMasterLikeHlsRecord(video)
+  );
+}
+
 function strictDirectoryPrefix(parent: string, child: string): boolean {
   return child.startsWith(parent) && child.length > parent.length;
 }
@@ -91,16 +113,23 @@ export function partitionCoveredByManifests(
   for (const video of videos) {
     const candidateHlsDirectory = video.kind === "hls" ? manifestDirectoryPrefix(video.url) : null;
     const redactedCandidateUrl = video.kind === "hls" ? queryRedactedUrl(video.url) : null;
+    const exactListedHlsChild = redactedCandidateUrl !== null &&
+      exactHlsChildUrls.has(redactedCandidateUrl) &&
+      !hasHlsChildren(video) &&
+      video.parsedAsMaster !== true;
     const isCovered = video.kind === "direct" && likelyStreamPart(video.url) &&
       prefixes.some((prefix) => video.url.startsWith(prefix)) ||
       (
         video.kind === "hls" &&
-        !hasHlsChildren(video) &&
         (
-          (candidateHlsDirectory !== null && hlsDirectories.some((parent) =>
-            parent.video !== video &&
-            strictDirectoryPrefix(parent.directory, candidateHlsDirectory))) ||
-          (redactedCandidateUrl !== null && exactHlsChildUrls.has(redactedCandidateUrl))
+          exactListedHlsChild ||
+          (
+            !isKnownHlsMaster(video) &&
+            candidateHlsDirectory !== null &&
+            hlsDirectories.some((parent) =>
+              parent.video !== video &&
+              strictDirectoryPrefix(parent.directory, candidateHlsDirectory))
+          )
         )
       );
     (isCovered ? covered : visible).push(video);

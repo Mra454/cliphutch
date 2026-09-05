@@ -126,6 +126,67 @@ describe("filterCoveredByManifests", () => {
     ]);
   });
 
+  it("keeps nested different-video master-like playlists visible under a parent prefix", () => {
+    const videos = [
+      v({ url: "https://cdn.example.com/a/master.m3u8", kind: "hls" }),
+      v({ url: "https://cdn.example.com/a/b/master.m3u8?token=secret", kind: "hls" }),
+      v({ url: "https://cdn.example.com/a/b/playlist.m3u8", kind: "hls" }),
+      v({ url: "https://cdn.example.com/a/b/media.m3u8", kind: "hls" }),
+    ];
+    const partition = partitionCoveredByManifests(videos);
+    expect(partition.visible.map((item) => item.url)).toEqual([
+      "https://cdn.example.com/a/master.m3u8",
+      "https://cdn.example.com/a/b/master.m3u8?token=secret",
+      "https://cdn.example.com/a/b/playlist.m3u8",
+    ]);
+    expect(partition.covered.map((item) => item.url)).toEqual([
+      "https://cdn.example.com/a/b/media.m3u8",
+    ]);
+  });
+
+  it("hides Squarespace-shaped HLS child playlists by prefix", () => {
+    const videos = [
+      v({ url: "https://media.example.com/ASSET/playlist.m3u8", kind: "hls" }),
+      v({ url: "https://media.example.com/ASSET/segments/mpegts-h264-1920:1080.m3u8", kind: "hls" }),
+      v({ url: "https://media.example.com/ASSET/segments/mpegts-aac-1-und.m3u8", kind: "hls" }),
+    ];
+    const partition = partitionCoveredByManifests(videos);
+    expect(partition.visible.map((item) => item.url)).toEqual([
+      "https://media.example.com/ASSET/playlist.m3u8",
+    ]);
+    expect(partition.covered.map((item) => item.url)).toEqual([
+      "https://media.example.com/ASSET/segments/mpegts-h264-1920:1080.m3u8",
+      "https://media.example.com/ASSET/segments/mpegts-aac-1-und.m3u8",
+    ]);
+  });
+
+  it("does not hide a child named index by prefix, but exact-list coverage remains authoritative", () => {
+    const prefixOnly = [
+      v({ url: "https://cdn.example.com/asset/playlist.m3u8", kind: "hls" }),
+      v({ url: "https://cdn.example.com/asset/720p/index.m3u8", kind: "hls" }),
+    ];
+    expect(partitionCoveredByManifests(prefixOnly).visible.map((item) => item.url)).toEqual([
+      "https://cdn.example.com/asset/playlist.m3u8",
+      "https://cdn.example.com/asset/720p/index.m3u8",
+    ]);
+
+    const exactListed = [
+      v({
+        url: "https://cdn.example.com/asset/playlist.m3u8",
+        kind: "hls",
+        childUrls: ["https://cdn.example.com/asset/720p/index.m3u8"],
+      } as Partial<DetectedVideo> & Pick<DetectedVideo, "url" | "kind">),
+      v({ url: "https://cdn.example.com/asset/720p/index.m3u8?token=secret", kind: "hls" }),
+    ];
+    const partition = partitionCoveredByManifests(exactListed);
+    expect(partition.visible.map((item) => item.url)).toEqual([
+      "https://cdn.example.com/asset/playlist.m3u8",
+    ]);
+    expect(partition.covered.map((item) => item.url)).toEqual([
+      "https://cdn.example.com/asset/720p/index.m3u8?token=secret",
+    ]);
+  });
+
   it("does not hide sibling-directory HLS videos from each other", () => {
     const videos = [
       v({ url: "https://cdn.example.com/video-a/master.m3u8", kind: "hls" }),
@@ -176,6 +237,21 @@ describe("filterCoveredByManifests", () => {
     expect(filterCoveredByManifests(videos).map((item) => item.url)).toEqual([
       "https://cdn.example.com/asset/master.m3u8",
       "https://cdn.example.com/asset/nested/child.m3u8",
+    ]);
+  });
+
+  it("unhides an HLS record once it has been parsed as a master", () => {
+    const videos = [
+      v({ url: "https://cdn.example.com/asset/playlist.m3u8", kind: "hls" }),
+      v({
+        url: "https://cdn.example.com/asset/nested/media.m3u8",
+        kind: "hls",
+        parsedAsMaster: true,
+      } as Partial<DetectedVideo> & Pick<DetectedVideo, "url" | "kind">),
+    ];
+    expect(partitionCoveredByManifests(videos).visible.map((item) => item.url)).toEqual([
+      "https://cdn.example.com/asset/playlist.m3u8",
+      "https://cdn.example.com/asset/nested/media.m3u8",
     ]);
   });
 

@@ -151,6 +151,11 @@ import {
   type ClaimedQuickCaptureHeaderLease,
 } from "./lib/quick-capture-lease";
 import {
+  persistAndReconcileQuickCaptureRunStart,
+  reconcileQuickCaptureRunStart,
+} from "./lib/quick-capture-run";
+import { QUICK_CAPTURE_SOURCE_AUTH_EXPIRED_MESSAGE } from "./lib/quick-capture-run-messages";
+import {
   activeJobOwnsQuickPlan,
   activeRunOwnsReviewPlan,
 } from "./lib/capture-active-ownership";
@@ -767,6 +772,25 @@ class QuickCaptureStartPendingError extends Error {
   }
 }
 
+function quickCaptureJobResponse(job: CaptureJobV1): DownloadResponse {
+  if (job.state === "failed" || job.state === "cancelled") {
+    return {
+      ok: false,
+      code: job.error?.code ?? job.state.toUpperCase(),
+      error: job.error?.customerMessage ??
+        (job.state === "cancelled" ? "Download cancelled." : "Download failed."),
+    };
+  }
+  if (job.state === "save_state_unknown") {
+    return {
+      ok: false,
+      code: "START_STATE_UNKNOWN",
+      error: "Chrome may already have accepted this file. Check Activity and Chrome downloads before trying again.",
+    };
+  }
+  return { ok: true, jobId: job.jobId };
+}
+
 async function readOwnedQuickCaptureJob(
   intent: QuickCaptureStartIntentV1,
 ): Promise<CaptureJobV1 | null> {
@@ -789,94 +813,41 @@ async function readOwnedQuickCaptureJob(
   return jobResult.job;
 }
 
-function quickCaptureJobResponse(job: CaptureJobV1): DownloadResponse {
-  if (job.state === "failed" || job.state === "cancelled") {
-    return {
-      ok: false,
-      code: job.error?.code ?? job.state.toUpperCase(),
-      error: job.error?.customerMessage ??
-        (job.state === "cancelled" ? "Download cancelled." : "Download failed."),
-    };
-  }
-  if (job.state === "save_state_unknown") {
-    return {
-      ok: false,
-      code: "START_STATE_UNKNOWN",
-      error: "Chrome may already have accepted this file. Check Activity and Chrome downloads before trying again.",
-    };
-  }
-  return { ok: true, jobId: job.jobId };
-}
-
-async function reconcileQuickCaptureStartIntentUnlocked(
-  intent: QuickCaptureStartIntentV1,
-  quickLease?: ClaimedQuickCaptureHeaderLease | null,
-): Promise<DownloadResponse> {
-  const result = await enqueueCaptureRun({
-    plan: intent.plan,
-    commandId: intent.coordinatorCommandId,
-    licensed: intent.licensed,
-    runId: intent.runId,
-    now: intent.createdAt,
-    ...(quickLease ? { headerLeaseIdsByItemId: quickLease.headerLeaseIdsByItemId } : {}),
-  });
-  if (!result.ok) {
-    const quickLeaseReleased = await retirePreparedQuickCaptureHeaderLease(
-      quickLease,
-      {
-        now: () => Date.now(),
-        retireClaimedCaptureHeaderLease,
-      },
-    );
-    if (!quickLeaseReleased) throw new QuickCaptureStartPendingError();
-    if (intent.status === "pending" && !result.releaseFailed) {
-      const abandoned = await abandonQuickCaptureStartIntent({
-        commandId: intent.commandId,
-        plan: intent.plan,
-      });
-      if (!abandoned.ok) throw new QuickCaptureStartPendingError();
-      const quotaBlocked = result.reason === "quota_unavailable";
-      return {
-        ok: false,
-        code: quotaBlocked ? "RATE_LIMITED" : result.code,
-        error: quotaBlocked
-          ? `You've used all ${FREE_DOWNLOAD_LIMIT} free video downloads in the last 24 hours. Upgrade for unlimited video downloads.`
-          : "ClipHutch could not queue this download safely.",
-      };
-    }
-    throw new QuickCaptureStartPendingError();
-  }
-
-  void scheduleCaptureQueueDrain();
-  const ownedJob = await readOwnedQuickCaptureJob(intent);
-  const observedDisposition = result.disposition === "accepted" && ownedJob
-    ? "accepted"
-    : result.disposition === "commit_state_unknown"
-      ? "commit_state_unknown"
-      : "recovery_needed";
-  const updated = await updateQuickCaptureStartIntentDisposition({
-    commandId: intent.commandId,
-    runId: intent.runId,
-    disposition: observedDisposition,
-  });
-  if (
-    !updated.ok ||
-    updated.intent.reconciliationDisposition !== "accepted" ||
-    !ownedJob
-  ) {
-    throw new QuickCaptureStartPendingError();
-  }
-  return quickCaptureJobResponse(ownedJob);
-}
-
 function reconcileQuickCaptureStartIntent(
   intent: QuickCaptureStartIntentV1,
   quickLease?: ClaimedQuickCaptureHeaderLease | null,
 ): Promise<DownloadResponse> {
   return withKeyLock(
     CAPTURE_DRAFT_ACCEPTANCE_LOCK_KEY,
-    () => reconcileQuickCaptureStartIntentUnlocked(intent, quickLease),
+    async () => {
+      const response = await reconcileQuickCaptureRunStart({
+        intent,
+        preparedLease: quickLease,
+        dependencies: quickCaptureRunDependencies(),
+      });
+      if (!response.ok && response.pending) throw new QuickCaptureStartPendingError();
+      return response;
+    },
   );
+}
+
+function quickCaptureRunDependencies() {
+  return {
+    now: () => Date.now(),
+    freeDownloadLimit: FREE_DOWNLOAD_LIMIT,
+    createQuickCaptureStartIntent,
+    abandonQuickCaptureStartIntent,
+    updateQuickCaptureStartIntentDisposition,
+    enqueueCaptureRun,
+    readOwnedQuickCaptureJob,
+    getClaimedCaptureHeaderLease,
+    retireQuickCaptureHeaderLease: (lease: ClaimedQuickCaptureHeaderLease) =>
+      retirePreparedQuickCaptureHeaderLease(lease, {
+        now: () => Date.now(),
+        retireClaimedCaptureHeaderLease,
+      }),
+    scheduleCaptureQueueDrain,
+  };
 }
 
 async function recoverDownloadCommand(commandId: string): Promise<DownloadResponse> {
@@ -1002,6 +973,7 @@ type ListVariantsResponse =
       durationSec?: number;
       sizeCapBytes: number;
       childUrls?: string[];
+      parsedAsMaster?: boolean;
     }
   | { ok: false; error: string };
 
@@ -1193,41 +1165,20 @@ async function handleSingleCaptureDownload(
         },
       });
       if (!preparedLease.ok) {
+        if (preparedLease.cleanupPending) updateCaptureCleanupRetry(true);
         return { ok: false, code: preparedLease.code, error: preparedLease.error };
       }
       quickLease = preparedLease.lease;
     }
-    const created = await createQuickCaptureStartIntent({
+    const response = await persistAndReconcileQuickCaptureRunStart({
       commandId: request.commandId,
       plan: prepared.plan,
       licensed: await isLicensed(),
+      preparedLease: quickLease,
+      dependencies: quickCaptureRunDependencies(),
     });
-    if (!created.ok) {
-      const quickLeaseReleased = await retirePreparedQuickCaptureHeaderLease(
-        quickLease,
-        {
-          now: () => Date.now(),
-          retireClaimedCaptureHeaderLease,
-        },
-      );
-      if (!quickLeaseReleased) throw new QuickCaptureStartPendingError();
-      if (created.reason === "unresolved_intent") {
-        return {
-          ok: false,
-          code: "PREVIOUS_START_UNRESOLVED",
-          error: "Reconcile the previous Quick Capture start before starting another download.",
-        };
-      }
-      if (created.reason === "command_conflict" || created.reason === "invalid_input") {
-        return {
-          ok: false,
-          code: "INVALID_COMMAND",
-          error: "This download command no longer matches its original media selection.",
-        };
-      }
-      throw new QuickCaptureStartPendingError();
-    }
-    return reconcileQuickCaptureStartIntentUnlocked(created.intent, quickLease);
+    if (!response.ok && response.pending) throw new QuickCaptureStartPendingError();
+    return response;
   });
 }
 
@@ -1569,16 +1520,23 @@ async function handleListVariantsRequest(
       type: "list-variants-start",
       url: video.url,
       kind: video.kind,
-    })) as { ok: true; kind: "hls" | "dash"; variants: VariantOption[]; durationSec?: number; childUrls?: string[] } | { ok: false; error: string };
+    })) as { ok: true; kind: "hls" | "dash"; variants: VariantOption[]; durationSec?: number; childUrls?: string[]; parsedAsMaster?: boolean } | { ok: false; error: string };
 
     if (!result || result.ok === false) {
       return { ok: false, error: (result && "error" in result && result.error) || "Manifest fetch failed" };
     }
 
-    if (video.kind === "hls" && result.childUrls && result.childUrls.length > 0) {
+    if (
+      video.kind === "hls" &&
+      (result.parsedAsMaster === true || (result.childUrls && result.childUrls.length > 0))
+    ) {
       await withKeyLock(
         CAPTURE_DRAFT_ACCEPTANCE_LOCK_KEY,
-        () => addOrUpdateVideo(req.tabId, { ...video, childUrls: result.childUrls }),
+        () => addOrUpdateVideo(req.tabId, {
+          ...video,
+          ...(result.childUrls && result.childUrls.length > 0 ? { childUrls: result.childUrls } : {}),
+          ...(result.parsedAsMaster === true ? { parsedAsMaster: true } : {}),
+        }),
       );
     }
 
@@ -4878,7 +4836,9 @@ async function startCaptureHeavyJob(job: CaptureJobV1): Promise<void> {
           job,
           expired ? "SOURCE_AUTH_EXPIRED" : "SOURCE_AUTH_UNAVAILABLE",
           expired
-            ? "Source authorization expired. Reopen the source page and add this item again."
+            ? job.itemId.startsWith("capture-single-item:")
+              ? QUICK_CAPTURE_SOURCE_AUTH_EXPIRED_MESSAGE
+              : "Source authorization expired. Reopen the source page and add this item again."
             : "ClipHutch could not safely read this item's selected authorization snapshot.",
           retryable,
         );
@@ -5018,7 +4978,9 @@ async function startCaptureHeavyJob(job: CaptureJobV1): Promise<void> {
         response?.code === "CONCURRENT_LIMIT"
           ? "Another media item is still being processed."
           : response?.code === "SOURCE_AUTH_EXPIRED"
-            ? "Source authorization expired. Reopen the source page and add this item again."
+            ? job.itemId.startsWith("capture-single-item:")
+              ? QUICK_CAPTURE_SOURCE_AUTH_EXPIRED_MESSAGE
+              : "Source authorization expired. Reopen the source page and add this item again."
             : response?.code === "EXECUTION_SNAPSHOT_INVALID"
               ? "The inspected stream changed before local processing could start. Retry this item to inspect it again."
             : "ClipHutch could not confirm that local processing started.",
@@ -5633,7 +5595,9 @@ async function recoverCaptureJobsUnlocked(): Promise<boolean> {
         const failed = await failCaptureJob(
           job,
           "SOURCE_AUTH_EXPIRED",
-          "Source authorization expired. Reopen the source page and add this item again.",
+          job.itemId.startsWith("capture-single-item:")
+            ? QUICK_CAPTURE_SOURCE_AUTH_EXPIRED_MESSAGE
+            : "Source authorization expired. Reopen the source page and add this item again.",
           false,
           false,
         );

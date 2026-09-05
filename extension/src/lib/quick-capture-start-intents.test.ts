@@ -14,6 +14,7 @@ import {
   quickCaptureStartRequestMatches,
   updateQuickCaptureStartIntentDisposition,
   type QuickCaptureStartIntentCreateInput,
+  type QuickCaptureStartHeaderLeaseV1,
   type QuickCaptureStartIntentV1,
 } from "./quick-capture-start-intents";
 
@@ -98,6 +99,32 @@ function plan(index = 1, commandId = command(index)): CaptureReviewPlanV1 {
 
 function input(index = 1, licensed = false): QuickCaptureStartIntentCreateInput {
   return { commandId: command(index), plan: plan(index), licensed };
+}
+
+function headerLease(index = 1, commandId = command(index)): QuickCaptureStartHeaderLeaseV1 {
+  const identity = deriveQuickCaptureStartIdentity(commandId);
+  if (!identity) throw new Error("test command must be valid");
+  return {
+    binding: {
+      leaseId: `capture-header-lease-v1:${identity.coordinatorCommandId}`,
+      draftId: identity.draftId,
+      itemId: identity.itemId,
+      mediaId: `media-${index}`,
+      sourceTabId: 7,
+      pageUrl: "https://example.test/lesson",
+      sourceUrl: `https://cdn.example/video-${index}.mp4`,
+      replayKind: "direct",
+    },
+    owner: {
+      runId: identity.runId,
+      jobId: `capture-job:v1:${index}`,
+      attemptId: `capture-attempt:v1:${index}`,
+    },
+    headerLeaseIdsByItemId: {
+      [identity.itemId]: `capture-header-lease-v1:${identity.coordinatorCommandId}`,
+    },
+    expiresAt: 3_602_000,
+  };
 }
 
 function currentIndex(): {
@@ -204,6 +231,31 @@ describe("Quick Capture start intent journal", () => {
       (replay as { intent: QuickCaptureStartIntentV1 }).intent,
       input(1, true),
     )).toBe(true);
+  });
+
+  it("round-trips the persisted Quick Capture header lease reference", async () => {
+    const raw = {
+      ...input(),
+      headerLease: headerLease(),
+    };
+    const result = await createQuickCaptureStartIntent(raw);
+    expect(result).toMatchObject({
+      ok: true,
+      intent: {
+        headerLease: {
+          headerLeaseIdsByItemId: {
+            [deriveQuickCaptureStartIdentity(command())!.itemId]:
+              `capture-header-lease-v1:${deriveQuickCaptureStartIdentity(command())!.coordinatorCommandId}`,
+          },
+          binding: { leaseId: `capture-header-lease-v1:${deriveQuickCaptureStartIdentity(command())!.coordinatorCommandId}` },
+        },
+      },
+    });
+    const stored = await getQuickCaptureStartIntent(command());
+    expect(stored).toMatchObject({
+      ok: true,
+      intent: { headerLease: raw.headerLease },
+    });
   });
 
   it("conflicts on any same-command plan change", async () => {

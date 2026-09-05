@@ -12,7 +12,12 @@ import {
   isCaptureReviewPlanV1,
   type CaptureReviewPlanV1,
 } from "./capture-pack-types";
+import type { CaptureHeaderLeaseBindingV1 } from "./capture-header-leases";
 import { cloneCaptureReviewPlan } from "./capture-plan";
+import {
+  canonicalizeCaptureHeaderLeaseIdsByItemId,
+  type CaptureHeaderLeaseIdsByItemId,
+} from "./capture-plan-options";
 import { withKeyLock } from "./session-jobs";
 
 export const QUICK_CAPTURE_START_INTENTS_STORAGE_KEY =
@@ -47,6 +52,19 @@ export type QuickCaptureStartIntentCreateInput = {
   plan: CaptureReviewPlanV1;
   /** The first authoritative background entitlement decision. */
   licensed: boolean;
+  /** Explicit null means this start needs no header lease. Undefined is legacy-only. */
+  headerLease?: QuickCaptureStartHeaderLeaseV1 | null;
+};
+
+export type QuickCaptureStartHeaderLeaseV1 = {
+  binding: CaptureHeaderLeaseBindingV1;
+  owner: {
+    runId: string;
+    jobId: string;
+    attemptId: string;
+  };
+  headerLeaseIdsByItemId: CaptureHeaderLeaseIdsByItemId;
+  expiresAt: number;
 };
 
 type QuickCaptureStartIntentBaseV1 = {
@@ -57,6 +75,7 @@ type QuickCaptureStartIntentBaseV1 = {
   licensed: boolean;
   plan: CaptureReviewPlanV1;
   createdAt: number;
+  headerLease?: QuickCaptureStartHeaderLeaseV1 | null;
 };
 
 export type QuickCaptureStartIntentV1 =
@@ -151,6 +170,7 @@ type CanonicalCreateInput = {
   identity: QuickCaptureStartIdentityV1;
   plan: CaptureReviewPlanV1;
   licensed: boolean;
+  headerLease?: QuickCaptureStartHeaderLeaseV1 | null;
 };
 
 function invalidInput(message: string): QuickCaptureStartIntentFailure {
@@ -349,12 +369,130 @@ function canonicalQuickCapturePlan(
     : undefined;
 }
 
+function safeLeaseText(value: unknown): value is string {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= 256 &&
+    value.trim() === value;
+}
+
+function safeLeaseUrl(value: unknown): value is string {
+  if (typeof value !== "string" || value.length === 0 || value.length > 16_384) return false;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function canonicalQuickCaptureHeaderLease(
+  value: unknown,
+  identity: QuickCaptureStartIdentityV1,
+  plan: CaptureReviewPlanV1,
+): QuickCaptureStartHeaderLeaseV1 | null | undefined {
+  if (value === null) return null;
+  const record = exactDataRecord(value, [
+    "binding",
+    "owner",
+    "headerLeaseIdsByItemId",
+    "expiresAt",
+  ]);
+  const binding = record ? exactDataRecord(record.binding, [
+    "leaseId",
+    "draftId",
+    "itemId",
+    "mediaId",
+    "sourceTabId",
+    "pageUrl",
+    "sourceUrl",
+    "replayKind",
+  ]) : undefined;
+  const owner = record ? exactDataRecord(record.owner, ["runId", "jobId", "attemptId"]) : undefined;
+  const item = plan.items[0];
+  const headerLeaseIdsByItemId = record
+    ? canonicalizeCaptureHeaderLeaseIdsByItemId(plan, record.headerLeaseIdsByItemId)
+    : undefined;
+  const expiresAt = record?.expiresAt;
+  const sourceTabId = binding?.sourceTabId;
+  const leaseId = binding?.leaseId;
+  const draftId = binding?.draftId;
+  const itemId = binding?.itemId;
+  const mediaId = binding?.mediaId;
+  const pageUrl = binding?.pageUrl;
+  const sourceUrl = binding?.sourceUrl;
+  const replayKind = binding?.replayKind;
+  const runId = owner?.runId;
+  const jobId = owner?.jobId;
+  const attemptId = owner?.attemptId;
+  if (
+    !record ||
+    !binding ||
+    !owner ||
+    !item ||
+    !headerLeaseIdsByItemId ||
+    typeof expiresAt !== "number" ||
+    !Number.isSafeInteger(expiresAt) ||
+    expiresAt < 0 ||
+    leaseId !== `capture-header-lease-v1:${identity.coordinatorCommandId}` ||
+    draftId !== identity.draftId ||
+    itemId !== identity.itemId ||
+    mediaId !== item.media.mediaId ||
+    typeof sourceTabId !== "number" ||
+    !Number.isSafeInteger(sourceTabId) ||
+    sourceTabId < 0 ||
+    !safeLeaseUrl(pageUrl) ||
+    !safeLeaseUrl(sourceUrl) ||
+    sourceUrl !== item.media.url ||
+    (replayKind !== "hls" && replayKind !== "dash" && replayKind !== "direct") ||
+    runId !== identity.runId ||
+    !safeLeaseText(jobId) ||
+    !safeLeaseText(attemptId) ||
+    headerLeaseIdsByItemId[identity.itemId] !== leaseId ||
+    Object.keys(headerLeaseIdsByItemId).length !== 1
+  ) {
+    return undefined;
+  }
+  return {
+    binding: {
+      leaseId,
+      draftId,
+      itemId,
+      mediaId,
+      sourceTabId,
+      pageUrl,
+      sourceUrl,
+      replayKind,
+    },
+    owner: {
+      runId,
+      jobId,
+      attemptId,
+    },
+    headerLeaseIdsByItemId,
+    expiresAt,
+  };
+}
+
 function parseCreateInput(value: unknown): CanonicalCreateInput | undefined {
-  const record = exactDataRecord(value, ["commandId", "plan", "licensed"]);
+  const record = exactDataRecord(value, ["commandId", "plan", "licensed", "headerLease"]) ??
+    exactDataRecord(value, ["commandId", "plan", "licensed"]);
   const identity = record ? deriveQuickCaptureStartIdentity(record.commandId) : undefined;
   if (!record || !identity || typeof record.licensed !== "boolean") return undefined;
   const plan = canonicalQuickCapturePlan(record.plan, identity);
-  return plan ? { identity, plan, licensed: record.licensed } : undefined;
+  if (!plan) return undefined;
+  const headerLease = Object.prototype.hasOwnProperty.call(record, "headerLease")
+    ? canonicalQuickCaptureHeaderLease(record.headerLease, identity, plan)
+    : undefined;
+  if (headerLease === undefined && Object.prototype.hasOwnProperty.call(record, "headerLease")) {
+    return undefined;
+  }
+  return {
+    identity,
+    plan,
+    licensed: record.licensed,
+    ...(Object.prototype.hasOwnProperty.call(record, "headerLease") ? { headerLease } : {}),
+  };
 }
 
 function plansEqual(left: CaptureReviewPlanV1, right: CaptureReviewPlanV1): boolean {
@@ -374,6 +512,7 @@ function cloneIntent(intent: QuickCaptureStartIntentV1): QuickCaptureStartIntent
     licensed: intent.licensed,
     plan: cloneCaptureReviewPlan(intent.plan),
     createdAt: intent.createdAt,
+    ...(intent.headerLease === undefined ? {} : { headerLease: cloneHeaderLease(intent.headerLease) }),
   };
   return intent.status === "pending"
     ? { ...base, status: "pending" }
@@ -382,6 +521,18 @@ function cloneIntent(intent: QuickCaptureStartIntentV1): QuickCaptureStartIntent
         status: "committed",
         reconciliationDisposition: intent.reconciliationDisposition,
       };
+}
+
+function cloneHeaderLease(
+  lease: QuickCaptureStartHeaderLeaseV1 | null,
+): QuickCaptureStartHeaderLeaseV1 | null {
+  if (lease === null) return null;
+  return {
+    binding: { ...lease.binding },
+    owner: { ...lease.owner },
+    headerLeaseIdsByItemId: { ...lease.headerLeaseIdsByItemId },
+    expiresAt: lease.expiresAt,
+  };
 }
 
 function parseIntent(value: unknown): QuickCaptureStartIntentV1 | undefined {
@@ -394,8 +545,29 @@ function parseIntent(value: unknown): QuickCaptureStartIntentV1 | undefined {
     "plan",
     "createdAt",
     "status",
+    "headerLease",
+  ]) ?? exactDataRecord(value, [
+    "schemaVersion",
+    "commandId",
+    "coordinatorCommandId",
+    "runId",
+    "licensed",
+    "plan",
+    "createdAt",
+    "status",
   ]);
   const committed = pending ? undefined : exactDataRecord(value, [
+    "schemaVersion",
+    "commandId",
+    "coordinatorCommandId",
+    "runId",
+    "licensed",
+    "plan",
+    "createdAt",
+    "status",
+    "reconciliationDisposition",
+    "headerLease",
+  ]) ?? exactDataRecord(value, [
     "schemaVersion",
     "commandId",
     "coordinatorCommandId",
@@ -419,6 +591,12 @@ function parseIntent(value: unknown): QuickCaptureStartIntentV1 | undefined {
   }
   const plan = canonicalQuickCapturePlan(record.plan, identity);
   if (!plan || record.createdAt !== plan.generatedAt) return undefined;
+  const headerLease = Object.prototype.hasOwnProperty.call(record, "headerLease")
+    ? canonicalQuickCaptureHeaderLease(record.headerLease, identity, plan)
+    : undefined;
+  if (headerLease === undefined && Object.prototype.hasOwnProperty.call(record, "headerLease")) {
+    return undefined;
+  }
   const base: QuickCaptureStartIntentBaseV1 = {
     schemaVersion: 1,
     commandId: identity.commandId,
@@ -427,6 +605,7 @@ function parseIntent(value: unknown): QuickCaptureStartIntentV1 | undefined {
     licensed: record.licensed,
     plan,
     createdAt: plan.generatedAt,
+    ...(Object.prototype.hasOwnProperty.call(record, "headerLease") ? { headerLease } : {}),
   };
   if (pending && record.status === "pending") return { ...base, status: "pending" };
   if (
@@ -462,7 +641,12 @@ function requestMatches(
   intent: QuickCaptureStartIntentV1,
   input: CanonicalCreateInput,
 ): boolean {
-  return intent.commandId === input.identity.commandId && plansEqual(intent.plan, input.plan);
+  return intent.commandId === input.identity.commandId &&
+    plansEqual(intent.plan, input.plan) &&
+    (
+      input.headerLease === undefined ||
+      headerLeasesEqual(intent.headerLease, input.headerLease)
+    );
 }
 
 /** The first licensed value is intentionally excluded from request identity. */
@@ -496,11 +680,21 @@ function recordsEqual(
     left.licensed === right.licensed &&
     left.createdAt === right.createdAt &&
     plansEqual(left.plan, right.plan) &&
+    headerLeasesEqual(left.headerLease, right.headerLease) &&
     left.status === right.status &&
     (left.status !== "committed" ||
       (right.status === "committed" &&
         left.reconciliationDisposition === right.reconciliationDisposition))
   );
+}
+
+function headerLeasesEqual(
+  left: QuickCaptureStartHeaderLeaseV1 | null | undefined,
+  right: QuickCaptureStartHeaderLeaseV1 | null | undefined,
+): boolean {
+  if (left === undefined || right === undefined) return left === right;
+  if (left === null || right === null) return left === right;
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 function indexesEqual(
@@ -806,6 +1000,7 @@ export async function createQuickCaptureStartIntent(
       plan: cloneCaptureReviewPlan(input.plan),
       createdAt: input.plan.generatedAt,
       status: "pending",
+      ...(input.headerLease === undefined ? {} : { headerLease: cloneHeaderLease(input.headerLease) }),
     };
     const source = { ...read.index.records, [intent.commandId]: intent };
     const built = buildIndex(source, intent.commandId);

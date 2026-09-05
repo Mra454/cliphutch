@@ -27,6 +27,7 @@ import {
   CaptureManifestBlobRegistry,
   parseCaptureManifestBlobMessage,
 } from "../lib/capture-manifest-blob";
+import { queryRedactedHlsChildUrls } from "../lib/hls-child-urls";
 
 console.log("[cliphutch] offscreen document loaded");
 
@@ -80,6 +81,7 @@ export type ListVariantsResult =
       variants: VariantOption[];
       durationSec?: number;
       childUrls?: string[];
+      parsedAsMaster?: boolean;
     }
   | { ok: false; error: string; code?: "TIMEOUT" | "MANIFEST_TOO_LARGE" | "FETCH_FAILED" };
 
@@ -418,14 +420,15 @@ async function listVariants(msg: ListVariantsMessage): Promise<ListVariantsResul
           ? new URL(v.audioRenditionUri, msg.url).href
           : undefined,
       }));
-      const childUrls = [...new Set(parsed.flatMap((variant) => [
+      const childUrls = queryRedactedHlsChildUrls(parsed.flatMap((variant) => [
         variant.identityInput?.uri,
         variant.defaultAudioRendition?.identityUri ?? variant.audioRendition?.identityUri,
-      ].filter((url): url is string => Boolean(url))))];
+      ]));
       return {
         ok: true,
         kind: "hls",
         variants,
+        parsedAsMaster: true,
         ...(childUrls.length === 0 ? {} : { childUrls }),
       };
     }
