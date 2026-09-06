@@ -19,6 +19,11 @@ import {
   MAX_CAPTURE_HEADER_LEASE_IDS,
   type CaptureHeaderLeaseIdsByItemId,
 } from "./capture-plan-options";
+import {
+  DEFAULT_AUTO_RECONCILE_STATE,
+  normalizeAutoReconcileState,
+  type AutoReconcileStateV1,
+} from "./quick-capture-auto-reconcile";
 import { withKeyLock } from "./session-jobs";
 
 export const CAPTURE_RUN_INTENTS_STORAGE_KEY = "capture-run-intents-v1";
@@ -67,7 +72,7 @@ type NormalizedCaptureRunIntentCreateInput = Omit<
 
 type CaptureRunIntentBaseV1 = NormalizedCaptureRunIntentCreateInput & {
   schemaVersion: 1;
-};
+} & AutoReconcileStateV1;
 
 export type CaptureRunIntentReconciliationDisposition =
   | "accepted"
@@ -141,6 +146,16 @@ export type FinalizeCaptureRunIntentResult =
     }
   | CaptureRunIntentFailure;
 
+export type UpdateCaptureRunIntentAutoReconcileResult =
+  | {
+      ok: true;
+      changed: boolean;
+      commitState: "committed";
+      intent: CaptureRunIntentV1;
+      prunedCommandIds: string[];
+    }
+  | CaptureRunIntentFailure;
+
 export type AbandonCaptureRunIntentResult =
   | { ok: true; changed: boolean; commitState: "committed" }
   | CaptureRunIntentFailure;
@@ -205,6 +220,35 @@ function exactDataRecord(value: unknown, allowedKeys: readonly string[]): Unknow
     }
     const record = Object.create(null) as UnknownRecord;
     for (const key of allowedKeys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !("value" in descriptor)) return undefined;
+      record[key] = descriptor.value;
+    }
+    return record;
+  } catch {
+    return undefined;
+  }
+}
+
+function exactDataRecordWithOptional(
+  value: unknown,
+  requiredKeys: readonly string[],
+  optionalKeys: readonly string[],
+): UnknownRecord | undefined {
+  try {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return undefined;
+    const allowed = new Set([...requiredKeys, ...optionalKeys]);
+    const keys = Reflect.ownKeys(value);
+    if (
+      keys.some((key) => typeof key !== "string" || !allowed.has(key)) ||
+      requiredKeys.some((key) => !Object.prototype.hasOwnProperty.call(value, key))
+    ) {
+      return undefined;
+    }
+    const record = Object.create(null) as UnknownRecord;
+    for (const key of keys as string[]) {
       const descriptor = Object.getOwnPropertyDescriptor(value, key);
       if (!descriptor || !("value" in descriptor)) return undefined;
       record[key] = descriptor.value;
@@ -380,6 +424,11 @@ function cloneIntent(intent: CaptureRunIntentV1): CaptureRunIntentV1 {
     headerLeaseIdsByItemId: parseHeaderLeaseIdMap(intent.headerLeaseIdsByItemId)!,
     executionPlanDigest: intent.executionPlanDigest,
     createdAt: intent.createdAt,
+    autoReconcileAttemptCount: intent.autoReconcileAttemptCount,
+    ...(intent.autoReconcileLastAttemptAt === undefined
+      ? {}
+      : { autoReconcileLastAttemptAt: intent.autoReconcileLastAttemptAt }),
+    needsManualReconcile: intent.needsManualReconcile,
   };
   return intent.status === "pending"
     ? { ...base, status: "pending" }
@@ -391,8 +440,19 @@ function cloneIntent(intent: CaptureRunIntentV1): CaptureRunIntentV1 {
       };
 }
 
+function withAutoReconcileState(
+  intent: CaptureRunIntentV1,
+  state: AutoReconcileStateV1,
+): CaptureRunIntentV1 {
+  const next = { ...cloneIntent(intent), ...state };
+  if (state.autoReconcileLastAttemptAt === undefined) {
+    delete next.autoReconcileLastAttemptAt;
+  }
+  return next;
+}
+
 function parseIntent(value: unknown): CaptureRunIntentV1 | undefined {
-  const statusRecord = exactDataRecord(value, [
+  const statusRecord = exactDataRecordWithOptional(value, [
     "schemaVersion",
     "commandId",
     "planId",
@@ -401,81 +461,16 @@ function parseIntent(value: unknown): CaptureRunIntentV1 | undefined {
     "requestedFreeVideoItemIds",
     "licensed",
     "allocatedVideoItemIds",
-    "headerLeaseIdsByItemId",
     "executionPlanDigest",
     "createdAt",
     "status",
-  ]) ?? exactDataRecord(value, [
-    "schemaVersion",
-    "commandId",
-    "planId",
-    "draftId",
-    "draftRevision",
-    "requestedFreeVideoItemIds",
-    "licensed",
-    "allocatedVideoItemIds",
+  ], [
     "headerLeaseIdsByItemId",
-    "executionPlanDigest",
-    "createdAt",
-    "status",
     "runId",
     "reconciliationDisposition",
-  ]) ?? exactDataRecord(value, [
-    "schemaVersion",
-    "commandId",
-    "planId",
-    "draftId",
-    "draftRevision",
-    "requestedFreeVideoItemIds",
-    "licensed",
-    "allocatedVideoItemIds",
-    "headerLeaseIdsByItemId",
-    "executionPlanDigest",
-    "createdAt",
-    "status",
-    "runId",
-  ]) ?? exactDataRecord(value, [
-    "schemaVersion",
-    "commandId",
-    "planId",
-    "draftId",
-    "draftRevision",
-    "requestedFreeVideoItemIds",
-    "licensed",
-    "allocatedVideoItemIds",
-    "executionPlanDigest",
-    "createdAt",
-    "status",
-  ]) ?? exactDataRecord(value, [
-    "schemaVersion",
-    "commandId",
-    "planId",
-    "draftId",
-    "draftRevision",
-    "requestedFreeVideoItemIds",
-    "licensed",
-    "allocatedVideoItemIds",
-    "executionPlanDigest",
-    "createdAt",
-    "status",
-    "runId",
-    "reconciliationDisposition",
-  ]) ?? exactDataRecord(value, [
-    // Legacy committed records did not distinguish a fully reconciled queue
-    // from an ambiguous commit. Treat them as unresolved on upgrade so a real
-    // coordinator replay, rather than migration optimism, proves acceptance.
-    "schemaVersion",
-    "commandId",
-    "planId",
-    "draftId",
-    "draftRevision",
-    "requestedFreeVideoItemIds",
-    "licensed",
-    "allocatedVideoItemIds",
-    "executionPlanDigest",
-    "createdAt",
-    "status",
-    "runId",
+    "autoReconcileAttemptCount",
+    "autoReconcileLastAttemptAt",
+    "needsManualReconcile",
   ]);
   if (!statusRecord || statusRecord.schemaVersion !== 1) return undefined;
   const parsed = parseCreateInput({
@@ -493,8 +488,14 @@ function parseIntent(value: unknown): CaptureRunIntentV1 | undefined {
     createdAt: statusRecord.createdAt,
   });
   if (!parsed) return undefined;
+  const autoReconcileState = normalizeAutoReconcileState({
+    autoReconcileAttemptCount: statusRecord.autoReconcileAttemptCount,
+    autoReconcileLastAttemptAt: statusRecord.autoReconcileLastAttemptAt,
+    needsManualReconcile: statusRecord.needsManualReconcile,
+  });
+  if (!autoReconcileState) return undefined;
   if (statusRecord.status === "pending" && !("runId" in statusRecord)) {
-    return { schemaVersion: 1, ...parsed, status: "pending" };
+    return { schemaVersion: 1, ...parsed, ...autoReconcileState, status: "pending" };
   }
   if (
     statusRecord.status === "committed" &&
@@ -508,6 +509,7 @@ function parseIntent(value: unknown): CaptureRunIntentV1 | undefined {
     return {
       schemaVersion: 1,
       ...parsed,
+      ...autoReconcileState,
       status: "committed",
       runId: statusRecord.runId,
       reconciliationDisposition: "reconciliationDisposition" in statusRecord
@@ -545,6 +547,9 @@ function intentsEqual(left: CaptureRunIntentV1, right: CaptureRunIntentV1): bool
     leaseMapsEqual(left.headerLeaseIdsByItemId, right.headerLeaseIdsByItemId) &&
     left.executionPlanDigest === right.executionPlanDigest &&
     left.createdAt === right.createdAt &&
+    left.autoReconcileAttemptCount === right.autoReconcileAttemptCount &&
+    left.autoReconcileLastAttemptAt === right.autoReconcileLastAttemptAt &&
+    left.needsManualReconcile === right.needsManualReconcile &&
     left.status === right.status &&
     (left.status !== "committed" ||
       (right.status === "committed" &&
@@ -997,6 +1002,7 @@ export async function createCaptureRunIntent(
     const intent: CaptureRunIntentV1 = {
       schemaVersion: 1,
       ...input,
+      ...DEFAULT_AUTO_RECONCILE_STATE,
       status: "pending",
     };
     const source = {
@@ -1073,7 +1079,18 @@ export async function finalizeCaptureRunIntent(input: {
           };
       }
       const intent: Extract<CaptureRunIntentV1, { status: "committed" }> = {
-        ...cloneIntent(existing),
+        ...withAutoReconcileState(
+          existing,
+          nextDisposition === "accepted"
+            ? DEFAULT_AUTO_RECONCILE_STATE
+            : {
+                autoReconcileAttemptCount: existing.autoReconcileAttemptCount,
+                ...(existing.autoReconcileLastAttemptAt === undefined
+                  ? {}
+                  : { autoReconcileLastAttemptAt: existing.autoReconcileLastAttemptAt }),
+                needsManualReconcile: existing.needsManualReconcile,
+              },
+        ),
         status: "committed",
         runId,
         reconciliationDisposition: nextDisposition,
@@ -1094,7 +1111,18 @@ export async function finalizeCaptureRunIntent(input: {
       };
     }
     const intent: Extract<CaptureRunIntentV1, { status: "committed" }> = {
-      ...cloneIntent(existing),
+      ...withAutoReconcileState(
+        existing,
+        disposition === "accepted"
+          ? DEFAULT_AUTO_RECONCILE_STATE
+          : {
+              autoReconcileAttemptCount: existing.autoReconcileAttemptCount,
+              ...(existing.autoReconcileLastAttemptAt === undefined
+                ? {}
+                : { autoReconcileLastAttemptAt: existing.autoReconcileLastAttemptAt }),
+              needsManualReconcile: existing.needsManualReconcile,
+            },
+      ),
       status: "committed",
       runId,
       reconciliationDisposition: disposition,
@@ -1109,6 +1137,50 @@ export async function finalizeCaptureRunIntent(input: {
       changed: true,
       commitState: "committed",
       intent: cloneIntent(intent) as Extract<CaptureRunIntentV1, { status: "committed" }>,
+      prunedCommandIds: [
+        ...new Set([...read.parsed.prunedCommandIds, ...built.prunedCommandIds]),
+      ],
+    };
+  });
+}
+
+export async function updateCaptureRunIntentAutoReconcileState(input: {
+  commandId: string;
+  state: AutoReconcileStateV1;
+}): Promise<UpdateCaptureRunIntentAutoReconcileResult> {
+  const record = exactDataRecord(input, ["commandId", "state"]);
+  const commandId = record ? canonicalCommandId(record.commandId) : undefined;
+  const state = record ? normalizeAutoReconcileState(record.state as Record<string, unknown>) : undefined;
+  if (!record || !commandId || !state) {
+    return invalidInput("Capture Run automatic reconcile update is invalid.");
+  }
+  return withKeyLock(CAPTURE_RUN_INTENTS_STORAGE_KEY, async () => {
+    const read = await readStoredIndex();
+    if (!read.ok) return read;
+    const existing = read.parsed.index.records[commandId];
+    if (!existing) return { ok: false, reason: "intent_not_found", commandId };
+    const intent: CaptureRunIntentV1 = {
+      ...withAutoReconcileState(existing, state),
+    };
+    if (intentsEqual(existing, intent)) {
+      return {
+        ok: true,
+        changed: false,
+        commitState: "committed",
+        intent: cloneIntent(existing),
+        prunedCommandIds: [],
+      };
+    }
+    const source = { ...read.parsed.index.records, [commandId]: intent };
+    const built = buildIndex(source, commandId);
+    if (!built.ok) return built;
+    const written = await writeIndex(built.index, intent, existing);
+    if (written !== "committed") return written;
+    return {
+      ok: true,
+      changed: true,
+      commitState: "committed",
+      intent: cloneIntent(intent),
       prunedCommandIds: [
         ...new Set([...read.parsed.prunedCommandIds, ...built.prunedCommandIds]),
       ],

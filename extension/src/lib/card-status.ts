@@ -7,6 +7,7 @@ export type CardStatusLine = {
 
 export type CardStatusInput = {
   progress?: string | null;
+  checking?: string | null;
   pending?: string | null;
   error?: string | null;
   complete?: string | null;
@@ -22,6 +23,9 @@ function clean(value: string | null | undefined): string | null {
 export function selectCardStatusLine(input: CardStatusInput): CardStatusLine | null {
   const progress = clean(input.progress);
   if (progress) return { kind: "progress", text: progress };
+
+  const checking = clean(input.checking);
+  if (checking) return { kind: "pending", text: checking };
 
   const pending = clean(input.pending);
   if (pending) return { kind: "pending", text: pending };

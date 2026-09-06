@@ -67,10 +67,10 @@ describe("Capture manifest Activity copy", () => {
     });
     expect(model).toEqual({
       filename: "_cliphutch-manifest.csv",
-      statusLabel: "Save state unknown",
-      detail: "Chrome may already have accepted this manifest. Check Downloads before exporting it again.",
+      statusLabel: "Checking save…",
+      detail: "Chrome may already have accepted this manifest. Check Downloads before retrying export.",
       tone: "warning",
-      actionLabel: "Export CSV manifest again",
+      actionLabel: "Retry export",
     });
   });
 

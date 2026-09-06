@@ -289,6 +289,7 @@ describe("capture review client", () => {
         draftRevision: plan.draftRevision,
         requestedFreeVideoItemIds: [],
         licensed: false,
+        needsManualReconcile: false,
         status: "pending",
         reconciliationState: "pending",
       },
@@ -329,6 +330,7 @@ describe("capture review client", () => {
         draftRevision: plan.draftRevision,
         requestedFreeVideoItemIds: [],
         licensed: false,
+        needsManualReconcile: false,
         status: "committed",
         reconciliationState: "committed_missing_run",
         runId: RUN_ID,
@@ -368,6 +370,7 @@ describe("capture review client", () => {
         draftRevision: plan.draftRevision,
         requestedFreeVideoItemIds: [],
         licensed: false,
+        needsManualReconcile: false,
         status: "committed",
         reconciliationState: "committed_recovery_needed",
         runId: RUN_ID,
@@ -413,6 +416,7 @@ describe("capture review client", () => {
         planId: QUICK_PLAN_ID,
         itemId: QUICK_ITEM_ID,
         reconciliationState: "pending",
+        needsManualReconcile: false,
       },
     };
     expect(parseCaptureWorkspaceClientResult(pending)).toMatchObject({
@@ -442,6 +446,7 @@ describe("capture review client", () => {
         draftRevision: plan.draftRevision,
         requestedFreeVideoItemIds: [],
         licensed: false,
+        needsManualReconcile: false,
         status: "pending",
         reconciliationState: "pending",
       },
@@ -465,6 +470,7 @@ describe("capture review client", () => {
         planId: QUICK_PLAN_ID,
         itemId: QUICK_ITEM_ID,
         reconciliationState: "recovery_needed",
+        needsManualReconcile: false,
         jobId: QUICK_JOB_ID,
       },
     };
@@ -491,6 +497,7 @@ describe("capture review client", () => {
         planId: QUICK_PLAN_ID,
         itemId: QUICK_ITEM_ID,
         reconciliationState: "recovery_needed",
+        needsManualReconcile: false,
       },
     })).toBeUndefined();
     expect(parseCaptureWorkspaceClientResult({

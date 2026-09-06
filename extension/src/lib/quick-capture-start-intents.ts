@@ -18,6 +18,11 @@ import {
   canonicalizeCaptureHeaderLeaseIdsByItemId,
   type CaptureHeaderLeaseIdsByItemId,
 } from "./capture-plan-options";
+import {
+  DEFAULT_AUTO_RECONCILE_STATE,
+  normalizeAutoReconcileState,
+  type AutoReconcileStateV1,
+} from "./quick-capture-auto-reconcile";
 import { withKeyLock } from "./session-jobs";
 
 export const QUICK_CAPTURE_START_INTENTS_STORAGE_KEY =
@@ -76,7 +81,7 @@ type QuickCaptureStartIntentBaseV1 = {
   plan: CaptureReviewPlanV1;
   createdAt: number;
   headerLease?: QuickCaptureStartHeaderLeaseV1 | null;
-};
+} & AutoReconcileStateV1;
 
 export type QuickCaptureStartIntentV1 =
   | (QuickCaptureStartIntentBaseV1 & { status: "pending" })
@@ -153,6 +158,16 @@ export type UpdateQuickCaptureStartIntentResult =
     }
   | QuickCaptureStartIntentFailure;
 
+export type UpdateQuickCaptureStartIntentAutoReconcileResult =
+  | {
+      ok: true;
+      changed: boolean;
+      commitState: "committed";
+      intent: QuickCaptureStartIntentV1;
+      prunedCommandIds: string[];
+    }
+  | QuickCaptureStartIntentFailure;
+
 export type AbandonQuickCaptureStartIntentResult =
   | { ok: true; changed: boolean; commitState: "committed" }
   | QuickCaptureStartIntentFailure;
@@ -207,6 +222,35 @@ function exactDataRecord(
     }
     const result = Object.create(null) as UnknownRecord;
     for (const key of allowedKeys) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !("value" in descriptor)) return undefined;
+      result[key] = descriptor.value;
+    }
+    return result;
+  } catch {
+    return undefined;
+  }
+}
+
+function exactDataRecordWithOptional(
+  value: unknown,
+  requiredKeys: readonly string[],
+  optionalKeys: readonly string[],
+): UnknownRecord | undefined {
+  try {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return undefined;
+    const allowed = new Set([...requiredKeys, ...optionalKeys]);
+    const keys = Reflect.ownKeys(value);
+    if (
+      keys.some((key) => typeof key !== "string" || !allowed.has(key)) ||
+      requiredKeys.some((key) => !Object.prototype.hasOwnProperty.call(value, key))
+    ) {
+      return undefined;
+    }
+    const result = Object.create(null) as UnknownRecord;
+    for (const key of keys as string[]) {
       const descriptor = Object.getOwnPropertyDescriptor(value, key);
       if (!descriptor || !("value" in descriptor)) return undefined;
       result[key] = descriptor.value;
@@ -515,6 +559,11 @@ function cloneIntent(intent: QuickCaptureStartIntentV1): QuickCaptureStartIntent
     plan: cloneCaptureReviewPlan(intent.plan),
     createdAt: intent.createdAt,
     ...(intent.headerLease === undefined ? {} : { headerLease: cloneHeaderLease(intent.headerLease) }),
+    autoReconcileAttemptCount: intent.autoReconcileAttemptCount,
+    ...(intent.autoReconcileLastAttemptAt === undefined
+      ? {}
+      : { autoReconcileLastAttemptAt: intent.autoReconcileLastAttemptAt }),
+    needsManualReconcile: intent.needsManualReconcile,
   };
   return intent.status === "pending"
     ? { ...base, status: "pending" }
@@ -537,8 +586,19 @@ function cloneHeaderLease(
   };
 }
 
+function withAutoReconcileState(
+  intent: QuickCaptureStartIntentV1,
+  state: AutoReconcileStateV1,
+): QuickCaptureStartIntentV1 {
+  const next = { ...cloneIntent(intent), ...state };
+  if (state.autoReconcileLastAttemptAt === undefined) {
+    delete next.autoReconcileLastAttemptAt;
+  }
+  return next;
+}
+
 function parseIntent(value: unknown): QuickCaptureStartIntentV1 | undefined {
-  const pending = exactDataRecord(value, [
+  const pending = exactDataRecordWithOptional(value, [
     "schemaVersion",
     "commandId",
     "coordinatorCommandId",
@@ -547,18 +607,13 @@ function parseIntent(value: unknown): QuickCaptureStartIntentV1 | undefined {
     "plan",
     "createdAt",
     "status",
+  ], [
     "headerLease",
-  ]) ?? exactDataRecord(value, [
-    "schemaVersion",
-    "commandId",
-    "coordinatorCommandId",
-    "runId",
-    "licensed",
-    "plan",
-    "createdAt",
-    "status",
+    "autoReconcileAttemptCount",
+    "autoReconcileLastAttemptAt",
+    "needsManualReconcile",
   ]);
-  const committed = pending ? undefined : exactDataRecord(value, [
+  const committed = pending ? undefined : exactDataRecordWithOptional(value, [
     "schemaVersion",
     "commandId",
     "coordinatorCommandId",
@@ -568,17 +623,11 @@ function parseIntent(value: unknown): QuickCaptureStartIntentV1 | undefined {
     "createdAt",
     "status",
     "reconciliationDisposition",
+  ], [
     "headerLease",
-  ]) ?? exactDataRecord(value, [
-    "schemaVersion",
-    "commandId",
-    "coordinatorCommandId",
-    "runId",
-    "licensed",
-    "plan",
-    "createdAt",
-    "status",
-    "reconciliationDisposition",
+    "autoReconcileAttemptCount",
+    "autoReconcileLastAttemptAt",
+    "needsManualReconcile",
   ]);
   const record = pending ?? committed;
   if (!record || record.schemaVersion !== 1) return undefined;
@@ -599,6 +648,12 @@ function parseIntent(value: unknown): QuickCaptureStartIntentV1 | undefined {
   if (headerLease === undefined && Object.prototype.hasOwnProperty.call(record, "headerLease")) {
     return undefined;
   }
+  const autoReconcileState = normalizeAutoReconcileState({
+    autoReconcileAttemptCount: record.autoReconcileAttemptCount,
+    autoReconcileLastAttemptAt: record.autoReconcileLastAttemptAt,
+    needsManualReconcile: record.needsManualReconcile,
+  });
+  if (!autoReconcileState) return undefined;
   const base: QuickCaptureStartIntentBaseV1 = {
     schemaVersion: 1,
     commandId: identity.commandId,
@@ -608,6 +663,7 @@ function parseIntent(value: unknown): QuickCaptureStartIntentV1 | undefined {
     plan,
     createdAt: plan.generatedAt,
     ...(Object.prototype.hasOwnProperty.call(record, "headerLease") ? { headerLease } : {}),
+    ...autoReconcileState,
   };
   if (pending && record.status === "pending") return { ...base, status: "pending" };
   if (
@@ -680,6 +736,9 @@ function recordsEqual(
     left.createdAt === right.createdAt &&
     plansEqual(left.plan, right.plan) &&
     headerLeasesEqual(left.headerLease, right.headerLease) &&
+    left.autoReconcileAttemptCount === right.autoReconcileAttemptCount &&
+    left.autoReconcileLastAttemptAt === right.autoReconcileLastAttemptAt &&
+    left.needsManualReconcile === right.needsManualReconcile &&
     left.status === right.status &&
     (left.status !== "committed" ||
       (right.status === "committed" &&
@@ -1000,6 +1059,7 @@ export async function createQuickCaptureStartIntent(
       createdAt: input.plan.generatedAt,
       status: "pending",
       headerLease: cloneHeaderLease(input.headerLease),
+      ...DEFAULT_AUTO_RECONCILE_STATE,
     };
     const source = { ...read.index.records, [intent.commandId]: intent };
     const built = buildIndex(source, intent.commandId);
@@ -1077,7 +1137,18 @@ export async function updateQuickCaptureStartIntentDisposition(input: {
       };
     }
     const intent: Extract<QuickCaptureStartIntentV1, { status: "committed" }> = {
-      ...cloneIntent(existing),
+      ...withAutoReconcileState(
+        existing,
+        disposition === "accepted"
+          ? DEFAULT_AUTO_RECONCILE_STATE
+          : {
+              autoReconcileAttemptCount: existing.autoReconcileAttemptCount,
+              ...(existing.autoReconcileLastAttemptAt === undefined
+                ? {}
+                : { autoReconcileLastAttemptAt: existing.autoReconcileLastAttemptAt }),
+              needsManualReconcile: existing.needsManualReconcile,
+            },
+      ),
       status: "committed",
       reconciliationDisposition: disposition,
     };
@@ -1094,6 +1165,50 @@ export async function updateQuickCaptureStartIntentDisposition(input: {
         QuickCaptureStartIntentV1,
         { status: "committed" }
       >,
+      prunedCommandIds: built.prunedCommandIds,
+    };
+  });
+}
+
+export async function updateQuickCaptureStartIntentAutoReconcileState(input: {
+  commandId: string;
+  state: AutoReconcileStateV1;
+}): Promise<UpdateQuickCaptureStartIntentAutoReconcileResult> {
+  const record = exactDataRecord(input, ["commandId", "state"]);
+  const identity = record ? deriveQuickCaptureStartIdentity(record.commandId) : undefined;
+  const state = record ? normalizeAutoReconcileState(record.state as Record<string, unknown>) : undefined;
+  if (!record || !identity || !state) {
+    return invalidInput("Quick Capture automatic reconcile update is invalid.");
+  }
+  return withKeyLock(QUICK_CAPTURE_START_INTENTS_STORAGE_KEY, async () => {
+    const read = await readStoredIndex();
+    if (!read.ok) return read;
+    const existing = read.index.records[identity.commandId];
+    if (!existing) {
+      return { ok: false, reason: "intent_not_found", commandId: identity.commandId };
+    }
+    const intent: QuickCaptureStartIntentV1 = {
+      ...withAutoReconcileState(existing, state),
+    };
+    if (recordsEqual(existing, intent)) {
+      return {
+        ok: true,
+        changed: false,
+        commitState: "committed",
+        intent: cloneIntent(existing),
+        prunedCommandIds: [],
+      };
+    }
+    const source = { ...read.index.records, [identity.commandId]: intent };
+    const built = buildIndex(source, identity.commandId);
+    if (!built.ok) return built;
+    const written = await writeIndex(built.index, read.index);
+    if (written !== "committed") return written;
+    return {
+      ok: true,
+      changed: true,
+      commitState: "committed",
+      intent: cloneIntent(intent),
       prunedCommandIds: built.prunedCommandIds,
     };
   });

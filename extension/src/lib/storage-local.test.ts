@@ -43,11 +43,15 @@ describe("getSettings", () => {
     await setSettings({
       ignoredSourceHosts: ["cdn.example"],
       ignoredPageHosts: ["news.example"],
+      captureReviewDetailsOpen: true,
+      hutchDetailsOpen: true,
     });
 
     const settings = await getSettings();
     expect(settings.ignoredSourceHosts).toEqual(["cdn.example"]);
     expect(settings.ignoredPageHosts).toEqual(["news.example"]);
+    expect(settings.captureReviewDetailsOpen).toBe(true);
+    expect(settings.hutchDetailsOpen).toBe(true);
   });
 
   it("persists the bounded Capture Pack quality preference", async () => {
@@ -78,6 +82,8 @@ describe("getSettings", () => {
       capturePackQualityMode: "largest",
       capturePackMaxHeight: 999,
       showFullUrlsByDefault: "yes",
+      captureReviewDetailsOpen: "yes",
+      hutchDetailsOpen: 1,
       ignoredSourceHosts: ["cdn.example", 7],
       ignoredPageHosts: "news.example",
     };
@@ -92,6 +98,8 @@ describe("getSettings", () => {
       capturePackQualityMode: "best_under_cap",
       capturePackMaxHeight: Number.NaN,
       showFullUrlsByDefault: true,
+      captureReviewDetailsOpen: true,
+      hutchDetailsOpen: true,
       ignoredSourceHosts: ["cdn.example"],
       ignoredPageHosts: ["news.example"],
     };
@@ -101,6 +109,8 @@ describe("getSettings", () => {
       hlsSizeCapBytes: 256 * 1024 * 1024,
       capturePackQualityMode: "best_under_cap",
       showFullUrlsByDefault: true,
+      captureReviewDetailsOpen: true,
+      hutchDetailsOpen: true,
       ignoredSourceHosts: ["cdn.example"],
       ignoredPageHosts: ["news.example"],
     });

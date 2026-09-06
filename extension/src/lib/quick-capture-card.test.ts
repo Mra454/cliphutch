@@ -134,6 +134,17 @@ describe("createQuickCaptureCardModel", () => {
       locked: true,
       canRetry: false,
       canStartAgain: false,
+      statusLabel: "Checking save…",
+    });
+  });
+
+  it("uses customer-facing checking labels for unknown states", () => {
+    expect(createQuickCaptureCardModel(null, [])).toMatchObject({
+      statusLabel: "Checking start…",
+    });
+    const future = { ...job("running"), state: "future_state" } as unknown as CaptureJobV1;
+    expect(createQuickCaptureCardModel(job("running").jobId, [future])).toMatchObject({
+      statusLabel: "Status not available yet",
     });
   });
 

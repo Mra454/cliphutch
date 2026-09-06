@@ -18,7 +18,7 @@ const FAILURE_COPY: Record<
   MANIFEST_BLOB_FAILED: "ClipHutch could not prepare this manifest for saving.",
   MANIFEST_SAVE_FAILED: "Chrome could not save this manifest.",
   MANIFEST_SAVE_STATE_UNKNOWN:
-    "Chrome may already have accepted this manifest. Check Downloads before exporting it again.",
+    "Chrome may already have accepted this manifest. Check Downloads before retrying export.",
   MANIFEST_CANCELLED: "This manifest export was cancelled.",
   UNKNOWN: "This manifest could not be saved.",
 };
@@ -87,10 +87,10 @@ export function createCaptureManifestOutputUiModel(
   return {
     filename,
     statusLabel: output.errorCode === "MANIFEST_SAVE_STATE_UNKNOWN"
-      ? "Save state unknown"
+      ? "Checking save…"
       : "Not saved",
     detail: FAILURE_COPY[output.errorCode],
     tone: output.errorCode === "MANIFEST_SAVE_STATE_UNKNOWN" ? "warning" : "error",
-    ...(output.retryable ? { actionLabel: `Export ${output.format.toUpperCase()} manifest again` } : {}),
+    ...(output.retryable ? { actionLabel: "Retry export" } : {}),
   };
 }

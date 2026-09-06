@@ -78,7 +78,7 @@ const STATUS_LABELS: Record<CaptureJobStateV1, string> = {
   failed: "Failed",
   cancelling: "Cancelling",
   cancelled: "Cancelled",
-  save_state_unknown: "Save state unknown",
+  save_state_unknown: "Checking save…",
 };
 
 function progressPercent(job: CaptureJobV1): number | null {
@@ -130,7 +130,7 @@ export function createQuickCaptureCardModel(
       canCancel: false,
       canRetry: false,
       canStartAgain: false,
-      statusLabel: "Start state unknown",
+      statusLabel: "Checking start…",
       progressPercent: null,
     };
   }
@@ -152,7 +152,7 @@ export function createQuickCaptureCardModel(
   const job = matches[0];
   const common = {
     job,
-    statusLabel: STATUS_LABELS[job.state] ?? "Status unavailable",
+    statusLabel: STATUS_LABELS[job.state] ?? "Status not available yet",
     progressPercent: progressPercent(job),
   };
   if (ACTIVE_STATES.has(job.state)) {

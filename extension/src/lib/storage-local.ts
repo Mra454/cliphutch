@@ -18,6 +18,8 @@ export type UserSettings = {
   capturePackQualityMode: CapturePackQualityMode;
   capturePackMaxHeight?: CapturePackMaxHeight;
   showFullUrlsByDefault: boolean;
+  captureReviewDetailsOpen: boolean;
+  hutchDetailsOpen: boolean;
   ignoredSourceHosts: string[];
   ignoredPageHosts: string[];
 };
@@ -27,6 +29,8 @@ export const DEFAULT_SETTINGS: UserSettings = {
   hlsSizeCapBytes: DEFAULT_HLS_SIZE_CAP_BYTES,
   capturePackQualityMode: "best_under_cap",
   showFullUrlsByDefault: false,
+  captureReviewDetailsOpen: false,
+  hutchDetailsOpen: false,
   ignoredSourceHosts: [],
   ignoredPageHosts: [],
 };
@@ -96,6 +100,8 @@ function canonicalSettings(value: unknown): UserSettings {
   const capturePackQualityMode = ownDataValue(value, "capturePackQualityMode");
   const capturePackMaxHeight = ownDataValue(value, "capturePackMaxHeight");
   const showFullUrlsByDefault = ownDataValue(value, "showFullUrlsByDefault");
+  const captureReviewDetailsOpen = ownDataValue(value, "captureReviewDetailsOpen");
+  const hutchDetailsOpen = ownDataValue(value, "hutchDetailsOpen");
 
   return {
     filenameTemplate: isFilenameTemplate(filenameTemplate)
@@ -118,6 +124,14 @@ function canonicalSettings(value: unknown): UserSettings {
       typeof showFullUrlsByDefault === "boolean"
         ? showFullUrlsByDefault
         : DEFAULT_SETTINGS.showFullUrlsByDefault,
+    captureReviewDetailsOpen:
+      typeof captureReviewDetailsOpen === "boolean"
+        ? captureReviewDetailsOpen
+        : DEFAULT_SETTINGS.captureReviewDetailsOpen,
+    hutchDetailsOpen:
+      typeof hutchDetailsOpen === "boolean"
+        ? hutchDetailsOpen
+        : DEFAULT_SETTINGS.hutchDetailsOpen,
     ignoredSourceHosts: canonicalHostFilters(ownDataValue(value, "ignoredSourceHosts")),
     ignoredPageHosts: canonicalHostFilters(ownDataValue(value, "ignoredPageHosts")),
   };

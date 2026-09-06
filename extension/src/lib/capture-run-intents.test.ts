@@ -14,6 +14,7 @@ import {
   isCaptureRunIntentUnresolved,
   listCaptureRunIntents,
   repairCaptureRunIntentJournal,
+  updateCaptureRunIntentAutoReconcileState,
   type CaptureRunIntentCreateInput,
   type CaptureRunIntentV1,
 } from "./capture-run-intents";
@@ -144,6 +145,70 @@ describe("Capture Run intent journal", () => {
         createdAt: 1,
       },
     });
+  });
+
+  it("defaults and persists automatic reconcile state for old-shape records", async () => {
+    const created = await createCaptureRunIntent(input());
+    expect(created).toMatchObject({
+      ok: true,
+      intent: {
+        autoReconcileAttemptCount: 0,
+        needsManualReconcile: false,
+      },
+    });
+    const stored = currentIndex().records[command()];
+    delete (stored as Record<string, unknown>).autoReconcileAttemptCount;
+    delete (stored as Record<string, unknown>).needsManualReconcile;
+    delete (stored as Record<string, unknown>).autoReconcileLastAttemptAt;
+
+    await expect(getCaptureRunIntent(command())).resolves.toMatchObject({
+      ok: true,
+      intent: {
+        autoReconcileAttemptCount: 0,
+        needsManualReconcile: false,
+      },
+    });
+
+    await expect(updateCaptureRunIntentAutoReconcileState({
+      commandId: command(),
+      state: {
+        autoReconcileAttemptCount: 5,
+        autoReconcileLastAttemptAt: 50_000,
+        needsManualReconcile: true,
+      },
+    })).resolves.toMatchObject({
+      ok: true,
+      intent: {
+        autoReconcileAttemptCount: 5,
+        autoReconcileLastAttemptAt: 50_000,
+        needsManualReconcile: true,
+      },
+    });
+  });
+
+  it("resets automatic reconcile state when a run intent becomes accepted", async () => {
+    const created = await createCaptureRunIntent(input());
+    if (!created.ok) throw new Error("create failed");
+    await updateCaptureRunIntentAutoReconcileState({
+      commandId: command(),
+      state: {
+        autoReconcileAttemptCount: 2,
+        autoReconcileLastAttemptAt: 20_000,
+        needsManualReconcile: true,
+      },
+    });
+    await expect(finalizeCaptureRunIntent({
+      commandId: command(),
+      runId: "capture-run:v1:00000000-0000-4000-8000-000000000001",
+      disposition: "accepted",
+    })).resolves.toMatchObject({
+      ok: true,
+      intent: {
+        autoReconcileAttemptCount: 0,
+        needsManualReconcile: false,
+      },
+    });
+    expect(currentIndex().records[command()].autoReconcileLastAttemptAt).toBeUndefined();
   });
 
   it("canonicalizes command UUID casing before journal ownership", async () => {

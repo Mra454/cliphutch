@@ -13,6 +13,7 @@ import {
   QUICK_CAPTURE_START_INTENTS_STORAGE_KEY,
   quickCaptureStartRequestMatches,
   updateQuickCaptureStartIntentDisposition,
+  updateQuickCaptureStartIntentAutoReconcileState,
   type QuickCaptureStartIntentCreateInput,
   type QuickCaptureStartHeaderLeaseV1,
   type QuickCaptureStartIntentV1,
@@ -191,6 +192,70 @@ describe("Quick Capture start intent journal", () => {
         plan: { planId: prepared.plan.planId },
       },
     });
+  });
+
+  it("defaults and persists automatic reconcile state without rejecting old records", async () => {
+    const created = await createQuickCaptureStartIntent(input());
+    expect(created).toMatchObject({
+      ok: true,
+      intent: {
+        autoReconcileAttemptCount: 0,
+        needsManualReconcile: false,
+      },
+    });
+    const stored = currentIndex().records[command()];
+    delete (stored as Record<string, unknown>).autoReconcileAttemptCount;
+    delete (stored as Record<string, unknown>).needsManualReconcile;
+    delete (stored as Record<string, unknown>).autoReconcileLastAttemptAt;
+
+    await expect(getQuickCaptureStartIntent(command())).resolves.toMatchObject({
+      ok: true,
+      intent: {
+        autoReconcileAttemptCount: 0,
+        needsManualReconcile: false,
+      },
+    });
+
+    await expect(updateQuickCaptureStartIntentAutoReconcileState({
+      commandId: command(),
+      state: {
+        autoReconcileAttemptCount: 5,
+        autoReconcileLastAttemptAt: 12_000,
+        needsManualReconcile: true,
+      },
+    })).resolves.toMatchObject({
+      ok: true,
+      intent: {
+        autoReconcileAttemptCount: 5,
+        autoReconcileLastAttemptAt: 12_000,
+        needsManualReconcile: true,
+      },
+    });
+  });
+
+  it("resets automatic reconcile state when the original start is accepted", async () => {
+    const created = await createQuickCaptureStartIntent(input());
+    if (!created.ok) throw new Error("create failed");
+    await updateQuickCaptureStartIntentAutoReconcileState({
+      commandId: command(),
+      state: {
+        autoReconcileAttemptCount: 3,
+        autoReconcileLastAttemptAt: 30_000,
+        needsManualReconcile: true,
+      },
+    });
+    await expect(updateQuickCaptureStartIntentDisposition({
+      commandId: command(),
+      runId: created.intent.runId,
+      disposition: "accepted",
+    })).resolves.toMatchObject({
+      ok: true,
+      intent: {
+        autoReconcileAttemptCount: 0,
+        needsManualReconcile: false,
+      },
+    });
+    expect(currentIndex().records[command()].autoReconcileLastAttemptAt).toBeUndefined();
   });
 
   it("freezes the canonical one-item plan and first entitlement decision", async () => {

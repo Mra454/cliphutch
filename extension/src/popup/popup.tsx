@@ -87,9 +87,12 @@ import {
   WORKSPACE_TAB_MIN_TRACK_PX,
   activeTabLoadIsCurrent,
   binaryTabForKey,
+  captureReviewDetailsDefaultOpen,
   customerVisibleUrlTitle,
   groupCaptureDraftBySourcePage,
+  hutchDetailsDefaultOpen,
   hutchFocusItemAfterRemoval,
+  shouldRenderCapturePageFolders,
   sourcePageDisplayUrl,
   workspaceRouteForKey,
   type WorkspaceRoute,
@@ -127,6 +130,7 @@ type CaptureRunReconcileIntent = {
   licensed: boolean;
   freeVideoItemIds: string[];
   selectionMustMatch: boolean;
+  needsManualReconcile: boolean;
 };
 
 function captureManifestRetryKey(runId: string, format: "json" | "csv"): string {
@@ -703,7 +707,6 @@ function VideoCard({
   acceptedCaptureJobId,
   unresolvedQuickStart,
   quickCaptureStartBlocked,
-  quickCaptureReconcilePending,
   deferPreview,
   onSelect,
   onCustomStemChange,
@@ -718,7 +721,6 @@ function VideoCard({
   onQuickStartOutcomeUnknown,
   onClearQuickStartOutcomeUnknown,
   onPreviousStartUnresolved,
-  onReconcileQuickStart,
   onCancelCaptureJob,
   onViewHutch,
   onViewActivity,
@@ -744,7 +746,6 @@ function VideoCard({
   acceptedCaptureJobId: string | null | undefined;
   unresolvedQuickStart: QuickStartOutcomeUnknownIntent | undefined;
   quickCaptureStartBlocked: boolean;
-  quickCaptureReconcilePending: boolean;
   deferPreview: boolean;
   onSelect: (id: string) => Promise<boolean>;
   onCustomStemChange: (mediaId: string, customStem: string | undefined) => void;
@@ -759,7 +760,6 @@ function VideoCard({
   onQuickStartOutcomeUnknown: (intent: QuickStartOutcomeUnknownIntent) => void;
   onClearQuickStartOutcomeUnknown: () => void;
   onPreviousStartUnresolved: () => void;
-  onReconcileQuickStart: (commandId: string) => void;
   onCancelCaptureJob: (job: CaptureJobV1) => Promise<void>;
   onViewHutch: () => void;
   onViewActivity: () => void;
@@ -1107,7 +1107,7 @@ function VideoCard({
       const res = (await chrome.runtime.sendMessage(request)) as DownloadResponse | undefined;
       if (!res) {
         markOutcomeUnknown(
-          "ClipHutch did not confirm this start. Reconcile the same request before starting anything else.",
+          "ClipHutch did not confirm this start. It will check the same request before starting anything else.",
         );
         return;
       }
@@ -1125,7 +1125,7 @@ function VideoCard({
       }
       if (res.downloadId === undefined && res.jobId === undefined) {
         markOutcomeUnknown(
-          "ClipHutch accepted this start, but its Activity job is not available yet. Reconcile the same request.",
+          "ClipHutch accepted this start, but its Activity job is not available yet. It will check the same request.",
         );
         return;
       }
@@ -1140,17 +1140,11 @@ function VideoCard({
     } catch (err) {
       markOutcomeUnknown(
         err instanceof Error && err.message
-          ? `${err.message} Reconcile the same request before starting anything else.`
-          : "ClipHutch could not confirm this start. Reconcile the same request before starting anything else.",
+          ? `${err.message} ClipHutch will check the same request before starting anything else.`
+          : "ClipHutch could not confirm this start. It will check the same request before starting anything else.",
       );
     }
   };
-
-  function reconcileQuickStart() {
-    const commandId = commandIdRef.current ?? unresolvedQuickStart?.commandId;
-    if (!commandId || quickCaptureReconcilePending) return;
-    onReconcileQuickStart(commandId);
-  }
 
   const onDownload = async () => {
     if (limitBlocked) return;
@@ -1351,18 +1345,13 @@ function VideoCard({
     if (limitBlocked) {
       return "Free video limit reached. Video actions are disabled; still-image downloads remain available.";
     }
-    if (quickCaptureStartBlocked || previousStartUnresolved) {
-      return previousStartUnresolved && immediateError
-        ? immediateError
-        : "A previous start must be reconciled before another Quick Capture can begin.";
-    }
+    if (quickCaptureStartBlocked || previousStartUnresolved) return null;
     if (immediateError) return immediateError;
     if (quickCapture.mode === "failed") {
       return quickCapture.job?.error?.customerMessage ?? "Quick Capture failed.";
     }
     if (quickCapture.mode === "outcome_unknown") {
-      return quickCapture.job?.error?.customerMessage ??
-        "Chrome may already have accepted this file. Check Activity before starting it again.";
+      return quickCapture.job?.error?.customerMessage ?? null;
     }
     if (captureWorkspaceError && quickCapture.mode !== "none") return captureWorkspaceError;
     const blocked = jobBlockedLine(job);
@@ -1375,6 +1364,18 @@ function VideoCard({
     }
     if (job?.source === "webm" && job.status === "error") {
       return job.errorMessage ?? "WebM conversion failed.";
+    }
+    return null;
+  }
+
+  function checkingStatusText(): string | null {
+    if (
+      quickStartOutcomeUnknown ||
+      previousStartUnresolved ||
+      quickCaptureStartBlocked ||
+      quickCapture.mode === "outcome_unknown"
+    ) {
+      return "Checking a previous download…";
     }
     return null;
   }
@@ -1650,20 +1651,7 @@ function VideoCard({
     if (immediateError) {
       const immediateRetryable = isImmediateStartErrorRetryable(immediateErrorCode);
       if (quickStartOutcomeUnknown) {
-        return (
-          <>
-            <button
-              ref={downloadButtonRef}
-              type="button"
-              onClick={reconcileQuickStart}
-              disabled={quickCaptureReconcilePending || commandIdRef.current === null}
-              aria-label={`Reconcile the previous download start for ${selectedName}`}
-              style={{ ...(quickCaptureReconcilePending || commandIdRef.current === null ? disabledButtonStyle : primaryButtonStyle), marginTop: 6 }}
-            >
-              {quickCaptureReconcilePending ? "Reconciling…" : "Reconcile start"}
-            </button>
-          </>
-        );
+        return activityButton;
       }
       return (
         <>
@@ -1903,6 +1891,7 @@ function VideoCard({
   const alternateOptions = groupedAssets.filter((item) => item.id !== selected.id);
   const statusLine = selectCardStatusLine({
     progress: progressStatusText(),
+    checking: checkingStatusText(),
     pending: pendingStatusText(),
     error: errorStatusText(),
     complete: completeStatusText(),
@@ -2372,15 +2361,11 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
         licensed: context.licensed,
         freeVideoItemIds: [...context.requestedFreeVideoItemIds],
         selectionMustMatch: false,
+        needsManualReconcile: context.needsManualReconcile,
       };
       setCaptureRunOutcomeUnknown(true);
-      const message = context.status === "pending"
-        ? "A previous pack start was not confirmed. No videos were auto-selected; reconcile to check only that frozen request."
-        : context.reconciliationState === "committed_missing_run"
-          ? "The previous pack was accepted, but its run record is missing. Reconcile the frozen request so ClipHutch can recover it without creating another run."
-          : "The previous pack was accepted, but its queue still needs recovery. Reconcile the frozen request without creating another run.";
-      setCaptureReviewError(message);
-      setCaptureView("review");
+      setCaptureReviewError(null);
+      setCaptureView(context.needsManualReconcile ? "activity" : captureView);
     }
   }
 
@@ -2615,6 +2600,7 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
           !tab.active
         ) return;
         await loadActiveTabMedia(tab);
+        await refreshCaptureWorkspace();
       } catch {
         if (!disposed && activeTabLoadGenerationRef.current === followGeneration) {
           await followCurrentTab();
@@ -3461,7 +3447,7 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
     if (!workspaceBootstrapped) return;
     if (quickCaptureRecoveryActive) {
       setCaptureReviewError(
-        "Resolve the previous Quick Capture start in Activity before reviewing or starting a pack.",
+        "Checking a previous download before reviewing or starting a pack.",
       );
       setCaptureView("activity");
       await refreshCaptureWorkspace();
@@ -3610,7 +3596,7 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
     if (!workspaceBootstrapped) return;
     if (quickCaptureRecoveryActive) {
       setCaptureReviewError(
-        "Resolve the previous Quick Capture start in Activity before starting this pack.",
+        "Checking a previous download before starting this pack.",
       );
       setCaptureView("activity");
       await refreshCaptureWorkspace();
@@ -3682,6 +3668,7 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
           licensed,
           freeVideoItemIds: currentFreeVideoItemIds,
           selectionMustMatch: true,
+          needsManualReconcile: false,
         };
     const intentAllocationKey = captureRunAllocationKey;
     captureRunAllocationKeyRef.current = intentAllocationKey;
@@ -3709,8 +3696,8 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
         setCaptureRunOutcomeUnknown(true);
         setCaptureReviewError(
           result.disposition === "recovery_needed"
-            ? "The pack was accepted, but its queue needs recovery. Reconcile the previous start to retry recovery without creating another run."
-            : "The pack was accepted, but ClipHutch could not confirm the committed run state. Reconcile the previous start before doing anything else.",
+            ? "The pack was accepted, and ClipHutch is checking its queue without creating another run."
+            : "The pack was accepted, and ClipHutch is checking the committed run state before doing anything else.",
         );
         await refreshCaptureWorkspace();
         if (!captureRunReconcileRef.current) {
@@ -3731,7 +3718,7 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
           return;
         }
         setCaptureReviewError(
-          "The start response was interrupted. Reconcile the previous start to check the same command before ClipHutch does anything twice.",
+          "The start response was interrupted. ClipHutch is checking the same command before doing anything twice.",
         );
         await refreshCaptureWorkspace();
         if (!captureRunReconcileRef.current) {
@@ -3836,7 +3823,7 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
       setCaptureManifestRetryErrors((current) => ({
         ...current,
         [key]: result.reason === "outcome_unknown"
-          ? "The export response was interrupted. Reconcile this exact export before starting another."
+          ? "The export response was interrupted. ClipHutch will check this exact export before starting another."
           : captureManifestRetryFailureMessage(result.reason),
       }));
       await refreshCaptureWorkspace();
@@ -3857,18 +3844,18 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
         setQuickCaptureReconcileError(
           result.customerMessage ?? (
             result.reason === "outcome_unknown"
-              ? "ClipHutch could not confirm reconciliation. The original start remains locked; try Reconcile again."
+              ? "ClipHutch could not confirm the check. The original start remains locked; try Check again."
               : result.reason === "invalid_background_response"
-                ? "Activity returned an invalid reconciliation result. The original start remains locked."
-                : `ClipHutch could not reconcile this Quick Capture (${result.reason}).`
+                ? "Activity returned an invalid check result. The original start remains locked."
+                : `ClipHutch could not check this Quick Capture (${result.reason}).`
           ),
         );
       }
     } catch (error) {
       setQuickCaptureReconcileError(
         error instanceof Error && error.message
-          ? `ClipHutch could not reconcile this Quick Capture: ${error.message}`
-          : "ClipHutch could not reconcile this Quick Capture. The original start remains locked.",
+          ? `ClipHutch could not check this Quick Capture: ${error.message}`
+          : "ClipHutch could not check this Quick Capture. The original start remains locked.",
       );
     } finally {
       // The response itself is never enough to unlock the UI: a fresh strict
@@ -3966,6 +3953,11 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
     await setSettings({ ignoredSourceHosts: [], ignoredPageHosts: [] });
   }
 
+  function persistSettings(partial: Partial<UserSettings>): void {
+    setSettingsState((current) => ({ ...current, ...partial }));
+    void setSettings(partial).catch(() => undefined);
+  }
+
   function renderBody() {
     if (loadError) {
       return <p role="alert" style={errorBoxStyle}>{loadError}</p>;
@@ -4035,7 +4027,6 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
             captureRunOutcomeUnknown || quickCaptureContext !== null || previousStartUnresolved ||
             unresolvedQuickStartEntries.some(([otherGroupId]) => otherGroupId !== group.groupId)
           }
-          quickCaptureReconcilePending={quickCaptureReconcilePending}
           deferPreview={surface === "sidepanel"}
           onSelect={(id) => selectGroupMedia(group, id)}
           onCustomStemChange={setCustomStemForMedia}
@@ -4059,9 +4050,6 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
             quickStartUiRevisionRef.current += 1;
             setPreviousStartUnresolved(true);
             void refreshCaptureWorkspace();
-          }}
-          onReconcileQuickStart={(commandId) => {
-            void reconcileWorkspaceQuickCapture(commandId);
           }}
           onCancelCaptureJob={cancelReviewedJob}
           onViewHutch={() => setCaptureView("hutch")}
@@ -4101,15 +4089,27 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
           >
             Hutch · {draftItems.length} item{draftItems.length === 1 ? "" : "s"}
           </h2>
-          <div style={{ marginTop: 3 }}>
-            Selected items stay here if you navigate or close their source tabs. Hutch is session-only and clears on browser restart, extension update, or Clear Hutch.
-          </div>
+          <details
+            open={hutchDetailsDefaultOpen(settings)}
+            onToggle={(event) => {
+              persistSettings({ hutchDetailsOpen: event.currentTarget.open });
+            }}
+            style={{ marginTop: 5 }}
+          >
+            <summary style={{ cursor: "pointer", fontWeight: 600 }}>Details</summary>
+            <div style={{ marginTop: 3 }}>
+              Selected items stay here if you navigate or close their source tabs. Hutch is session-only and clears on browser restart, extension update, or Clear Hutch.
+            </div>
+          </details>
           {draftItems.length > 0 ? (
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 7 }}>
               <button
                 type="button"
                 disabled={!workspaceBootstrapped || captureReviewPending || anyStartReconciliationActive}
-                onClick={() => void requestCaptureReview(captureChoices)}
+                onClick={() => {
+                  setCaptureView("review");
+                  void requestCaptureReview(captureChoices);
+                }}
                 style={!workspaceBootstrapped || captureReviewPending || anyStartReconciliationActive
                   ? disabledButtonStyle
                   : primaryButtonStyle}
@@ -4270,12 +4270,13 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
       capturePageLabelPendingUrl !== null || quickCaptureRecoveryActive ||
       captureManifestCsvPending || (isNormalCapturePack && !hasRequiredManifest) ||
       (!captureRunOutcomeUnknown && !gate.canSubmit);
+    const showCapturePageFolders = shouldRenderCapturePageFolders(capturePageFolderGroups.length);
 
     return (
       <section aria-label="Capture Pack review" style={{ marginTop: 10 }}>
         {quickCaptureRecoveryActive ? (
           <div role="alert" style={errorBoxStyle}>
-            Resolve the previous Quick Capture start in Activity before reviewing or starting this pack.
+            Checking a previous download before reviewing or starting this pack.
           </div>
         ) : null}
         <div style={{ ...noteBoxStyle, marginTop: 0 }}>
@@ -4290,181 +4291,190 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
           <div style={{ marginTop: 2 }}>Folder: <code>{capturePlan.relativeRoot}/</code></div>
         </div>
 
-        {isNormalCapturePack && capturePlan.manifestSpec ? (
-          <fieldset
-            style={{
-              border: "1px solid #c8d8cc",
-              borderRadius: 7,
-              background: "#fff",
-              margin: "8px 0 0",
-              padding: "7px 8px",
-              minWidth: 0,
-            }}
-          >
-            <legend style={{ fontSize: 11, fontWeight: 700, padding: "0 3px" }}>
-              Source manifest
-            </legend>
-            <div id="capture-manifest-disclosure" style={{ color: "#536156", fontSize: 10.5 }}>
-              Required JSON source manifest (requested name: <code>_cliphutch-manifest.json</code>),
-              saved after the media files finish. Chrome may add a collision suffix. It records
-              planned paths, final basenames, item outcomes, timestamps, redacted source pages, and
-              source hosts. It excludes media URLs, URL credentials/query/fragment, captured request
-              headers, license data, and absolute local paths.
+        <details
+          open={captureReviewDetailsDefaultOpen(settings)}
+          onToggle={(event) => {
+            persistSettings({ captureReviewDetailsOpen: event.currentTarget.open });
+          }}
+          style={{ marginTop: 8 }}
+        >
+          <summary style={{ cursor: "pointer", fontWeight: 600 }}>Details</summary>
+          {isNormalCapturePack && capturePlan.manifestSpec ? (
+            <fieldset
+              style={{
+                border: "1px solid #c8d8cc",
+                borderRadius: 7,
+                background: "#fff",
+                margin: "8px 0 0",
+                padding: "7px 8px",
+                minWidth: 0,
+              }}
+            >
+              <legend style={{ fontSize: 11, fontWeight: 700, padding: "0 3px" }}>
+                Source manifest
+              </legend>
+              <div id="capture-manifest-disclosure" style={{ color: "#536156", fontSize: 10.5 }}>
+                Required JSON source manifest (requested name: <code>_cliphutch-manifest.json</code>),
+                saved after the media files finish. Chrome may add a collision suffix. It records
+                planned paths, final basenames, item outcomes, timestamps, redacted source pages, and
+                source hosts. It excludes media URLs, URL credentials/query/fragment, captured request
+                headers, license data, and absolute local paths.
+              </div>
+              <label style={{ display: "flex", gap: 6, alignItems: "flex-start", marginTop: 7, fontSize: 10.5 }}>
+                <input
+                  type="checkbox"
+                  checked={capturePlan.manifestSpec.formats.includes("csv")}
+                  disabled={
+                    captureManifestCsvPending || captureReviewPending || captureRunPending ||
+                    capturePageLabelPendingUrl !== null || captureRunOutcomeUnknown
+                  }
+                  aria-describedby="capture-manifest-disclosure"
+                  onChange={(event) => void setCaptureManifestCsvPreference(event.currentTarget.checked)}
+                />
+                <span>
+                  {captureManifestCsvPending ? "Updating CSV option…" : "Also save a CSV manifest"}
+                </span>
+              </label>
+            </fieldset>
+          ) : isNormalCapturePack ? (
+            <div role="alert" style={{ ...errorBoxStyle, marginTop: 8 }}>
+              This older review does not include the required JSON source manifest. Refresh the review
+              before saving this pack.
             </div>
-            <label style={{ display: "flex", gap: 6, alignItems: "flex-start", marginTop: 7, fontSize: 10.5 }}>
-              <input
-                type="checkbox"
-                checked={capturePlan.manifestSpec.formats.includes("csv")}
-                disabled={
-                  captureManifestCsvPending || captureReviewPending || captureRunPending ||
-                  capturePageLabelPendingUrl !== null || captureRunOutcomeUnknown
-                }
-                aria-describedby="capture-manifest-disclosure"
-                onChange={(event) => void setCaptureManifestCsvPreference(event.currentTarget.checked)}
-              />
-              <span>
-                {captureManifestCsvPending ? "Updating CSV option…" : "Also save a CSV manifest"}
-              </span>
-            </label>
-          </fieldset>
-        ) : isNormalCapturePack ? (
-          <div role="alert" style={{ ...errorBoxStyle, marginTop: 8 }}>
-            This older review does not include the required JSON source manifest. Refresh the review
-            before saving this pack.
-          </div>
-        ) : null}
+          ) : null}
 
-        {captureReviewHasTemporaryAccess ? (
-          <div role="note" style={{ ...noteBoxStyle, background: "#fffaf0", color: "#60491f" }}>
-            You may close the source tabs. Temporary access for selected items expires after 60 minutes; an expired item will ask you to reopen its page and add it again.
-          </div>
-        ) : null}
-
-        {capturePageFolderGroups.length > 0 ? (
-          <div aria-label="Source page folder labels" style={{ marginTop: 8 }}>
-            <strong style={{ fontSize: 11 }}>Page folders</strong>
-            <div style={{ color: "#59675c", fontSize: 10, marginTop: 2 }}>
-              Set an optional label for each source page. Saving or resetting a label rebuilds the reviewed paths.
+          {captureReviewHasTemporaryAccess ? (
+            <div role="note" style={{ ...noteBoxStyle, background: "#fffaf0", color: "#60491f" }}>
+              You may close the source tabs. Temporary access for selected items expires after 60 minutes; an expired item will ask you to reopen its page and add it again.
             </div>
-            {capturePageFolderGroups.map((group, index) => {
-              const input = capturePageLabelInputs[group.pageUrl] ?? group.label ?? "";
-              const normalizedInput = normalizeCapturePageFolderLabel(input);
-              const changed = normalizedInput !== undefined && normalizedInput !== group.label;
-              const pending = capturePageLabelPendingUrl === group.pageUrl;
-              const descriptor = group.pageTitle?.trim() || group.pageHost;
-              const displayedPageUrl = settings.showFullUrlsByDefault
-                ? group.pageUrl
-                : sourcePageDisplayUrl(group.pageUrl);
-              const inputId = `capture-page-folder-${index}`;
-              return (
-                <fieldset
-                  key={group.pageUrl}
-                  style={{
-                    border: "1px solid #c8d8cc",
-                    borderRadius: 7,
-                    background: "#fff",
-                    margin: "6px 0 0",
-                    padding: "7px 8px",
-                    minWidth: 0,
-                  }}
-                >
-                  <legend style={{ fontSize: 10.5, fontWeight: 600, padding: "0 3px" }}>
-                    {descriptor} · {group.itemCount} item{group.itemCount === 1 ? "" : "s"}
-                  </legend>
-                  <label htmlFor={inputId} style={{ display: "block", fontSize: 10.5 }}>
-                    Folder label for {group.pageHost}
-                  </label>
-                  <input
-                    id={inputId}
-                    value={input}
-                    maxLength={MAX_CAPTURE_PAGE_FOLDER_LABEL_LENGTH}
-                    disabled={
-                      capturePageLabelPendingUrl !== null || captureRunPending ||
-                      captureRunOutcomeUnknown
-                    }
-                    aria-describedby={`${inputId}-source`}
-                    onChange={(event) => {
-                      const value = event.currentTarget.value;
-                      setCapturePageLabelInputs((current) => ({
-                        ...current,
-                        [group.pageUrl]: value,
-                      }));
-                    }}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" && changed) {
-                        event.preventDefault();
-                        void saveCapturePageLabel(group.pageUrl);
-                      }
-                    }}
+          ) : null}
+
+          {showCapturePageFolders ? (
+            <div aria-label="Source page folder labels" style={{ marginTop: 8 }}>
+              <strong style={{ fontSize: 11 }}>Page folders</strong>
+              <div style={{ color: "#59675c", fontSize: 10, marginTop: 2 }}>
+                Set an optional label for each source page. Saving or resetting a label rebuilds the reviewed paths.
+              </div>
+              {capturePageFolderGroups.map((group, index) => {
+                const input = capturePageLabelInputs[group.pageUrl] ?? group.label ?? "";
+                const normalizedInput = normalizeCapturePageFolderLabel(input);
+                const changed = normalizedInput !== undefined && normalizedInput !== group.label;
+                const pending = capturePageLabelPendingUrl === group.pageUrl;
+                const descriptor = group.pageTitle?.trim() || group.pageHost;
+                const displayedPageUrl = settings.showFullUrlsByDefault
+                  ? group.pageUrl
+                  : sourcePageDisplayUrl(group.pageUrl);
+                const inputId = `capture-page-folder-${index}`;
+                return (
+                  <fieldset
+                    key={group.pageUrl}
                     style={{
-                      display: "block",
-                      width: "100%",
-                      boxSizing: "border-box",
-                      marginTop: 3,
-                      padding: 4,
-                      fontSize: 11,
-                    }}
-                  />
-                  {normalizedInput === undefined ? (
-                    <div role="alert" style={{ color: "#7a1f1a", fontSize: 9.5, marginTop: 3 }}>
-                      Remove control or direction-formatting characters from this label.
-                    </div>
-                  ) : null}
-                  <div
-                    id={`${inputId}-source`}
-                    title={settings.showFullUrlsByDefault ? group.pageUrl : undefined}
-                    style={{
-                      color: "#667269",
-                      fontSize: 9.5,
-                      marginTop: 3,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
+                      border: "1px solid #c8d8cc",
+                      borderRadius: 7,
+                      background: "#fff",
+                      margin: "6px 0 0",
+                      padding: "7px 8px",
+                      minWidth: 0,
                     }}
                   >
-                    {displayedPageUrl}
-                  </div>
-                  <div style={{ display: "flex", gap: 5, marginTop: 5 }}>
-                    <button
-                      type="button"
+                    <legend style={{ fontSize: 10.5, fontWeight: 600, padding: "0 3px" }}>
+                      {descriptor} · {group.itemCount} item{group.itemCount === 1 ? "" : "s"}
+                    </legend>
+                    <label htmlFor={inputId} style={{ display: "block", fontSize: 10.5 }}>
+                      Folder label for {group.pageHost}
+                    </label>
+                    <input
+                      id={inputId}
+                      value={input}
+                      maxLength={MAX_CAPTURE_PAGE_FOLDER_LABEL_LENGTH}
                       disabled={
-                        !changed || pending || capturePageLabelPendingUrl !== null ||
-                        captureRunPending || captureRunOutcomeUnknown || normalizedInput === undefined
+                        capturePageLabelPendingUrl !== null || captureRunPending ||
+                        captureRunOutcomeUnknown
                       }
-                      onClick={() => void saveCapturePageLabel(group.pageUrl)}
-                      aria-label={`Save folder label for ${descriptor}`}
-                      style={
-                        !changed || pending || capturePageLabelPendingUrl !== null ||
-                        captureRunPending || captureRunOutcomeUnknown || normalizedInput === undefined
-                          ? disabledButtonStyle
-                          : buttonStyle
-                      }
+                      aria-describedby={`${inputId}-source`}
+                      onChange={(event) => {
+                        const value = event.currentTarget.value;
+                        setCapturePageLabelInputs((current) => ({
+                          ...current,
+                          [group.pageUrl]: value,
+                        }));
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" && changed) {
+                          event.preventDefault();
+                          void saveCapturePageLabel(group.pageUrl);
+                        }
+                      }}
+                      style={{
+                        display: "block",
+                        width: "100%",
+                        boxSizing: "border-box",
+                        marginTop: 3,
+                        padding: 4,
+                        fontSize: 11,
+                      }}
+                    />
+                    {normalizedInput === undefined ? (
+                      <div role="alert" style={{ color: "#7a1f1a", fontSize: 9.5, marginTop: 3 }}>
+                        Remove control or direction-formatting characters from this label.
+                      </div>
+                    ) : null}
+                    <div
+                      id={`${inputId}-source`}
+                      title={settings.showFullUrlsByDefault ? group.pageUrl : undefined}
+                      style={{
+                        color: "#667269",
+                        fontSize: 9.5,
+                        marginTop: 3,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
                     >
-                      {pending ? "Saving…" : "Save label"}
-                    </button>
-                    <button
-                      type="button"
-                      disabled={
-                        pending || capturePageLabelPendingUrl !== null || captureRunPending ||
-                        captureRunOutcomeUnknown || (group.label === null && input.length === 0)
-                      }
-                      onClick={() => void saveCapturePageLabel(group.pageUrl, null)}
-                      aria-label={`Reset folder label for ${descriptor}`}
-                      style={
-                        pending || capturePageLabelPendingUrl !== null || captureRunPending ||
-                        captureRunOutcomeUnknown || (group.label === null && input.length === 0)
-                          ? disabledButtonStyle
-                          : buttonStyle
-                      }
-                    >
-                      Reset
-                    </button>
-                  </div>
-                </fieldset>
-              );
-            })}
-          </div>
-        ) : null}
+                      {displayedPageUrl}
+                    </div>
+                    <div style={{ display: "flex", gap: 5, marginTop: 5 }}>
+                      <button
+                        type="button"
+                        disabled={
+                          !changed || pending || capturePageLabelPendingUrl !== null ||
+                          captureRunPending || captureRunOutcomeUnknown || normalizedInput === undefined
+                        }
+                        onClick={() => void saveCapturePageLabel(group.pageUrl)}
+                        aria-label={`Save folder label for ${descriptor}`}
+                        style={
+                          !changed || pending || capturePageLabelPendingUrl !== null ||
+                          captureRunPending || captureRunOutcomeUnknown || normalizedInput === undefined
+                            ? disabledButtonStyle
+                            : buttonStyle
+                        }
+                      >
+                        {pending ? "Saving…" : "Save label"}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={
+                          pending || capturePageLabelPendingUrl !== null || captureRunPending ||
+                          captureRunOutcomeUnknown || (group.label === null && input.length === 0)
+                        }
+                        onClick={() => void saveCapturePageLabel(group.pageUrl, null)}
+                        aria-label={`Reset folder label for ${descriptor}`}
+                        style={
+                          pending || capturePageLabelPendingUrl !== null || captureRunPending ||
+                          captureRunOutcomeUnknown || (group.label === null && input.length === 0)
+                            ? disabledButtonStyle
+                            : buttonStyle
+                        }
+                      >
+                        Reset
+                      </button>
+                    </div>
+                  </fieldset>
+                );
+              })}
+            </div>
+          ) : null}
+        </details>
 
         <ol style={{ listStyle: "none", padding: 0, margin: "8px 0" }}>
           {capturePlan.items.map((item) => {
@@ -4495,6 +4505,11 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
             const isFreeVideoChoice = !gate.licensed && gate.readyVideoItemIds.includes(item.itemId);
             const isSelectedFreeVideo = gate.selectedFreeVideoItemIds.includes(item.itemId);
             const copyChoiceUi = createCaptureCopyChoiceReviewPresentation(item.copyChoice);
+            const qualityPolicyCopy = item.readiness === "ready" && item.qualityChoice.mode === "stream"
+              ? item.qualityChoice.policy.mode === "best_under_cap"
+                ? `Automatic: best supported quality at or below 90% of ${fmtBytes(item.qualityChoice.maxDownloadBytes) ?? "the saved cap"}${item.qualityChoice.policy.maxHeight === undefined ? "" : ` and at most ${item.qualityChoice.policy.maxHeight}p`}. The full saved cap remains a hard runtime limit. Rechecked before download.`
+                : "Manual choice. ClipHutch rechecks that exact quality before download."
+              : null;
             return (
               <li
                 key={item.itemId}
@@ -4515,24 +4530,6 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
                 <div style={{ color: "#59675c", fontSize: 10.5, marginTop: 3, overflowWrap: "anywhere" }}>
                   <code>{item.plannedRelativePath}</code>
                   {` · ${plannedSizeCopy}`}
-                </div>
-                <div
-                  role="note"
-                  aria-label={`Copy choice for ${basename}`}
-                  style={{
-                    marginTop: 5,
-                    padding: "5px 6px",
-                    borderRadius: 5,
-                    border: "1px solid #c8d8cc",
-                    background: "#f4f9f5",
-                    color: "#31553d",
-                    fontSize: 10.5,
-                  }}
-                >
-                  <strong>
-                    {copyChoiceUi.label}
-                  </strong>
-                  <div style={{ marginTop: 2 }}>{copyChoiceUi.reason}</div>
                 </div>
                 {(item.media.kind === "hls" || item.media.kind === "dash") && itemOptions.length > 0 ? (
                   <label style={{ display: "block", marginTop: 6, fontSize: 10.5 }}>
@@ -4558,13 +4555,6 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
                         </option>
                       ))}
                     </select>
-                    {item.readiness === "ready" && item.qualityChoice.mode === "stream" ? (
-                      <span style={{ display: "block", color: "#59675c", marginTop: 3 }}>
-                        {item.qualityChoice.policy.mode === "best_under_cap"
-                          ? `Automatic: best supported quality at or below 90% of ${fmtBytes(item.qualityChoice.maxDownloadBytes) ?? "the saved cap"}${item.qualityChoice.policy.maxHeight === undefined ? "" : ` and at most ${item.qualityChoice.policy.maxHeight}p`}. The full saved cap remains a hard runtime limit. Rechecked before download.`
-                          : "Manual choice. ClipHutch rechecks that exact quality before download."}
-                      </span>
-                    ) : null}
                   </label>
                 ) : null}
                 {isFreeVideoChoice ? (
@@ -4584,6 +4574,34 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
                     Use one free video slot for this item
                   </label>
                 ) : null}
+                <details style={{ marginTop: 6 }}>
+                  <summary style={{ cursor: "pointer", fontSize: 10.5, fontWeight: 600 }}>
+                    Why this copy
+                  </summary>
+                  <div
+                    role="note"
+                    aria-label={`Copy choice for ${basename}`}
+                    style={{
+                      marginTop: 5,
+                      padding: "5px 6px",
+                      borderRadius: 5,
+                      border: "1px solid #c8d8cc",
+                      background: "#f4f9f5",
+                      color: "#31553d",
+                      fontSize: 10.5,
+                    }}
+                  >
+                    <strong>
+                      {copyChoiceUi.label}
+                    </strong>
+                    <div style={{ marginTop: 2 }}>{copyChoiceUi.reason}</div>
+                    {qualityPolicyCopy ? (
+                      <div style={{ color: "#59675c", marginTop: 4 }}>
+                        {qualityPolicyCopy}
+                      </div>
+                    ) : null}
+                  </div>
+                </details>
                 {item.warnings.map((warning) => (
                   <div key={`${warning.code}:${warning.message}`} role="note" style={{ color: "#7a4d14", fontSize: 10.5, marginTop: 5 }}>
                     {warning.message}
@@ -4599,7 +4617,7 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
                   aria-label={`Remove ${basename} from Capture Pack`}
                   style={{ ...buttonStyle, marginTop: 6, padding: "3px 7px", fontSize: 10 }}
                 >
-                  Remove from pack
+                  Remove
                 </button>
               </li>
             );
@@ -4626,13 +4644,20 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
           <button
             type="button"
             disabled={submitDisabled}
-            onClick={() => void enqueueReviewedCapture()}
+            onClick={() => {
+              if (captureRunOutcomeUnknown) {
+                setCaptureView("activity");
+                void refreshCaptureWorkspace();
+                return;
+              }
+              void enqueueReviewedCapture();
+            }}
             style={submitDisabled ? disabledButtonStyle : primaryButtonStyle}
           >
             {captureRunPending
-              ? captureRunOutcomeUnknown ? "Reconciling previous start…" : "Starting pack…"
+              ? captureRunOutcomeUnknown ? "Checking…" : "Starting pack…"
               : captureRunOutcomeUnknown
-                ? "Reconcile previous start"
+                ? "View Activity"
                 : gate.isCompleteAllocation
                   ? `Save complete pack (${gate.saveItemCount} media)`
                   : `Save free pack (${gate.saveItemCount} media)`}
@@ -4670,6 +4695,7 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
       .sort(([left], [right]) => left.localeCompare(right))[0]?.[1];
     const quickRecoveryCommandId = quickCaptureContext?.commandId ??
       fallbackQuickIntent?.commandId;
+    const quickRecoveryNeedsManual = quickCaptureContext?.needsManualReconcile ?? false;
     const hasQuickRecovery = Boolean(
       quickCaptureReconcilePending || quickCaptureContext || fallbackQuickIntent ||
       previousStartUnresolved,
@@ -4677,13 +4703,13 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
     const quickRecoveryJob = quickCaptureContext?.jobId
       ? captureJobs.find((job) => job.jobId === quickCaptureContext.jobId)
       : undefined;
-    const quickRecoveryCopy = quickCaptureReconcilePending && !quickCaptureContext && !fallbackQuickIntent
-      ? "ClipHutch is checking the original Quick Capture command against authoritative Activity state."
-      : quickCaptureContext?.reconciliationState === "commit_state_unknown"
-      ? "ClipHutch could not confirm whether this Quick Capture reached the queue. Reconcile the original command before starting another."
-      : quickCaptureContext?.reconciliationState === "recovery_needed"
-        ? "This Quick Capture was accepted, but its queue record needs recovery. Reconcile the original command."
-        : "This Quick Capture start is not confirmed yet. Reconcile the original command before starting another.";
+    const quickRecoveryCopy = quickRecoveryNeedsManual
+      ? "ClipHutch could not confirm whether an earlier download started. Check your Downloads folder, then choose Check again."
+      : "ClipHutch is checking whether an earlier download started. This resolves on its own.";
+    const packRecoveryIntent = captureRunOutcomeUnknown ? captureRunReconcileRef.current : null;
+    const packRecoveryCopy = packRecoveryIntent?.needsManualReconcile
+      ? "ClipHutch could not confirm whether an earlier download started. Check your Downloads folder, then choose Check again."
+      : "ClipHutch is checking whether an earlier download started. This resolves on its own.";
     const cancellable = new Set(["prepared", "queued", "starting", "running", "processing", "delivery_pending", "saving", "cancelling"]);
     return (
       <section aria-label="Capture activity" style={{ marginTop: 10 }}>
@@ -4703,7 +4729,7 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
           <article style={{ ...noteBoxStyle, marginTop: 0, marginBottom: 8, background: "#fffaf0" }}>
             <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
               <strong>Quick Capture</strong>
-              <span>Needs reconciliation</span>
+              <span>{quickRecoveryNeedsManual ? "Check needed" : "Checking…"}</span>
             </div>
             <div style={{ marginTop: 5 }}>{quickRecoveryCopy}</div>
             {quickRecoveryJob ? (
@@ -4719,22 +4745,41 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
                 {quickCaptureReconcileError}
               </div>
             ) : null}
-            {quickRecoveryCommandId ? (
+            {quickRecoveryCommandId && quickRecoveryNeedsManual ? (
               <button
                 type="button"
                 disabled={quickCaptureReconcilePending}
                 onClick={() => void reconcileWorkspaceQuickCapture(quickRecoveryCommandId)}
                 style={{ ...(quickCaptureReconcilePending ? disabledButtonStyle : primaryButtonStyle), marginTop: 7 }}
               >
-                {quickCaptureReconcilePending ? "Reconciling…" : "Reconcile start"}
+                {quickCaptureReconcilePending ? "Checking…" : "Check again"}
               </button>
-            ) : (
+            ) : !quickRecoveryCommandId ? (
               <div role="status" style={{ marginTop: 5 }}>
                 {quickCaptureReconcilePending
-                  ? "Reconciling the previous start…"
-                  : "Refresh Activity to load the authoritative reconciliation command."}
+                  ? "Checking the previous start…"
+                  : "Refresh Activity to load the authoritative command."}
               </div>
-            )}
+            ) : null}
+          </article>
+        ) : null}
+        {packRecoveryIntent ? (
+          <article style={{ ...noteBoxStyle, marginTop: 0, marginBottom: 8, background: "#fffaf0" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+              <strong>Capture Pack</strong>
+              <span>{packRecoveryIntent.needsManualReconcile ? "Check needed" : "Checking…"}</span>
+            </div>
+            <div style={{ marginTop: 5 }}>{packRecoveryCopy}</div>
+            {packRecoveryIntent.needsManualReconcile ? (
+              <button
+                type="button"
+                disabled={captureRunPending}
+                onClick={() => void enqueueReviewedCapture()}
+                style={{ ...(captureRunPending ? disabledButtonStyle : primaryButtonStyle), marginTop: 7 }}
+              >
+                {captureRunPending ? "Checking…" : "Check again"}
+              </button>
+            ) : null}
           </article>
         ) : null}
         {!hasQuickRecovery && captureRuns.length === 0 ? (
@@ -4818,9 +4863,7 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
                             type="button"
                             disabled={captureManifestRetryPendingKey !== null}
                             onClick={() => void retryManifestOutput(run.runId, output.format)}
-                            aria-label={reconciling
-                              ? `Reconcile ${output.format.toUpperCase()} manifest export`
-                              : model.actionLabel}
+                            aria-label={model.actionLabel}
                             style={{
                               ...(
                                 captureManifestRetryPendingKey !== null
@@ -4833,9 +4876,9 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
                             }}
                           >
                             {pending
-                              ? reconciling ? "Reconciling export…" : "Exporting…"
+                              ? reconciling ? "Checking export…" : "Exporting…"
                               : reconciling
-                                ? `Reconcile ${output.format.toUpperCase()} export`
+                                ? "Retry export"
                                 : model.actionLabel}
                           </button>
                         ) : null}
@@ -4907,7 +4950,10 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
           </span>
           {draftItems.length > 0 && (
             <button
-              onClick={() => void requestCaptureReview(captureChoices)}
+              onClick={() => {
+                setCaptureView("review");
+                void requestCaptureReview(captureChoices);
+              }}
               disabled={!workspaceBootstrapped || captureReviewPending || anyStartReconciliationActive}
               style={!workspaceBootstrapped || captureReviewPending || anyStartReconciliationActive ? disabledButtonStyle : primaryButtonStyle}
             >
@@ -5011,7 +5057,7 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
       </div>
       {quickCaptureRecoveryActive && captureView !== "activity" ? (
         <div role="alert" style={errorBoxStyle}>
-          A previous Quick Capture start must be resolved before another Quick Capture or pack can begin.
+          Checking a previous download before starting new ones…
           <button
             type="button"
             onClick={() => {

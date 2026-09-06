@@ -5,13 +5,17 @@ import {
   WORKSPACE_TAB_MIN_TRACK_PX,
   activeTabLoadIsCurrent,
   binaryTabForKey,
+  captureReviewDetailsDefaultOpen,
   customerVisibleUrlTitle,
   groupCaptureDraftBySourcePage,
+  hutchDetailsDefaultOpen,
   hutchFocusItemAfterRemoval,
+  shouldRenderCapturePageFolders,
   sourcePageDisplayUrl,
   workspaceTabColumnCount,
   workspaceRouteForKey,
 } from "./workspace-ui";
+import { DEFAULT_SETTINGS } from "./storage-local";
 
 describe("hutchFocusItemAfterRemoval", () => {
   it("prefers the next row, then the previous row, then the Hutch heading", () => {
@@ -106,6 +110,27 @@ describe("groupCaptureDraftBySourcePage", () => {
         itemIds: ["three"],
       },
     ]);
+  });
+});
+
+describe("Capture Pack Details visibility helpers", () => {
+  it("renders page folder controls only for packs spanning multiple source pages", () => {
+    expect(shouldRenderCapturePageFolders(0)).toBe(false);
+    expect(shouldRenderCapturePageFolders(1)).toBe(false);
+    expect(shouldRenderCapturePageFolders(2)).toBe(true);
+  });
+
+  it("defaults Details disclosures from persisted local settings", () => {
+    expect(captureReviewDetailsDefaultOpen(DEFAULT_SETTINGS)).toBe(false);
+    expect(hutchDetailsDefaultOpen(DEFAULT_SETTINGS)).toBe(false);
+    expect(captureReviewDetailsDefaultOpen({
+      ...DEFAULT_SETTINGS,
+      captureReviewDetailsOpen: true,
+    })).toBe(true);
+    expect(hutchDetailsDefaultOpen({
+      ...DEFAULT_SETTINGS,
+      hutchDetailsOpen: true,
+    })).toBe(true);
   });
 });
 

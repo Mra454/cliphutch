@@ -22,6 +22,20 @@ describe("selectCardStatusLine", () => {
     });
   });
 
+  it("shows automatic checking between progress and errors", () => {
+    expect(selectCardStatusLine({
+      checking: "Checking a previous download…",
+      error: "Start state unknown",
+    })).toEqual({
+      kind: "pending",
+      text: "Checking a previous download…",
+    });
+    expect(selectCardStatusLine({
+      progress: "Downloading 20%",
+      checking: "Checking a previous download…",
+    })).toEqual({ kind: "progress", text: "Downloading 20%" });
+  });
+
   it("returns the error after the pending retry clears", () => {
     expect(selectCardStatusLine({
       error: "This stream is DRM-protected and cannot be downloaded.",

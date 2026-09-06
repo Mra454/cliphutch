@@ -168,10 +168,18 @@ import {
   createQuickCaptureStartIntent,
   getNewestUnresolvedQuickCaptureStartIntent,
   getQuickCaptureStartIntent,
+  isQuickCaptureStartIntentUnresolved,
   listQuickCaptureStartIntents,
+  updateQuickCaptureStartIntentAutoReconcileState,
   updateQuickCaptureStartIntentDisposition,
   type QuickCaptureStartIntentV1,
 } from "./lib/quick-capture-start-intents";
+import {
+  AUTO_RECONCILE_MAX_ATTEMPTS,
+  DEFAULT_AUTO_RECONCILE_STATE,
+  runAutoReconcileAttempt,
+  type AutoReconcileStateV1,
+} from "./lib/quick-capture-auto-reconcile";
 import {
   getCaptureJob,
   getCaptureRun,
@@ -236,6 +244,7 @@ import {
   getNewestUnresolvedCaptureRunIntent,
   isCaptureRunIntentUnresolved,
   listCaptureRunIntents,
+  updateCaptureRunIntentAutoReconcileState,
   type CaptureRunIntentV1,
 } from "./lib/capture-run-intents";
 import {
@@ -3227,18 +3236,7 @@ async function handleCaptureQuickReconcile(
   request: CaptureQuickReconcileRequest,
 ): Promise<DownloadResponse> {
   try {
-    return await downloadCommandGate.run(request.commandId, async () => {
-      const read = await getQuickCaptureStartIntent(request.commandId);
-      if (!read.ok) throw new QuickCaptureStartPendingError();
-      if (!read.intent) {
-        return {
-          ok: false,
-          code: "INTENT_NOT_FOUND",
-          error: "This Quick Capture no longer has an unresolved start to reconcile.",
-        };
-      }
-      return reconcileQuickCaptureStartIntent(read.intent);
-    });
+    return await reconcileQuickCaptureStartCommand(request.commandId);
   } catch {
     return {
       ok: false,
@@ -3248,7 +3246,119 @@ async function handleCaptureQuickReconcile(
   }
 }
 
+async function reconcileQuickCaptureStartCommand(commandId: string): Promise<DownloadResponse> {
+  return downloadCommandGate.run(commandId, async () => {
+    const read = await getQuickCaptureStartIntent(commandId);
+    if (!read.ok) throw new QuickCaptureStartPendingError();
+    if (!read.intent) {
+      return {
+        ok: false,
+        code: "INTENT_NOT_FOUND",
+        error: "This Quick Capture no longer needs checking.",
+      };
+    }
+    return reconcileQuickCaptureStartIntent(read.intent);
+  });
+}
+
+function exhaustedAutoReconcileState(): AutoReconcileStateV1 {
+  return {
+    autoReconcileAttemptCount: AUTO_RECONCILE_MAX_ATTEMPTS,
+    needsManualReconcile: true,
+  };
+}
+
+async function markQuickCaptureAutoReconcile(
+  commandId: string,
+  state: AutoReconcileStateV1,
+): Promise<boolean> {
+  const updated = await updateQuickCaptureStartIntentAutoReconcileState({ commandId, state });
+  return updated.ok;
+}
+
+async function markCaptureRunAutoReconcile(
+  commandId: string,
+  state: AutoReconcileStateV1,
+): Promise<boolean> {
+  const updated = await updateCaptureRunIntentAutoReconcileState({ commandId, state });
+  return updated.ok;
+}
+
+async function reconcileCaptureRunStartCommand(
+  intent: CaptureRunIntentV1,
+): Promise<{ ok: boolean }> {
+  const response = await withKeyLock(
+    CAPTURE_DRAFT_ACCEPTANCE_LOCK_KEY,
+    () => handleCaptureRunEnqueue({
+      type: "capture-run-enqueue",
+      commandId: intent.commandId,
+      planId: intent.planId,
+      draftId: intent.draftId,
+      expectedRevision: intent.draftRevision,
+      freeVideoItemIds: [...intent.requestedFreeVideoItemIds],
+    }),
+  );
+  return response !== null &&
+    typeof response === "object" &&
+    (response as { ok?: unknown }).ok === true
+    ? { ok: true }
+    : { ok: false };
+}
+
+async function runAutomaticStartReconciliation(): Promise<void> {
+  const quickIntents = await listQuickCaptureStartIntents();
+  if (quickIntents.ok) {
+    for (const intent of quickIntents.intents) {
+      if (
+        intent.status === "committed" &&
+        intent.reconciliationDisposition === "accepted"
+      ) {
+        const commandRecord = await downloadCommandStore.read(intent.commandId).catch(
+          () => undefined,
+        );
+        if (commandRecord?.state === "pending") {
+          await reconcileQuickCaptureStartCommand(intent.commandId).catch(() => undefined);
+        }
+        continue;
+      }
+      if (!isQuickCaptureStartIntentUnresolved(intent)) continue;
+      await runAutoReconcileAttempt({
+        intent,
+        now: Date.now(),
+        markAttempt: markQuickCaptureAutoReconcile,
+        markManualReconcileRequired: (commandId) =>
+          markQuickCaptureAutoReconcile(commandId, exhaustedAutoReconcileState()),
+        markReconcileSucceeded: (commandId) =>
+          markQuickCaptureAutoReconcile(commandId, DEFAULT_AUTO_RECONCILE_STATE),
+        reconcileExistingStart: (commandId) =>
+          reconcileQuickCaptureStartCommand(commandId).catch(() => ({
+            ok: false,
+            error: "ClipHutch still cannot prove the Quick Capture outcome.",
+          })),
+      });
+    }
+  }
+
+  const runIntents = await listCaptureRunIntents();
+  if (!runIntents.ok) return;
+  for (const intent of runIntents.intents) {
+    if (!isCaptureRunIntentUnresolved(intent)) continue;
+    await runAutoReconcileAttempt({
+      intent,
+      now: Date.now(),
+      markAttempt: markCaptureRunAutoReconcile,
+      markManualReconcileRequired: (commandId) =>
+        markCaptureRunAutoReconcile(commandId, exhaustedAutoReconcileState()),
+      markReconcileSucceeded: (commandId) =>
+        markCaptureRunAutoReconcile(commandId, DEFAULT_AUTO_RECONCILE_STATE),
+      reconcileExistingStart: () =>
+        reconcileCaptureRunStartCommand(intent).catch(() => ({ ok: false })),
+    });
+  }
+}
+
 async function handleCaptureWorkspaceGet(): Promise<unknown> {
+  await runAutomaticStartReconciliation();
   const [
     draftResult,
     plansResult,
@@ -3373,6 +3483,7 @@ async function handleCaptureWorkspaceGet(): Promise<unknown> {
           draftRevision: unresolvedIntent.draftRevision,
           requestedFreeVideoItemIds: unresolvedIntent.requestedFreeVideoItemIds,
           licensed: unresolvedIntent.licensed,
+          needsManualReconcile: unresolvedIntent.needsManualReconcile,
           status: unresolvedIntent.status,
           reconciliationState: unresolvedIntent.status === "pending"
             ? "pending"
@@ -3393,6 +3504,7 @@ async function handleCaptureWorkspaceGet(): Promise<unknown> {
           reconciliationState: unresolvedQuick.status === "pending"
             ? "pending"
             : unresolvedQuick.reconciliationDisposition,
+          needsManualReconcile: unresolvedQuick.needsManualReconcile,
           ...(unresolvedQuickJob === undefined ? {} : { jobId: unresolvedQuickJob.jobId }),
         }
       : null,
@@ -5200,6 +5312,7 @@ function updateCaptureCleanupRetry(pending: boolean): void {
 async function drainCaptureQueueOnce(): Promise<void> {
   const recovery = captureRecoveryBarrier;
   if (recovery) await recovery.catch(() => undefined);
+  await runAutomaticStartReconciliation();
   const recoveryComplete = await withKeyLock(
     CAPTURE_DRAFT_ACCEPTANCE_LOCK_KEY,
     recoverCaptureJobs,
@@ -5698,31 +5811,7 @@ async function recoverCaptureJobsUnlocked(): Promise<boolean> {
 }
 
 async function recoverQuickCaptureStartIntents(): Promise<void> {
-  const listed = await listQuickCaptureStartIntents();
-  if (!listed.ok) return;
-  for (const intent of listed.intents) {
-    if (
-      intent.status === "committed" &&
-      intent.reconciliationDisposition === "accepted"
-    ) {
-      // A worker can stop after the Quick journal records accepted ownership
-      // but before PersistentCommandGate writes its settled response. Repair
-      // that narrow window without recreating already-pruned settled commands.
-      const commandRecord = await downloadCommandStore.read(intent.commandId).catch(
-        () => undefined,
-      );
-      if (commandRecord?.state !== "pending") continue;
-    }
-    // Re-enter through the original command gate. Reconciling only the Quick
-    // intent can prove the run/job was accepted while leaving the matching
-    // download-command tombstone pending forever. The gate settles both views
-    // of the same customer intent after exact ownership is established, and
-    // keeps both unresolved when reconciliation is still ambiguous.
-    await downloadCommandGate.run(
-      intent.commandId,
-      () => reconcileQuickCaptureStartIntent(intent),
-    ).catch(() => undefined);
-  }
+  await runAutomaticStartReconciliation();
 }
 
 const captureQueueDrainScheduler = createTrailingTaskScheduler(drainCaptureQueueOnce);

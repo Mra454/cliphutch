@@ -69,6 +69,7 @@ type CaptureWorkspaceRunContextBaseV1 = {
   draftRevision: number;
   requestedFreeVideoItemIds: string[];
   licensed: boolean;
+  needsManualReconcile: boolean;
 };
 
 export type CaptureWorkspaceRunContextV1 = CaptureWorkspaceRunContextBaseV1 & (
@@ -86,6 +87,7 @@ export type CaptureWorkspaceQuickCaptureContextV1 = {
   planId: string;
   itemId: string;
   reconciliationState: "pending" | "commit_state_unknown" | "recovery_needed";
+  needsManualReconcile: boolean;
   jobId?: string;
 };
 
@@ -618,11 +620,13 @@ function parseRunContext(value: unknown): CaptureWorkspaceRunContextV1 | null | 
       !hasOnlyKeys(record, [
         "commandId", "planId", "draftId", "draftRevision",
         "requestedFreeVideoItemIds", "licensed", "status", "reconciliationState", "runId",
+        "needsManualReconcile",
       ]) ||
       typeof record.commandId !== "string" ||
       !CAPTURE_RUN_COMMAND_ID_PATTERN.test(record.commandId) ||
       !safeId(record.planId) || !safeId(record.draftId) ||
       !safeNonNegative(record.draftRevision) || typeof record.licensed !== "boolean" ||
+      typeof record.needsManualReconcile !== "boolean" ||
       (record.status !== "pending" && record.status !== "committed")) {
     return undefined;
   }
@@ -652,6 +656,7 @@ function parseRunContext(value: unknown): CaptureWorkspaceRunContextV1 | null | 
     draftRevision: record.draftRevision,
     requestedFreeVideoItemIds,
     licensed: record.licensed,
+    needsManualReconcile: record.needsManualReconcile,
   };
   return record.status === "pending"
     ? { ...base, status: "pending", reconciliationState: "pending" }
@@ -675,6 +680,7 @@ function parseQuickCaptureContext(
     "planId",
     "itemId",
     "reconciliationState",
+    "needsManualReconcile",
     "jobId",
   ])) return undefined;
   const identity = quickCaptureIdentity(record.commandId);
@@ -686,6 +692,7 @@ function parseQuickCaptureContext(
     (record.reconciliationState !== "pending" &&
       record.reconciliationState !== "commit_state_unknown" &&
       record.reconciliationState !== "recovery_needed") ||
+    typeof record.needsManualReconcile !== "boolean" ||
     (record.jobId !== undefined &&
       (typeof record.jobId !== "string" || !CAPTURE_JOB_ID_PATTERN.test(record.jobId)))
   ) {
@@ -697,6 +704,7 @@ function parseQuickCaptureContext(
     planId: identity.planId,
     itemId: identity.itemId,
     reconciliationState: record.reconciliationState,
+    needsManualReconcile: record.needsManualReconcile,
     ...(typeof record.jobId === "string" ? { jobId: record.jobId } : {}),
   };
 }

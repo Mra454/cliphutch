@@ -1,4 +1,5 @@
 import type { CaptureDraftItemV1, CaptureDraftV1 } from "./capture-pack-types";
+import type { UserSettings } from "./storage-local";
 
 export const WORKSPACE_ROUTES = ["shelf", "hutch", "review", "activity"] as const;
 export const WORKSPACE_TAB_GAP_PX = 5;
@@ -140,6 +141,18 @@ export function groupCaptureDraftBySourcePage(
     });
   }
   return [...groups.values()];
+}
+
+export function shouldRenderCapturePageFolders(sourcePageCount: number): boolean {
+  return Number.isSafeInteger(sourcePageCount) && sourcePageCount >= 2;
+}
+
+export function captureReviewDetailsDefaultOpen(settings: UserSettings): boolean {
+  return settings.captureReviewDetailsOpen;
+}
+
+export function hutchDetailsDefaultOpen(settings: UserSettings): boolean {
+  return settings.hutchDetailsOpen;
 }
 
 /** Rejects late async media loads after the panel has followed another tab. */
