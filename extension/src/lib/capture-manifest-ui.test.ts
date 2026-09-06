@@ -58,7 +58,7 @@ describe("Capture manifest Activity copy", () => {
     })).toBe("cancelled");
   });
 
-  it("warns before an explicit retry when Chrome acceptance is unknown", () => {
+  it("hides manifest retry while automatic export checks remain", () => {
     const model = createCaptureManifestOutputUiModel({
       format: "csv",
       state: "failed",
@@ -68,8 +68,22 @@ describe("Capture manifest Activity copy", () => {
     expect(model).toEqual({
       filename: "_cliphutch-manifest.csv",
       statusLabel: "Checking save…",
-      detail: "Chrome may already have accepted this manifest. Check Downloads before retrying export.",
+      detail: "Checking export…",
       tone: "warning",
+    });
+  });
+
+  it("shows manifest retry only after automatic export checks are exhausted", () => {
+    const model = createCaptureManifestOutputUiModel({
+      format: "csv",
+      state: "failed",
+      errorCode: "MANIFEST_SAVE_STATE_UNKNOWN",
+      retryable: true,
+      autoReconcileAttemptCount: 5,
+      needsManualReconcile: true,
+    });
+    expect(model).toMatchObject({
+      detail: "Chrome may already have accepted this manifest. Check Downloads before retrying export.",
       actionLabel: "Retry export",
     });
   });

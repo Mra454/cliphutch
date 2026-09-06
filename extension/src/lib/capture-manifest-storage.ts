@@ -5,10 +5,12 @@ import {
   finalizeCaptureManifestRecord,
   isCaptureManifestRecordV1,
   reduceCaptureManifestOutput,
+  updateCaptureManifestOutputAutoReconcileState,
   type CaptureManifestOutputActionV1,
   type CaptureManifestRecordV1,
   type ReduceCaptureManifestOutputResult,
 } from "./capture-manifest-delivery";
+import type { AutoReconcileStateV1 } from "./quick-capture-auto-reconcile";
 import { withKeyLock } from "./session-jobs";
 
 export const CAPTURE_MANIFEST_RECORD_STORAGE_PREFIX = "capture-manifest-record-v1:";
@@ -48,6 +50,10 @@ export type GetCaptureManifestRecordResult =
   | CaptureManifestStorageFailure;
 
 export type MutateCaptureManifestOutputResult =
+  | { ok: true; changed: boolean; record: CaptureManifestRecordV1 }
+  | CaptureManifestStorageFailure;
+
+export type UpdateCaptureManifestOutputAutoReconcileResult =
   | { ok: true; changed: boolean; record: CaptureManifestRecordV1 }
   | CaptureManifestStorageFailure;
 
@@ -195,6 +201,35 @@ export async function mutateCaptureManifestOutput(input: {
     ) };
     if (!reduced.changed) return reduced;
     return writeRecordWithReadBack(key, parsed.record, reduced.record);
+  });
+}
+
+export async function updateStoredCaptureManifestOutputAutoReconcileState(input: {
+  runId: string;
+  format: CaptureManifestFormatV1;
+  expectedRevision: number;
+  attemptId: string;
+  state: AutoReconcileStateV1;
+}): Promise<UpdateCaptureManifestOutputAutoReconcileResult> {
+  if (!safeRunId(input.runId)) {
+    return { ok: false, reason: "invalid_input", message: "Manifest auto reconcile identity is invalid." };
+  }
+  return withKeyLock(CAPTURE_RUN_GRAPH_LOCK, async () => {
+    const key = captureManifestRecordKey(input.runId);
+    const raw = await readRaw(key);
+    if (!raw.ok) return raw;
+    const parsed = parseStoredCaptureManifestRecord(raw.value);
+    if (parsed.status === "invalid") return parsedFailure(key, parsed);
+    if (parsed.status === "empty") return { ok: false, reason: "not_found", runId: input.runId };
+    if (parsed.record.seed.runId !== input.runId) {
+      return { ok: false, reason: "storage_corrupt", key };
+    }
+    const updated = updateCaptureManifestOutputAutoReconcileState(parsed.record, input);
+    if (!updated.ok) return { ok: false, reason: updated.reason, ...(
+      updated.actualRevision === undefined ? {} : { actualRevision: updated.actualRevision }
+    ) };
+    if (!updated.changed) return updated;
+    return writeRecordWithReadBack(key, parsed.record, updated.record);
   });
 }
 

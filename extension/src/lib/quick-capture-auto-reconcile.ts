@@ -1,5 +1,22 @@
+/**
+ * Automatic reconcile re-enters the same idempotent enqueue/reconcile path with
+ * frozen original IDs. Its safety depends on PersistentCommandGate blocking a
+ * second command execution (guarded by "uses the real background dependency
+ * shape with one reconcile action and frozen refs"), withKeyLock serializing
+ * read/count/write/reconcile ("serializes concurrent triggers by reading,
+ * counting, and persisting inside the lock"), deterministic run IDs
+ * ("uses the original commandId for reconcile"), and quota reservation replay
+ * ("classifies every known reconcile disposition and status explicitly").
+ */
 export const AUTO_RECONCILE_MIN_INTERVAL_MS = 10_000;
 export const AUTO_RECONCILE_MAX_ATTEMPTS = 5;
+
+export type AutoReconcileKind = "quick_start" | "pack_run" | "manifest_export";
+
+export type AutoReconcileRef =
+  | { kind: "quick_start"; commandId: string }
+  | { kind: "pack_run"; commandId: string }
+  | { kind: "manifest_export"; commandId: string; runId: string; format: "json" | "csv" };
 
 export type AutoReconcileStateV1 = {
   autoReconcileAttemptCount: number;
@@ -101,46 +118,136 @@ export function autoReconcileAttemptsRemaining(intent: AutoReconcileIntent): num
     : Math.max(0, AUTO_RECONCILE_MAX_ATTEMPTS - intent.autoReconcileAttemptCount);
 }
 
+export type AutoReconcileResolution = "resolved" | "unresolved";
+
 export type AutoReconcileRunResult<R> =
   | { status: "attempted"; result: R; attemptsRemaining: number }
   | { status: "rate_limited"; retryAt: number; attemptsRemaining: number }
   | { status: "manual_required" }
   | { status: "state_unavailable" };
 
-export async function runAutoReconcileAttempt<R extends { ok: boolean }>(input: {
-  intent: AutoReconcileIntent;
-  now: number;
-  markAttempt(commandId: string, state: AutoReconcileStateV1): Promise<boolean>;
-  markManualReconcileRequired(commandId: string): Promise<boolean>;
-  markReconcileSucceeded(commandId: string): Promise<boolean>;
-  reconcileExistingStart(commandId: string): Promise<R>;
-  startNewDownload?: (commandId: string) => Promise<unknown>;
-}): Promise<AutoReconcileRunResult<R>> {
-  const plan = planAutoReconcileAttempt(input.intent, input.now);
-  if (plan.kind === "rate_limited") {
-    return {
-      status: "rate_limited",
-      retryAt: plan.retryAt,
-      attemptsRemaining: plan.attemptsRemaining,
-    };
-  }
-  if (plan.kind === "manual_required") {
-    await input.markManualReconcileRequired(input.intent.commandId);
-    return { status: "manual_required" };
-  }
+type ResponseRecord = {
+  ok?: unknown;
+  jobId?: unknown;
+  runId?: unknown;
+  disposition?: unknown;
+  status?: unknown;
+  code?: unknown;
+  reason?: unknown;
+  pending?: unknown;
+};
 
-  if (!await input.markAttempt(input.intent.commandId, plan.state)) {
-    return { status: "state_unavailable" };
+function responseRecord(value: unknown): ResponseRecord | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as ResponseRecord
+    : undefined;
+}
+
+/**
+ * Explicit response map:
+ * - handleCaptureRunEnqueue dispositions: accepted + runId => RESOLVED;
+ *   recovery_needed, commit_state_unknown, missing/unknown => UNRESOLVED.
+ * - reconcileQuickCaptureRunStart: ok + jobId => RESOLVED;
+ *   pending/START_STATE_UNKNOWN/outcome_unknown => UNRESOLVED; responses
+ *   tagged failed/cancelled/abandoned by the background are RESOLVED.
+ * - run-context recovery statuses: completed/complete, failed, cancelled,
+ *   abandoned => RESOLVED; pending, queued, running, partial, and unknown/new
+ *   statuses => UNRESOLVED.
+ */
+export function classifyAutoReconcileResponse(value: unknown): AutoReconcileResolution {
+  const response = responseRecord(value);
+  if (!response) return "unresolved";
+  const terminalStatuses = new Set(["completed", "complete", "failed", "cancelled", "abandoned"]);
+  if (typeof response.status === "string") {
+    return terminalStatuses.has(response.status) ? "resolved" : "unresolved";
   }
-  const result = await input.reconcileExistingStart(input.intent.commandId);
-  if (result.ok) {
-    await input.markReconcileSucceeded(input.intent.commandId);
-  } else if (plan.attemptsRemainingAfterAttempt === 0) {
-    await input.markManualReconcileRequired(input.intent.commandId);
+  if (response.ok === true) {
+    if (response.disposition !== undefined) {
+      return response.disposition === "accepted" && typeof response.runId === "string"
+        ? "resolved"
+        : "unresolved";
+    }
+    if (typeof response.jobId === "string") return "resolved";
+    return "unresolved";
   }
-  return {
-    status: "attempted",
-    result,
-    attemptsRemaining: result.ok ? AUTO_RECONCILE_MAX_ATTEMPTS : plan.attemptsRemainingAfterAttempt,
+  if (response.ok === false) {
+    if (response.pending === true) return "unresolved";
+    if (response.code === "START_STATE_UNKNOWN") return "unresolved";
+    if (
+      response.reason === "outcome_unknown" ||
+      response.reason === "manifest_attempt_failed"
+    ) return "unresolved";
+    return response.code === "CANCELLED" ||
+        response.code === "RATE_LIMITED" ||
+        response.code === "SOURCE_AUTH_EXPIRED"
+      ? "resolved"
+      : "unresolved";
+  }
+  return "unresolved";
+}
+
+export type AutoReconcileDependencies<R> = {
+  lockKey: string;
+  withLock<T>(key: string, task: () => Promise<T>): Promise<T>;
+  now(): number;
+  readIntent(ref: AutoReconcileRef): Promise<AutoReconcileIntent | null>;
+  markAttempt(ref: AutoReconcileRef, state: AutoReconcileStateV1): Promise<boolean>;
+  markManualReconcileRequired(ref: AutoReconcileRef): Promise<boolean>;
+  markReconcileSucceeded(ref: AutoReconcileRef): Promise<boolean>;
+  actions: {
+    reconcile(ref: AutoReconcileRef): Promise<R>;
   };
+};
+
+export async function runAutoReconcileAttempt<R>(input: {
+  ref: AutoReconcileRef;
+  now: number;
+  lockKey: string;
+} & Omit<AutoReconcileDependencies<R>, "now">): Promise<AutoReconcileRunResult<R>> {
+  return input.withLock(input.lockKey, async () => {
+    const intent = await input.readIntent(input.ref);
+    if (!intent) return { status: "state_unavailable" };
+    const plan = planAutoReconcileAttempt(intent, input.now);
+    if (plan.kind === "rate_limited") {
+      return {
+        status: "rate_limited",
+        retryAt: plan.retryAt,
+        attemptsRemaining: plan.attemptsRemaining,
+      };
+    }
+    if (plan.kind === "manual_required") {
+      await input.markManualReconcileRequired(input.ref);
+      return { status: "manual_required" };
+    }
+
+    if (!await input.markAttempt(input.ref, plan.state)) {
+      return { status: "state_unavailable" };
+    }
+    const result = await input.actions.reconcile(input.ref);
+    const resolution = classifyAutoReconcileResponse(result);
+    if (resolution === "resolved") {
+      await input.markReconcileSucceeded(input.ref);
+    } else if (plan.attemptsRemainingAfterAttempt === 0) {
+      await input.markManualReconcileRequired(input.ref);
+    }
+    return {
+      status: "attempted",
+      result,
+      attemptsRemaining: resolution === "resolved"
+        ? AUTO_RECONCILE_MAX_ATTEMPTS
+        : plan.attemptsRemainingAfterAttempt,
+    };
+  });
+}
+
+export function autoReconcileLockKey(ref: AutoReconcileRef): string {
+  return ref.kind === "manifest_export"
+    ? `auto-reconcile:${ref.kind}:${ref.runId}:${ref.format}:${ref.commandId}`
+    : `auto-reconcile:${ref.kind}:${ref.commandId}`;
+}
+
+export function createAutoReconcileDependencies<R>(
+  dependencies: AutoReconcileDependencies<R>,
+): AutoReconcileDependencies<R> {
+  return dependencies;
 }

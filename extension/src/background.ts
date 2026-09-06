@@ -177,7 +177,10 @@ import {
 import {
   AUTO_RECONCILE_MAX_ATTEMPTS,
   DEFAULT_AUTO_RECONCILE_STATE,
+  autoReconcileLockKey,
+  createAutoReconcileDependencies,
   runAutoReconcileAttempt,
+  type AutoReconcileRef,
   type AutoReconcileStateV1,
 } from "./lib/quick-capture-auto-reconcile";
 import {
@@ -192,6 +195,7 @@ import {
   finalizeStoredCaptureManifestRecord,
   getCaptureManifestRecord,
   mutateCaptureManifestOutput,
+  updateStoredCaptureManifestOutputAutoReconcileState,
 } from "./lib/capture-manifest-storage";
 import {
   buildCaptureManifestInput,
@@ -241,6 +245,7 @@ import {
   createCaptureRunIntent,
   digestCaptureRunExecutionPlan,
   finalizeCaptureRunIntent,
+  getCaptureRunIntent,
   getNewestUnresolvedCaptureRunIntent,
   isCaptureRunIntentUnresolved,
   listCaptureRunIntents,
@@ -511,7 +516,7 @@ chrome.storage.onChanged.addListener(async (changes, area) => {
 });
 
 chrome.tabs.onActivated.addListener(({ tabId }) => {
-  void updateBadge(tabId);
+  void runAutomaticStartReconciliation({ tabId }).then(() => updateBadge(tabId));
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
@@ -1027,7 +1032,7 @@ async function handleSingleCaptureDownload(
     return {
       ok: false,
       code: "PREVIOUS_START_UNRESOLVED",
-      error: "Reconcile the previous Quick Capture start before starting another download.",
+      error: "ClipHutch is still checking an earlier download. Try again in a moment.",
     };
   }
   const unresolved = await getNewestUnresolvedCaptureRunIntent();
@@ -1042,7 +1047,7 @@ async function handleSingleCaptureDownload(
     return {
       ok: false,
       code: "PREVIOUS_START_UNRESOLVED",
-      error: "Reconcile the previous Capture Pack start before starting another download.",
+      error: "ClipHutch is still checking an earlier download. Try again in a moment.",
     };
   }
 
@@ -1120,7 +1125,7 @@ async function handleSingleCaptureDownload(
       return {
         ok: false,
         code: "PREVIOUS_START_UNRESOLVED",
-        error: "Reconcile the previous Capture Pack start before starting another download.",
+        error: "ClipHutch is still checking an earlier download. Try again in a moment.",
       };
     }
     const activeOwner = await findActiveQuickCaptureJob(prepared.plan);
@@ -3269,25 +3274,45 @@ function exhaustedAutoReconcileState(): AutoReconcileStateV1 {
 }
 
 async function markQuickCaptureAutoReconcile(
-  commandId: string,
+  ref: AutoReconcileRef,
   state: AutoReconcileStateV1,
 ): Promise<boolean> {
-  const updated = await updateQuickCaptureStartIntentAutoReconcileState({ commandId, state });
+  if (ref.kind !== "quick_start") return false;
+  const updated = await updateQuickCaptureStartIntentAutoReconcileState({ commandId: ref.commandId, state });
   return updated.ok;
 }
 
 async function markCaptureRunAutoReconcile(
-  commandId: string,
+  ref: AutoReconcileRef,
   state: AutoReconcileStateV1,
 ): Promise<boolean> {
-  const updated = await updateCaptureRunIntentAutoReconcileState({ commandId, state });
+  if (ref.kind !== "pack_run") return false;
+  const updated = await updateCaptureRunIntentAutoReconcileState({ commandId: ref.commandId, state });
+  return updated.ok;
+}
+
+async function markManifestExportAutoReconcile(
+  ref: AutoReconcileRef,
+  state: AutoReconcileStateV1,
+): Promise<boolean> {
+  if (ref.kind !== "manifest_export") return false;
+  const read = await getCaptureManifestRecord(ref.runId);
+  const output = read.ok ? read.record?.outputs[ref.format] : undefined;
+  if (output?.state !== "failed" || output.attemptId !== ref.commandId) return false;
+  const updated = await updateStoredCaptureManifestOutputAutoReconcileState({
+    runId: ref.runId,
+    format: ref.format,
+    expectedRevision: output.revision,
+    attemptId: ref.commandId,
+    state,
+  });
   return updated.ok;
 }
 
 async function reconcileCaptureRunStartCommand(
   intent: CaptureRunIntentV1,
-): Promise<{ ok: boolean }> {
-  const response = await withKeyLock(
+): Promise<unknown> {
+  return await withKeyLock(
     CAPTURE_DRAFT_ACCEPTANCE_LOCK_KEY,
     () => handleCaptureRunEnqueue({
       type: "capture-run-enqueue",
@@ -3298,17 +3323,35 @@ async function reconcileCaptureRunStartCommand(
       freeVideoItemIds: [...intent.requestedFreeVideoItemIds],
     }),
   );
-  return response !== null &&
-    typeof response === "object" &&
-    (response as { ok?: unknown }).ok === true
-    ? { ok: true }
-    : { ok: false };
 }
 
-async function runAutomaticStartReconciliation(): Promise<void> {
+function samePageUrl(left: string | undefined, right: string | undefined): boolean {
+  if (!left || !right) return false;
+  try {
+    return new URL(left).href === new URL(right).href;
+  } catch {
+    return false;
+  }
+}
+
+async function quickCaptureIntentBelongsToTab(intent: QuickCaptureStartIntentV1, tabId: number): Promise<boolean> {
+  if (intent.headerLease?.binding.sourceTabId === tabId) return true;
+  const tab = await chrome.tabs.get(tabId).catch(() => undefined);
+  return intent.plan.items.some((item) => samePageUrl(item.media.pageUrl, tab?.url));
+}
+
+async function captureRunIntentBelongsToTab(intent: CaptureRunIntentV1, tabId: number): Promise<boolean> {
+  const read = await getCaptureReviewPlan(intent.planId);
+  if (!read.ok || !read.plan) return false;
+  const tab = await chrome.tabs.get(tabId).catch(() => undefined);
+  return read.plan.items.some((item) => samePageUrl(item.media.pageUrl, tab?.url));
+}
+
+async function runAutomaticStartReconciliation(options: { tabId?: number } = {}): Promise<void> {
   const quickIntents = await listQuickCaptureStartIntents();
   if (quickIntents.ok) {
     for (const intent of quickIntents.intents) {
+      if (options.tabId !== undefined && !await quickCaptureIntentBelongsToTab(intent, options.tabId)) continue;
       if (
         intent.status === "committed" &&
         intent.reconciliationDisposition === "accepted"
@@ -3322,19 +3365,45 @@ async function runAutomaticStartReconciliation(): Promise<void> {
         continue;
       }
       if (!isQuickCaptureStartIntentUnresolved(intent)) continue;
-      await runAutoReconcileAttempt({
-        intent,
-        now: Date.now(),
+      const ref: AutoReconcileRef = { kind: "quick_start", commandId: intent.commandId };
+      const dependencies = createAutoReconcileDependencies({
+        lockKey: autoReconcileLockKey(ref),
+        withLock: withKeyLock,
+        now: () => Date.now(),
+        readIntent: async () => {
+          const latest = await getQuickCaptureStartIntent(ref.commandId);
+          return latest.ok && latest.intent && isQuickCaptureStartIntentUnresolved(latest.intent)
+            ? latest.intent
+            : null;
+        },
         markAttempt: markQuickCaptureAutoReconcile,
-        markManualReconcileRequired: (commandId) =>
-          markQuickCaptureAutoReconcile(commandId, exhaustedAutoReconcileState()),
-        markReconcileSucceeded: (commandId) =>
-          markQuickCaptureAutoReconcile(commandId, DEFAULT_AUTO_RECONCILE_STATE),
-        reconcileExistingStart: (commandId) =>
-          reconcileQuickCaptureStartCommand(commandId).catch(() => ({
-            ok: false,
-            error: "ClipHutch still cannot prove the Quick Capture outcome.",
-          })),
+        markManualReconcileRequired: (nextRef) =>
+          markQuickCaptureAutoReconcile(nextRef, exhaustedAutoReconcileState()),
+        markReconcileSucceeded: (nextRef) =>
+          markQuickCaptureAutoReconcile(nextRef, DEFAULT_AUTO_RECONCILE_STATE),
+        actions: {
+          reconcile: async (nextRef) => {
+            const response = await reconcileQuickCaptureStartCommand(nextRef.commandId).catch(() => ({
+              ok: false,
+              code: "START_STATE_UNKNOWN",
+              pending: true as const,
+              error: "ClipHutch still cannot prove the Quick Capture outcome.",
+            }));
+            return !response.ok &&
+                !("pending" in response && response.pending === true) &&
+                response.code !== "START_STATE_UNKNOWN"
+              ? {
+                ...response,
+                status: response.code === "CANCELLED" ? "cancelled" : "failed",
+              }
+              : response;
+          },
+        },
+      });
+      await runAutoReconcileAttempt({
+        ...dependencies,
+        ref,
+        now: Date.now(),
       });
     }
   }
@@ -3342,23 +3411,47 @@ async function runAutomaticStartReconciliation(): Promise<void> {
   const runIntents = await listCaptureRunIntents();
   if (!runIntents.ok) return;
   for (const intent of runIntents.intents) {
+    if (options.tabId !== undefined && !await captureRunIntentBelongsToTab(intent, options.tabId)) continue;
     if (!isCaptureRunIntentUnresolved(intent)) continue;
-    await runAutoReconcileAttempt({
-      intent,
-      now: Date.now(),
+    const ref: AutoReconcileRef = { kind: "pack_run", commandId: intent.commandId };
+    const dependencies = createAutoReconcileDependencies({
+      lockKey: autoReconcileLockKey(ref),
+      withLock: withKeyLock,
+      now: () => Date.now(),
+      readIntent: async () => {
+        const latest = await getCaptureRunIntent(ref.commandId);
+        return latest.ok && latest.intent && isCaptureRunIntentUnresolved(latest.intent)
+          ? latest.intent
+          : null;
+      },
       markAttempt: markCaptureRunAutoReconcile,
-      markManualReconcileRequired: (commandId) =>
-        markCaptureRunAutoReconcile(commandId, exhaustedAutoReconcileState()),
-      markReconcileSucceeded: (commandId) =>
-        markCaptureRunAutoReconcile(commandId, DEFAULT_AUTO_RECONCILE_STATE),
-      reconcileExistingStart: () =>
-        reconcileCaptureRunStartCommand(intent).catch(() => ({ ok: false })),
+      markManualReconcileRequired: (nextRef) =>
+        markCaptureRunAutoReconcile(nextRef, exhaustedAutoReconcileState()),
+      markReconcileSucceeded: (nextRef) =>
+        markCaptureRunAutoReconcile(nextRef, DEFAULT_AUTO_RECONCILE_STATE),
+      actions: {
+        reconcile: async () => {
+          const latest = await getCaptureRunIntent(ref.commandId);
+          return latest.ok && latest.intent
+            ? reconcileCaptureRunStartCommand(latest.intent).catch(() => ({ ok: false, reason: "outcome_unknown" }))
+            : { ok: false, reason: "outcome_unknown" };
+        },
+      },
+    });
+    await runAutoReconcileAttempt({
+      ...dependencies,
+      ref,
+      now: Date.now(),
     });
   }
 }
 
 async function handleCaptureWorkspaceGet(): Promise<unknown> {
   await runAutomaticStartReconciliation();
+  await withKeyLock(
+    CAPTURE_ATTEMPT_SIDE_EFFECTS_LOCK_KEY,
+    () => reconcileCaptureManifests(true),
+  );
   const [
     draftResult,
     plansResult,
@@ -4421,6 +4514,62 @@ async function applyCaptureManifestDownloadTerminal(
   return true;
 }
 
+async function runAutomaticManifestExportReconciliation(
+  record: CaptureManifestRecordV1,
+  output: Extract<CaptureManifestOutputV1, { state: "failed" }>,
+): Promise<void> {
+  if (!output.retryable) return;
+  const ref: AutoReconcileRef = {
+    kind: "manifest_export",
+    commandId: output.attemptId,
+    runId: record.seed.runId,
+    format: output.format,
+  };
+  const dependencies = createAutoReconcileDependencies({
+    lockKey: autoReconcileLockKey(ref),
+    withLock: withKeyLock,
+    now: () => Date.now(),
+    readIntent: async () => {
+      const latest = await getCaptureManifestRecord(ref.runId);
+      const latestOutput = latest.ok ? latest.record?.outputs[ref.format] : undefined;
+      return latestOutput?.state === "failed" &&
+          latestOutput.retryable &&
+          latestOutput.attemptId === ref.commandId
+        ? {
+          commandId: ref.commandId,
+          ...DEFAULT_AUTO_RECONCILE_STATE,
+          autoReconcileAttemptCount: latestOutput.autoReconcileAttemptCount ?? 0,
+          ...(latestOutput.autoReconcileLastAttemptAt === undefined
+            ? {}
+            : { autoReconcileLastAttemptAt: latestOutput.autoReconcileLastAttemptAt }),
+          needsManualReconcile: latestOutput.needsManualReconcile ?? false,
+        }
+        : null;
+    },
+    markAttempt: markManifestExportAutoReconcile,
+    markManualReconcileRequired: (nextRef) =>
+      markManifestExportAutoReconcile(nextRef, exhaustedAutoReconcileState()),
+    markReconcileSucceeded: (nextRef) =>
+      markManifestExportAutoReconcile(nextRef, DEFAULT_AUTO_RECONCILE_STATE),
+    actions: {
+      reconcile: (nextRef) =>
+        nextRef.kind === "manifest_export"
+          ? handleCaptureManifestRetry({
+            type: "capture-manifest-retry",
+            commandId: nextRef.commandId,
+            runId: nextRef.runId,
+            format: nextRef.format,
+          }).catch(() => ({ ok: false, reason: "outcome_unknown" }))
+          : Promise.resolve({ ok: false, reason: "outcome_unknown" }),
+    },
+  });
+  await runAutoReconcileAttempt({
+    ...dependencies,
+    ref,
+    now: Date.now(),
+  });
+}
+
 async function reconcileCaptureManifests(allowAutomatic: boolean): Promise<boolean> {
   for (let pass = 0; pass < 128; pass += 1) {
     const listed = await listCaptureRuns();
@@ -4583,6 +4732,16 @@ async function reconcileCaptureManifests(allowAutomatic: boolean): Promise<boole
         });
       }
       continue;
+    }
+    if (allowAutomatic) {
+      for (const record of records) {
+        for (const format of record.seed.formats) {
+          const output = record.outputs[format];
+          if (output?.state === "failed" && output.retryable) {
+            await runAutomaticManifestExportReconciliation(record, output);
+          }
+        }
+      }
     }
     return !hasMonitor && planned.blockers.length === 0;
   }

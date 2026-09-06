@@ -55,6 +55,8 @@ describe("Capture manifest workspace boundary", () => {
           state: "failed",
           errorCode: "MANIFEST_SAVE_FAILED",
           retryable: true,
+          autoReconcileAttemptCount: 0,
+          needsManualReconcile: false,
         },
       ],
     }];

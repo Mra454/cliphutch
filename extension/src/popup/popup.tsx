@@ -2323,7 +2323,10 @@ export function WorkspaceShell({ surface }: { surface: WorkspaceSurface }) {
       const output = outputByKey.get(key);
       const separator = key.indexOf("\u0000");
       const runId = separator < 0 ? "" : key.slice(0, separator);
-      return !runIds.has(runId) || (output !== undefined && output.state !== "failed");
+      return !runIds.has(runId) ||
+        (output !== undefined && (
+          output.state !== "failed" || output.needsManualReconcile === true
+        ));
     });
     if (settledKeys.length === 0) return;
     for (const key of settledKeys) delete captureManifestRetryCommandRefs.current[key];

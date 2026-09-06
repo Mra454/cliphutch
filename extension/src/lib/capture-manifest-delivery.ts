@@ -4,6 +4,11 @@ import {
   isCaptureManifestSeedV1,
   type CaptureManifestSeedV1,
 } from "./capture-manifest-seed";
+import {
+  DEFAULT_AUTO_RECONCILE_STATE,
+  normalizeAutoReconcileState,
+  type AutoReconcileStateV1,
+} from "./quick-capture-auto-reconcile";
 
 export const MAX_CAPTURE_MANIFEST_RECORD_BYTES = 640 * 1024;
 export const MAX_CAPTURE_MANIFEST_OUTPUT_ATTEMPTS = 32;
@@ -38,7 +43,7 @@ type CaptureManifestOutputBaseV1 = {
    */
   attemptIds: string[];
   updatedAt: number;
-};
+} & Partial<AutoReconcileStateV1>;
 
 export type CaptureManifestOutputV1 =
   | (CaptureManifestOutputBaseV1 & { state: "pending"; attemptNo: 0; revision: 0 })
@@ -199,12 +204,18 @@ function serializedBytes(value: unknown): number | undefined {
 }
 
 function canonicalOutput(output: CaptureManifestOutputV1): CaptureManifestOutputV1 {
+  const autoReconcileState = normalizeAutoReconcileState({
+    autoReconcileAttemptCount: output.autoReconcileAttemptCount,
+    autoReconcileLastAttemptAt: output.autoReconcileLastAttemptAt,
+    needsManualReconcile: output.needsManualReconcile,
+  }) ?? DEFAULT_AUTO_RECONCILE_STATE;
   const common = {
     format: output.format,
     revision: output.revision,
     attemptNo: output.attemptNo,
     attemptIds: [...output.attemptIds],
     updatedAt: output.updatedAt,
+    ...autoReconcileState,
   };
   if (output.state === "pending") return { ...common, state: "pending", revision: 0, attemptNo: 0 };
   if (output.state === "saving") {
@@ -245,15 +256,27 @@ function isCaptureManifestOutputV1(
   createdAt: number,
 ): value is CaptureManifestOutputV1 {
   const record = asRecord(value);
+  const autoReconcileState = normalizeAutoReconcileState({
+    autoReconcileAttemptCount: record?.autoReconcileAttemptCount,
+    autoReconcileLastAttemptAt: record?.autoReconcileLastAttemptAt,
+    needsManualReconcile: record?.needsManualReconcile,
+  });
   if (
     !record || record.format !== expectedFormat || !safeNonNegativeInteger(record.revision) ||
     !safeNonNegativeInteger(record.attemptNo) || !safeAttemptIds(record.attemptIds) ||
     !safeTimestamp(record.updatedAt) ||
-    (record.updatedAt as number) < createdAt
+    (record.updatedAt as number) < createdAt ||
+    !autoReconcileState
   ) return false;
+  const autoReconcileKeys = [
+    ...(record.autoReconcileAttemptCount === undefined ? [] : ["autoReconcileAttemptCount"]),
+    ...(record.autoReconcileLastAttemptAt === undefined ? [] : ["autoReconcileLastAttemptAt"]),
+    ...(record.needsManualReconcile === undefined ? [] : ["needsManualReconcile"]),
+  ];
   if (record.state === "pending") {
     return exactKeys(record, [
       "format", "state", "revision", "attemptNo", "attemptIds", "updatedAt",
+      ...autoReconcileKeys,
     ]) && record.revision === 0 && record.attemptNo === 0 &&
       record.attemptIds.length === 0 && record.updatedAt === createdAt;
   }
@@ -263,19 +286,19 @@ function isCaptureManifestOutputV1(
   if (record.state === "saving") {
     return exactKeys(record, [
       "format", "state", "revision", "attemptNo", "attemptIds", "updatedAt", "attemptId",
-      "downloadId",
+      "downloadId", ...autoReconcileKeys,
     ]) && (record.downloadId === undefined || safeNonNegativeInteger(record.downloadId));
   }
   if (record.state === "complete") {
     return exactKeys(record, [
       "format", "state", "revision", "attemptNo", "attemptIds", "updatedAt", "attemptId",
-      "downloadId",
+      "downloadId", ...autoReconcileKeys,
     ]) && safeNonNegativeInteger(record.downloadId);
   }
   if (record.state === "failed") {
     return exactKeys(record, [
       "format", "state", "revision", "attemptNo", "attemptIds", "updatedAt", "attemptId",
-      "errorCode", "retryable", "downloadId",
+      "errorCode", "retryable", "downloadId", ...autoReconcileKeys,
     ]) && safeErrorCode(record.errorCode) && typeof record.retryable === "boolean" &&
       (record.downloadId === undefined || safeNonNegativeInteger(record.downloadId));
   }
@@ -329,6 +352,7 @@ export function createCaptureManifestRecord(seed: CaptureManifestSeedV1): Captur
       attemptNo: 0,
       attemptIds: [],
       updatedAt: seed.createdAt,
+      ...DEFAULT_AUTO_RECONCILE_STATE,
     }])),
   };
   return isCaptureManifestRecordV1(record) ? cloneCaptureManifestRecord(record) : undefined;
@@ -421,6 +445,7 @@ export function reduceCaptureManifestOutput(
       errorCode: action.errorCode,
       retryable: action.retryable,
       updatedAt: action.now,
+      ...DEFAULT_AUTO_RECONCILE_STATE,
     };
   } else if (action.type === "begin") {
     if (current.state === "failed" && !current.retryable) {
@@ -446,6 +471,7 @@ export function reduceCaptureManifestOutput(
       attemptIds: [...current.attemptIds, action.attemptId],
       attemptId: action.attemptId,
       updatedAt: action.now,
+      ...DEFAULT_AUTO_RECONCILE_STATE,
     };
   } else {
     if (current.state !== "saving") return { ok: false, reason: "illegal_transition" };
@@ -475,6 +501,7 @@ export function reduceCaptureManifestOutput(
         attemptId: current.attemptId,
         downloadId: current.downloadId,
         updatedAt: action.now,
+        ...DEFAULT_AUTO_RECONCILE_STATE,
       };
     } else {
       next = {
@@ -488,10 +515,47 @@ export function reduceCaptureManifestOutput(
         retryable: action.retryable,
         ...(current.downloadId === undefined ? {} : { downloadId: current.downloadId }),
         updatedAt: action.now,
+        ...DEFAULT_AUTO_RECONCILE_STATE,
       };
     }
   }
   record.outputs[action.format] = next;
+  return isCaptureManifestRecordV1(record)
+    ? { ok: true, changed: true, record: cloneCaptureManifestRecord(record) }
+    : { ok: false, reason: "invalid_action" };
+}
+
+export function updateCaptureManifestOutputAutoReconcileState(
+  rawRecord: unknown,
+  input: {
+    format: CaptureManifestFormatV1;
+    expectedRevision: number;
+    attemptId: string;
+    state: AutoReconcileStateV1;
+  },
+): ReduceCaptureManifestOutputResult {
+  if (!isCaptureManifestRecordV1(rawRecord)) return { ok: false, reason: "invalid_record" };
+  const state = normalizeAutoReconcileState(input.state);
+  if (
+    (input.format !== "json" && input.format !== "csv") ||
+    !safeNonNegativeInteger(input.expectedRevision) ||
+    !safeAttemptId(input.attemptId) ||
+    !state
+  ) return { ok: false, reason: "invalid_action" };
+  const record = cloneCaptureManifestRecord(rawRecord);
+  const current = record.outputs[input.format];
+  if (!current) return { ok: false, reason: "unknown_format" };
+  if (current.revision !== input.expectedRevision) {
+    return { ok: false, reason: "revision_mismatch", actualRevision: current.revision };
+  }
+  if (current.state !== "failed") return { ok: false, reason: "illegal_transition" };
+  if (current.attemptId !== input.attemptId) return { ok: false, reason: "attempt_mismatch" };
+  const next: CaptureManifestOutputV1 = { ...current, ...state };
+  if (state.autoReconcileLastAttemptAt === undefined) delete next.autoReconcileLastAttemptAt;
+  record.outputs[input.format] = next;
+  if (JSON.stringify(rawRecord) === JSON.stringify(record)) {
+    return { ok: true, changed: false, record };
+  }
   return isCaptureManifestRecordV1(record)
     ? { ok: true, changed: true, record: cloneCaptureManifestRecord(record) }
     : { ok: false, reason: "invalid_action" };

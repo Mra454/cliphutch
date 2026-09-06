@@ -217,7 +217,7 @@ export async function persistAndReconcileQuickCaptureRunStart(input: {
       return {
         ok: false,
         code: "PREVIOUS_START_UNRESOLVED",
-        error: "Reconcile the previous Quick Capture start before starting another download.",
+        error: "ClipHutch is still checking an earlier download. Try again in a moment.",
       };
     }
     if (created.reason === "command_conflict" || created.reason === "invalid_input") {

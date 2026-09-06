@@ -1,6 +1,11 @@
 import type { CaptureWorkspaceManifestOutputV1 } from "./capture-manifest-workspace";
 import type { CaptureRunStatusV1 } from "./capture-pack-types";
 import type { CaptureWorkspaceManifestV1 } from "./capture-manifest-workspace";
+import {
+  DEFAULT_AUTO_RECONCILE_STATE,
+  autoReconcileAttemptsRemaining,
+  normalizeAutoReconcileState,
+} from "./quick-capture-auto-reconcile";
 
 export type CaptureManifestOutputUiModel = {
   filename: string;
@@ -84,13 +89,21 @@ export function createCaptureManifestOutputUiModel(
       tone: "success",
     };
   }
+  const automaticState = normalizeAutoReconcileState({
+    autoReconcileAttemptCount: output.autoReconcileAttemptCount,
+    autoReconcileLastAttemptAt: output.autoReconcileLastAttemptAt,
+    needsManualReconcile: output.needsManualReconcile,
+  }) ?? DEFAULT_AUTO_RECONCILE_STATE;
+  const automaticAttemptsRemaining = output.retryable
+    ? autoReconcileAttemptsRemaining({ commandId: `${output.format}:manifest`, ...automaticState })
+    : 0;
   return {
     filename,
     statusLabel: output.errorCode === "MANIFEST_SAVE_STATE_UNKNOWN"
       ? "Checking save…"
       : "Not saved",
-    detail: FAILURE_COPY[output.errorCode],
+    detail: automaticAttemptsRemaining > 0 ? "Checking export…" : FAILURE_COPY[output.errorCode],
     tone: output.errorCode === "MANIFEST_SAVE_STATE_UNKNOWN" ? "warning" : "error",
-    ...(output.retryable ? { actionLabel: "Retry export" } : {}),
+    ...(output.retryable && automaticAttemptsRemaining === 0 ? { actionLabel: "Retry export" } : {}),
   };
 }

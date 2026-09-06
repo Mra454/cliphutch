@@ -5,6 +5,11 @@ import {
   type CaptureManifestRecordV1,
 } from "./capture-manifest-delivery";
 import type { CaptureManifestFormatV1 } from "./capture-pack-types";
+import {
+  DEFAULT_AUTO_RECONCILE_STATE,
+  normalizeAutoReconcileState,
+  type AutoReconcileStateV1,
+} from "./quick-capture-auto-reconcile";
 
 export const MAX_CAPTURE_WORKSPACE_MANIFESTS = 30;
 
@@ -12,13 +17,13 @@ export type CaptureWorkspaceManifestOutputV1 =
   | { format: CaptureManifestFormatV1; state: "pending" }
   | { format: CaptureManifestFormatV1; state: "saving"; downloadId?: number }
   | { format: CaptureManifestFormatV1; state: "complete"; downloadId: number }
-  | {
+  | ({
       format: CaptureManifestFormatV1;
       state: "failed";
       errorCode: CaptureManifestPublicErrorCode;
       retryable: boolean;
       downloadId?: number;
-    };
+    } & Partial<AutoReconcileStateV1>);
 
 /**
  * Deliberately omits the manifest seed, URLs, paths, item metadata, attempt
@@ -101,12 +106,27 @@ function parseOutput(value: unknown): CaptureWorkspaceManifestOutputV1 | undefin
       : undefined;
   }
   if (record.state !== "failed") return undefined;
+  const autoReconcileState = normalizeAutoReconcileState({
+    autoReconcileAttemptCount: record.autoReconcileAttemptCount,
+    autoReconcileLastAttemptAt: record.autoReconcileLastAttemptAt,
+    needsManualReconcile: record.needsManualReconcile,
+  });
   if (
-    !hasOnlyKeys(record, ["format", "state", "errorCode", "retryable", "downloadId"]) ||
+    !hasOnlyKeys(record, [
+      "format",
+      "state",
+      "errorCode",
+      "retryable",
+      "downloadId",
+      "autoReconcileAttemptCount",
+      "autoReconcileLastAttemptAt",
+      "needsManualReconcile",
+    ]) ||
     typeof record.errorCode !== "string" ||
     !PUBLIC_ERROR_CODES.has(record.errorCode as CaptureManifestPublicErrorCode) ||
     typeof record.retryable !== "boolean" ||
-    (record.downloadId !== undefined && !safeDownloadId(record.downloadId))
+    (record.downloadId !== undefined && !safeDownloadId(record.downloadId)) ||
+    !autoReconcileState
   ) return undefined;
   return {
     format: record.format,
@@ -114,6 +134,7 @@ function parseOutput(value: unknown): CaptureWorkspaceManifestOutputV1 | undefin
     errorCode: record.errorCode as CaptureManifestPublicErrorCode,
     retryable: record.retryable,
     ...(record.downloadId === undefined ? {} : { downloadId: record.downloadId }),
+    ...autoReconcileState,
   };
 }
 
@@ -135,6 +156,11 @@ function outputSummary(output: CaptureManifestOutputV1): CaptureWorkspaceManifes
     errorCode: output.errorCode,
     retryable: output.retryable,
     ...(output.downloadId === undefined ? {} : { downloadId: output.downloadId }),
+    ...(normalizeAutoReconcileState({
+      autoReconcileAttemptCount: output.autoReconcileAttemptCount,
+      autoReconcileLastAttemptAt: output.autoReconcileLastAttemptAt,
+      needsManualReconcile: output.needsManualReconcile,
+    }) ?? DEFAULT_AUTO_RECONCILE_STATE),
   };
 }
 
