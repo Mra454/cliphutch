@@ -93,11 +93,13 @@ version rollback does not undo mutations.
 
 ## Refund disposition, read from Stripe on 2026-09-07
 
-Both production refunded rows are full reversals of the $35 ClipHutch License purchase, made within minutes of the live Payment Link's creation on 2026-04-27, and refunded within eleven minutes. That pattern is consistent with the founder's own end-to-end test purchases. Disposition: mark both licenses refunded and revoke any activations, through the journaled repair path, after rehearsal on staging.
+Recorded in the shape this runbook requires (no keys, emails, payment-intent IDs, or Stripe payloads; the identifier mapping stays in the operator's Stripe session).
 
-| Payment intent | Amount | Method | Created | Refunded | Stripe status |
-| --- | --- | --- | --- | --- | --- |
-| `pi_3TQgi5GQjeGFY4e529g3KPQy` | $35.00 USD | Amazon Pay | 2026-04-27 04:23 | 2026-04-27 04:34 | Reversed (full) |
-| `pi_3TRDorGQjeGFY4e534VIWiBg` | $35.00 USD | card ending 9615 | 2026-04-28 15:45 | 2026-04-28 15:46 | Reversed (full) |
+| Case | Disposition | Evidence | Intended guarded transition | Contact owner and deadline |
+| --- | --- | --- | --- | --- |
+| REFUND-2026-04-27-A | `confirmed-full` | Stripe dashboard, 2026-09-07, operator: founder's Claude session | None required: the row is already `refunded`; verify no activation for it remains active | Founder; not applicable (the purchase pattern matches the founder's own end-to-end test on the day the link went live) |
+| REFUND-2026-04-28-B | `confirmed-full` | Stripe dashboard, 2026-09-07, operator: founder's Claude session | None required: the row is already `refunded`; verify no activation for it remains active | Founder; not applicable (same pattern, one day later) |
 
-Related facts read the same day: the live ClipHutch Payment Link is `plink_1TQgVeGQjeGFY4e5OMj57lO0` (now set in `wrangler.toml` for production). Stripe test mode has no ClipHutch payment link and no ClipHutch webhook endpoint; the only test-mode objects belong to Recoup Radar. The live webhook endpoint for ClipHutch is `https://cliphutch-api.mra454.workers.dev/stripe-webhook`. Customer identifiers are intentionally not recorded here.
+Both were full reversals of the $35 purchase within eleven minutes of purchase. Because the old handler's "refunded" outcome is the correct terminal state for a full refund, no compensating row repair is required; what remains is a read-only check that no activation rows for these two licenses are still active. If any are, that becomes a guarded transition under the repair requirements above.
+
+Related facts read the same day: the live ClipHutch Payment Link ID is now set in `wrangler.toml` for production. Stripe test mode has no ClipHutch payment link and no ClipHutch webhook endpoint; the only test-mode objects belong to Recoup Radar. The live webhook endpoint for ClipHutch is `https://cliphutch-api.mra454.workers.dev/stripe-webhook`.
