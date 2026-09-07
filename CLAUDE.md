@@ -63,7 +63,7 @@ ClipHutch uses **honest-user client-side licensing**. `isLicensed()` in `extensi
 
 ## CWS submission status
 
-Item ID: `pdpcameeghhppjbhecolnhdepceeldhl`. Version 0.1.3 is customer-live. The 0.1.4 Capture Pack candidate is not uploaded, approved, or deployed. Its automated development gate is green; clean-tag packaging, the Chrome 116/current-stable manual matrix, MV3 lifecycle cases, accessibility passes, and the product-value task remain release gates.
+Item ID: `pdpcameeghhppjbhecolnhdepceeldhl`. Version 0.1.3 is customer-live. The 0.1.4 candidate **merged to master on 2026-09-06 (PR #1, merge commit `f46e95c`)** and is not uploaded, approved, or deployed. Its development gate is green on master (88 test files, 1,269 tests, 6 TypeScript projects, distribution audit PASS). Remaining release gates: clean-tag packaging, the Chrome 116/current-stable manual matrix, MV3 lifecycle cases, accessibility passes, and the product-value task.
 
 Pre-submission codex audit (2026-04-28) — resolved blockers:
 - B1 host-permissions claim, B2 server-contact claim, B3 active-tab claim: copy fixed across all three docs.
@@ -78,11 +78,11 @@ Open release work:
 - **M4** — RESOLVED 2026-07-30: `email_sent_at` on licenses (migration 0002, applied to prod + backfilled 4/4) + webhook returns 500 on send failure so Stripe redelivery retries the email; idempotent path re-sends when `email_sent_at` IS NULL. Deployed as cliphutch-api version dd889c50.
 - **Trader verification** — Google Payments verification submitted 2026-04-28 with Vismu LLC Articles of Organization; pending. Listing will display "non-trader" until Google approves.
 
-## Option C + product-improvement work — branch not yet merged
+## 0.1.4 line — merged to master 2026-09-06 (PR #1)
 
-Active branch: **`option-c-stage-1-separate-audio`** (pushed, ahead of master, **no PRs open** when checked on 2026-08-28). Goal was: download a single playable MP4 containing the selected video variant plus the default audio rendition for separate-audio HLS, including fMP4 and MPEG-TS video with supported AAC audio (Squarespace, Apple advanced fMP4, modern Vimeo non-DRM, Wistia). The first fMP4 scope shipped, then a larger product-improvement pass (2026-07-02/03) landed on the same branch off a 4-agent audit + Codex-reviewed plan.
+**Master is the truth** (`f46e95c`). The feature branches `option-c-stage-1-separate-audio` and `aes128-transport-decrypt` are fully contained in master and kept for history. The original goal was: download a single playable MP4 containing the selected video variant plus the default audio rendition for separate-audio HLS, including fMP4 and MPEG-TS video with supported AAC audio (Squarespace, Apple advanced fMP4, modern Vimeo non-DRM, Wistia). The first fMP4 scope shipped, then a larger product-improvement pass (2026-07-02/03) landed on the same branch off a 4-agent audit + Codex-reviewed plan.
 
-**Shipped (all committed, 295 tests pass, build + audit clean):**
+**Shipped (all on master, 1,269 tests pass, build + audit clean):**
 
 | Area | Commits | What |
 |---|---|---|
@@ -94,18 +94,25 @@ Active branch: **`option-c-stage-1-separate-audio`** (pushed, ahead of master, *
 | Recovery (B2) | `b36b85c`, `2d180a0`, `e31e447`, `60bbfd6` | redirect-resolved URL classification; per-tab `addOrUpdateVideo` mutex; `RawAacAudioError` ADTS sniff; WebM DNR header replay; SIZE_CAP "Download anyway"; captured headers persisted to `chrome.storage.session` (`lib/captured-headers`) + deterministic FNV-1a rule IDs surviving SW restart |
 | Disclosure (Stage 2D) | `782125f` (+ `fa33894` in cliphutch-site, **not deployed**) | PRIVACY/PERMISSIONS/firstrun + site privacy.html cover separate-audio fetch, byte-range, MPEG-TS repackaging, header-replay scope, captured-header storage; GPL tag → v0.1.1 |
 | Upgrade UX | `699df43` | "Already have a key?" link in the at-limit banner |
-| AES-128 transport decrypt | `488b353+b96e66f` | hls-crypto-plan.ts owns key/IV/sequence from raw text; decrypt in fetchSegmentBytes + fetchInit; 16-byte key fetch cap; snapshot authorizes media-playlist key URIs; disclosures rewritten |
+| AES-128 transport decrypt | `488b353`, `b96e66f` | hls-crypto-plan.ts owns key/IV/sequence from raw text; decrypt in fetchSegmentBytes + fetchInit; 16-byte key fetch cap; snapshot authorizes media-playlist key URIs; body-phase aborts normalized to CancelledError; disclosures rewritten from "does not decrypt" to the exact behavior |
+| A/V start offsets | `1e8788e` | `muxFmp4` gives a later-starting rendition an `edts/elst` empty edit so cross-rendition start offsets survive; fixture `hls-master-separate-audio-ts-offset` |
+| Store paste | `854fe97` | CWS declarations paste (single purpose, 7 permission justifications, data usage) in `store-assets/listing-pricing-2026-07-30.md` |
+| UX Tier 1 | `1f65560`, `37ad458`, `2f7b115` | one card per video (child HLS playlists fold under their master); Quick Capture creates, claims, persists and retires its own bounded header lease instead of `ADD_TO_HUTCH_REQUIRED`; permanent start errors show a reason without Retry; legacy intents reconcile as non-header |
+| UX Tier 2 | `020e85c`, `2c964c1` | card = title + badge, one status line, Download, More menu; editable title (`customStem`) with strict sanitizer and content-type extension allowlist; brand-like page titles fall back to host-date-time; exact runtime parser for download messages |
+| UX Tiers 3+4 | `c445eb5`, `02d6832` | Review: summary, collapsed Details (manifest, CSV, 60-minute notice), items, unchanged $35 gate; page folders only for 2+ pages; automatic reconciliation (`lib/quick-capture-auto-reconcile.ts`: same guarded path, original commandId, per-ref lock, 1 attempt/10 s, max 5, then "Check again"); status labels say "Checking…" |
+| Popup fix | `a892129` | folder-label input read `currentTarget.value` inside a deferred updater and blanked the popup on the first keystroke |
 
-**Smoke gate: declined by Mikey 2026-07-03; proceeding as if cleared.** Pre-flight only: Mux `tos_ismc` and Apple `img_bipbop_adv_example_fmp4` manifests fetched via browser, confirmed live and exactly the Stage 1 / Stage 1+2A shapes. Browser automation can't load the unpacked ext, drive the popup, or hear audio, so these paths are **logic-verified + unit-tested but NOT browser-smoked** — say so if it matters.
+**Real-browser smoke 2026-09-05 PASSED** on Mikey's own Squarespace asset library (header-protected, AES-128, MPEG-TS video + separate TS audio): one card, one click, one MP4 with sound, quota consumed. Earlier history: **smoke gate declined by Mikey 2026-07-03; proceeded as if cleared.** Pre-flight only at that time: Mux `tos_ismc` and Apple `img_bipbop_adv_example_fmp4` manifests fetched via browser, confirmed live and exactly the Stage 1 / Stage 1+2A shapes. Browser automation can't load the unpacked ext, drive the popup, or hear audio, so these paths are **logic-verified + unit-tested but NOT browser-smoked** — say so if it matters.
 
 Checkout verified live 2026-07-03: `CHECKOUT_URL` (`buy.stripe.com/8x29ATcsIdsW3V31wUfw400`) → real Stripe page, Vismu LLC, "ClipHutch License $35 one-time, up to 5 devices" — matches in-extension copy.
 
 ### What's next (needs Mikey or deferred)
 
-1. **Remote checkpoint** — keep the reviewed Worker, extension, and status-document commits backed up on this feature branch. PR/merge remains a separate decision.
-2. **Deploy site privacy** — `fa33894` in cliphutch-site is local only; `npx wrangler pages deploy public --project-name cliphutch-site`.
-3. **Worker promotion gates** — the fixes and 40-test local Worker suite are checkpointed; staging setup, exact Payment Link qualification, production refund-row disposition, a refund-safe rollback point, migrations, and v2 smoke remain. Deployment is not implied by a branch push.
-4. **Optional:** B3 stills (video posters, CSS bg-images); full raw-ADTS→fMP4 muxing (currently accurate error only); UX batch (direct-download cancel, rate-limit reset time, host-aware empty state); CI/typecheck gate (M3 — `tsc` has ~35 pre-existing DOM-lib errors, needs tsconfig split first).
+1. **Site copy waits for publication.** The `~/projects/cliphutch-site` working tree holds the 0.1.4 site (Capture Pack hero, AES-128 and lease sentences in privacy.html), **uncommitted and not deployed**. The live site still carries the 0.1.3 copy. Deploy (`npx wrangler pages deploy public --project-name cliphutch-site`) only once 0.1.4 is live in the store; deploying earlier creates a marketing/code mismatch.
+2. **Worker promotion gates** — the fixes and 40-test local Worker suite are on master; staging setup, exact Payment Link qualification, production refund-row disposition, a refund-safe rollback point, migrations, and v2 smoke remain. Deployment is not implied by a merge: the live `cliphutch-api` Worker is deployed only by hand (last 2026-07-30).
+3. **Stray Cloudflare hookup.** A git-connected Worker named `cliphutch` runs "Workers Builds" on every push and PR; every build fails (its name never matches the wrangler config) and it has never deployed anything (two manual uploads on 2026-04-27). It only produces red checks. Disconnect it or retarget it at staging in the dashboard. A Pages project `cliphutch` also builds this repo to `cliphutch.pages.dev` and serves an empty 404; harmless.
+4. **Small follow-ups from the last review (GO, not blocking):** the auto-reconcile classifier treats two success shapes as unresolved (manifest retry `{ok, runId, format, replayed}`, legacy `{ok, downloadId}`), which only burns automatic attempts; popup fallback errors near `popup.tsx:3752` and `:3784` still interpolate raw reason codes.
+5. **Optional:** B3 stills (video posters, CSS bg-images); full raw-ADTS→fMP4 muxing (currently accurate error only); UX batch (direct-download cancel, rate-limit reset time, host-aware empty state); CI/typecheck gate (M3 — `tsc` has ~35 pre-existing DOM-lib errors, needs tsconfig split first).
 
 ### Known concerns parked
 
@@ -115,7 +122,7 @@ Checkout verified live 2026-07-03: `CHECKOUT_URL` (`buy.stripe.com/8x29ATcsIdsW3
 
 ### Where the master plan lives
 
-In the conversation history of the session that branched `option-c-stage-1-separate-audio`. The plan covered Stages 1, 2A, 2B, 2C, 2D with file-by-file changes and accept criteria. Memory: `~/.claude/projects/-Users-mikey/memory/`. If a future session needs the plan and can't find it: ask Codex to re-draft from this section.
+In the conversation history of the session that branched `option-c-stage-1-separate-audio`. The plan covered Stages 1, 2A, 2B, 2C, 2D with file-by-file changes and accept criteria. The 2026-09-03 to 09-06 work (AES-128, TS separate audio, UX Tiers 1-4) followed the pattern design → Codex adversarial review → Codex implements → Codex adversarial review → corrections in a follow-up commit; each unit's spec lived in that session's scratchpad and its findings are summarized in the commit messages. Memory: `~/.claude/projects/-Users-mikey/memory/` (see the ClipHutch entries). If a future session needs the plan and can't find it: ask Codex to re-draft from this section.
 
 ## What future sessions tend to get wrong
 
