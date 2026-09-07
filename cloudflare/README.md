@@ -1,98 +1,142 @@
-# cliphutch-api — license validation Worker
+# ClipHutch license Worker
 
-Cloudflare Worker that handles ClipHutch license issuance (via Stripe webhook) and validation (called by the extension).
+Cloudflare Worker for product-isolated ClipHutch and ComputedKit entitlement
+issuance, email delivery, activation status, and server-confirmed device
+deactivation.
 
-## Endpoints
+## Routes
 
-| Method | Path | Auth | Purpose |
-| ------ | ---- | ---- | ------- |
-| `GET`  | `/`  | none | Health check, returns `{ ok: true, service: "cliphutch-api" }` |
-| `POST` | `/validate` | license key in body | Extension calls this with `{ key, installationId }`. Returns `{ valid: true, maxDevices }` or `{ valid: false, reason }`. Records or refreshes the activation. |
-| `POST` | `/stripe-webhook` | Stripe signature | Stripe calls this on `checkout.session.completed` (issues a license + emails it) and `charge.refunded` (marks license refunded). |
+| Method | Route | Behavior |
+| --- | --- | --- |
+| `GET` | `/` | Health response with exact environment and Worker version metadata. |
+| `POST` | `/validate` | Legacy activate-or-refresh endpoint retained for old clients. |
+| `POST` | `/v2/activate` | Explicit activation; returns an activation generation. |
+| `POST` | `/v2/status` | Refreshes an existing activation only; never creates one. |
+| `POST` | `/v2/deactivate` | Deletes only the supplied activation generation and records an idempotent tombstone. |
+| `POST` | `/computedkit/validate` and `/computedkit/v2/*` | Product-isolated ComputedKit equivalents. |
+| `POST` | `/computedkit/checkout` | Creates a Stripe-hosted Checkout Session for the configured ComputedKit price. |
+| `POST` | `/stripe-webhook` | Verifies Stripe signatures, issues qualified licenses, delivers email, and records partial/full refunds. |
 
-## One-time deploy
+## Environment boundaries
 
-```sh
-cd cloudflare
-npm install
-npx wrangler login
+- The unnamed Wrangler default is `cliphutch-api-local` and uses staging D1;
+  a bare command cannot target the production Worker or production database.
+- `staging` uses Worker `cliphutch-api-staging` and D1
+  `cliphutch-licenses-staging` (`8a3ccbca-205a-4e92-bd25-8203fa07000a`).
+- `production` uses Worker `cliphutch-api` and D1
+  `cliphutch-licenses` (`dc85e41b-4f1b-487d-b46e-5789e6fd0ca1`).
+- Test Stripe and Resend credentials belong only in staging secrets. Never copy
+  production credentials into staging.
+- New ClipHutch issuance is fail-closed until the exact live/test Payment Link
+  ID is configured as `CLIPHUTCH_STRIPE_PAYMENT_LINK_ID` in that environment.
 
-# Create the D1 database — copy the printed UUID into wrangler.toml under
-# [[d1_databases]].database_id (replacing REPLACE_AFTER_WRANGLER_D1_CREATE).
-npx wrangler d1 create cliphutch-licenses
-
-# Apply schema to the remote DB.
-npm run db:init:remote
-
-# Set the secrets (you'll be prompted for each value).
-npx wrangler secret put STRIPE_WEBHOOK_SECRET
-npx wrangler secret put RESEND_API_KEY
-npx wrangler secret put RESEND_FROM_EMAIL
-
-# Deploy.
-npm run deploy
-```
-
-The deploy URL prints as something like `https://cliphutch-api.<your-subdomain>.workers.dev`.
-
-## Wiring Stripe
-
-After deploying, in the Stripe Dashboard:
-
-1. **Products** → create "ClipHutch License", price `$35` USD, **One-time** (not subscription).
-2. Open the product → enable **Stripe Checkout** → copy the public payment link.
-3. **Developers → Webhooks** → **Add endpoint** → URL: `https://cliphutch-api.<your-subdomain>.workers.dev/stripe-webhook`
-4. Subscribe to events: `checkout.session.completed`, `charge.refunded`.
-5. Reveal the **Signing secret** (starts with `whsec_`) and run `npx wrangler secret put STRIPE_WEBHOOK_SECRET` with that value (re-run if you'd already set a placeholder).
-
-The Checkout URL goes into `extension/src/lib/constants.ts` as `CHECKOUT_URL` (replaces `TODO_CHECKOUT_URL`).
-
-## Wiring Resend
-
-1. Create a Resend account, verify your sending domain.
-2. Generate an API key.
-3. `npx wrangler secret put RESEND_API_KEY` with the key.
-4. `npx wrangler secret put RESEND_FROM_EMAIL` with e.g. `licenses@cliphutch.app`.
-
-## Local dev
-
-Copy `.dev.vars.example` to `.dev.vars` and fill in test values:
+Set each secret explicitly per environment:
 
 ```sh
-cp .dev.vars.example .dev.vars
-# edit .dev.vars
-npm run db:init:local
-npm run dev
+npx wrangler secret put STRIPE_SECRET_KEY --env staging
+npx wrangler secret put STRIPE_WEBHOOK_SECRET --env staging
+npx wrangler secret put RESEND_API_KEY --env staging
+npx wrangler secret put RESEND_FROM_EMAIL --env staging
 ```
 
-`wrangler dev` serves at `http://localhost:8787`. Test with:
+Repeat with `--env production` only under an approved production change.
+
+## Local quality gate
 
 ```sh
-curl http://localhost:8787/
-# => {"ok":true,"service":"cliphutch-api"}
-
-curl -X POST http://localhost:8787/validate \
-  -H "Content-Type: application/json" \
-  -d '{"key":"CH-AAAA-BBBB-CCCC-DDDD","installationId":"local-test"}'
-# => {"valid":false,"reason":"NOT_FOUND"}  (until you've issued a key locally)
+npm ci
+npm run check
 ```
 
-## Operator notes
+`check` generates/verifies Worker types, runs TypeScript and Workers-runtime
+tests, and produces a staging-bound dry-run bundle. The test suite exercises a
+fresh `schema.base.sql` database through numbered migrations 0001-0004.
 
-| Task | How |
-| ---- | --- |
-| Look up a license by email | `npx wrangler d1 execute cliphutch-licenses --remote --command="SELECT * FROM licenses WHERE email = 'foo@bar.com';"` |
-| Manually issue a license | Insert into `licenses` table with a fake `stripe_session_id`. |
-| Revoke a license | `UPDATE licenses SET status = 'revoked' WHERE key = 'CH-...';` |
-| See activations for a key | `SELECT * FROM activations WHERE license_key = 'CH-...';` |
-| Reset device count for a user (e.g., they reinstalled OS) | `DELETE FROM activations WHERE license_key = 'CH-...';` — they can reactivate freely after this. |
-| Re-send a license email (Resend was down during purchase, etc.) | `RESEND_API_KEY=re_... RESEND_FROM_EMAIL='ClipHutch <licenses@cliphutch.com>' node scripts/resend-license.mjs <email> <license-key>` |
+## Database bootstrap and migrations
 
-## Phase 3 (next)
+New local or staging databases start from the baseline, then use Wrangler's
+migration ledger:
 
-Wire the extension to call this Worker:
-- `extension/src/lib/license.ts` `activateLicense()` POSTs to `/validate` (currently a stub that accepts any well-formed key)
-- Add a periodic re-validation (weekly) with a 7-day offline grace period
-- Add `installationId` generation (random UUID, persisted in `chrome.storage.local`)
+```sh
+npm run db:local:bootstrap
+npm run db:staging:bootstrap
+npm run db:staging:migrations:list
+```
 
-After Phase 3, set `CHECKOUT_URL` in `extension/src/lib/constants.ts` to the Stripe Checkout URL from the dashboard.
+Never initialize a database from `schema.sql`; that file is only the current
+schema snapshot. Never use a bare remote database command. Production exposes
+only explicit migration-list/apply commands, and apply refuses to run without
+an exact current version, change ticket, and confirmation:
+
+```sh
+npm run db:production:migrations:list
+npm run db:production:migrations:apply -- \
+  --confirm-production \
+  --change-ticket=<approved-id> \
+  --expected-current-version=<100-percent-version-uuid>
+```
+
+Migration 0003 and 0004 must be applied before any Worker version that queries
+their columns. Production migrations remain blocked until the reconciliation
+runbook is complete.
+
+## Staging and production rollout
+
+Deploy and test staging first:
+
+```sh
+npm run deploy:staging
+npm run smoke:version -- \
+  https://cliphutch-api-staging.mra454.workers.dev/ \
+  staging <staging-version-uuid>
+```
+
+Production uses versions and deployments, not `wrangler deploy`:
+
+1. Record the current 100% version and D1 reconciliation report.
+2. Upload a candidate without traffic.
+3. Add it to a deployment at 0% while the old version remains at 100%.
+4. Send a read-only health request with Cloudflare's version-override header;
+   the smoke script verifies returned version metadata and writes evidence.
+5. Promote directly to 100% only after staging mutation tests, production
+   read-only smoke, and explicit approval. Do not split Stripe webhook traffic
+   between safe and unsafe refund handlers.
+
+```sh
+npm run versions:production:upload -- \
+  --confirm-production --change-ticket=<id> \
+  --expected-current-version=<old-version-uuid>
+
+npm run versions:production:stage -- \
+  --confirm-production --change-ticket=<id> \
+  --expected-current-version=<old-version-uuid> \
+  --candidate-version=<candidate-version-uuid>
+
+npm run smoke:version -- \
+  https://cliphutch-api.mra454.workers.dev/ \
+  production <candidate-version-uuid> <evidence.json> cliphutch-api
+
+npm run versions:production:promote -- \
+  --confirm-production --change-ticket=<id> \
+  --expected-current-version=<old-version-uuid> \
+  --candidate-version=<candidate-version-uuid> \
+  --smoke-evidence=<evidence.json>
+```
+
+The current production version
+`dd889c50-c33d-485e-ae3f-87223457a250` is rollback evidence, but it is not a
+safe steady-state rollback target for refund traffic because it contains the
+historical partial-refund defect. Establish a minimal A2 hotfix/known-good
+rollback target before the broader B6/B7 rollout.
+
+## Operator safety
+
+Do not put license keys, customer emails, installation IDs, or Stripe payloads
+in shell arguments, logs, tickets, or ad hoc SQL. Do not manually update
+license state, delete activations, or send a license email outside the Worker's
+leased/idempotent delivery path. Retry the original signed webhook through the
+provider workflow or use the reviewed, journaled repair procedure in
+[`operations/WORKER-ROLLBACK-AND-RECONCILIATION.md`](operations/WORKER-ROLLBACK-AND-RECONCILIATION.md).
+
+Production invocation logs and traces remain disabled. Operational alerting
+and the full staging buyer journey are release gates, not optional follow-up.

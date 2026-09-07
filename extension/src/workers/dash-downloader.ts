@@ -15,10 +15,18 @@ import {
   NetworkError,
   ParseError,
   SizeCapError,
+  UnsupportedMediaShapeError,
+  VariantStaleError,
 } from "../lib/errors";
 import { HLS_SEGMENT_FETCH_CONCURRENCY } from "../lib/constants";
-import { DashParseError, parseMpd, pickHighestBandwidth } from "../lib/dash";
-import { muxFmp4 } from "./dash-mux";
+import {
+  DashParseError,
+  parseMpd,
+  pickHighestBandwidth,
+  type DashRepresentation,
+  type DashRepresentationUnsupportedShape,
+} from "../lib/dash";
+import { inspectFmp4Init, muxFmp4 } from "./dash-mux";
 
 export type DashProgress = {
   videoDone: number;
@@ -39,6 +47,58 @@ export type DownloadDashOptions = {
 };
 
 const FALLBACK_BITRATE_BPS = 5_000_000;
+
+function unsupportedShapeDetail(shape: DashRepresentationUnsupportedShape): string {
+  switch (shape) {
+    case "segment-base":
+      return "DASH SegmentBase indexing";
+    case "segment-list-range":
+      return "DASH SegmentList byte ranges";
+    case "negative-repeat":
+      return "an open-ended DASH timeline repeat";
+    case "segment-limit":
+      return "too many DASH segments";
+    case "invalid-segment-template":
+      return "invalid DASH timeline values";
+    case "ambiguous-media-type":
+      return "a DASH representation with no reliable audio/video type";
+    case "no-segments":
+      return "a DASH representation with no usable segments";
+    case "unsupported-container":
+      return "a DASH representation outside the supported MP4 containers";
+  }
+}
+
+function assertRepresentationSupported(rep: DashRepresentation): void {
+  if (rep.drm.protected) throw new DrmProtectedError(rep.drm.scheme);
+  if (rep.unsupportedShape === "segment-base" || rep.unsupportedShape === "segment-list-range") {
+    throw new ByteRangeError();
+  }
+  if (rep.unsupportedShape) {
+    throw new UnsupportedMediaShapeError(unsupportedShapeDetail(rep.unsupportedShape));
+  }
+}
+
+function validateInit(bytes: Uint8Array, expectedType: "video" | "audio"): void {
+  let inspection: ReturnType<typeof inspectFmp4Init>;
+  try {
+    inspection = inspectFmp4Init(bytes);
+  } catch {
+    throw new UnsupportedMediaShapeError("an unreadable fMP4 initialization segment");
+  }
+  if (inspection.encrypted) throw new DrmProtectedError("unknown");
+  if (inspection.trackCount !== 1) {
+    throw new UnsupportedMediaShapeError(
+      `an fMP4 initialization segment containing ${inspection.trackCount} tracks`,
+    );
+  }
+  const actualType = inspection.trackTypes[0];
+  if (actualType !== expectedType) {
+    throw new UnsupportedMediaShapeError(
+      `a DASH ${expectedType} representation whose init declares a ${actualType} track`,
+    );
+  }
+}
 
 async function fetchBytes(
   url: string,
@@ -84,20 +144,36 @@ async function fetchSegmentsConcurrent(
   const buffers: Uint8Array[] = new Array(total);
   let nextIndex = 0;
 
+  // Abort every worker the instant one fails, so a mid-stream error stops the
+  // whole fetch instead of downloading every remaining segment into memory.
+  const pool = new AbortController();
+  const relayAbort = () => pool.abort();
+  if (signal.aborted) pool.abort();
+  else signal.addEventListener("abort", relayAbort, { once: true });
+
   async function worker(): Promise<void> {
     while (true) {
-      if (signal.aborted) throw new CancelledError();
+      if (pool.signal.aborted) throw new CancelledError();
       const idx = nextIndex++;
       if (idx >= total) return;
-      const bytes = await fetchBytes(urls[idx], signal, fetchImpl);
-      buffers[idx] = bytes;
-      onSegmentDone(idx, bytes.length);
+      try {
+        const bytes = await fetchBytes(urls[idx], pool.signal, fetchImpl);
+        buffers[idx] = bytes;
+        onSegmentDone(idx, bytes.length);
+      } catch (err) {
+        pool.abort();
+        throw err;
+      }
     }
   }
 
-  const concurrency = Math.min(HLS_SEGMENT_FETCH_CONCURRENCY, Math.max(total, 1));
-  await Promise.all(Array.from({ length: concurrency }, () => worker()));
-  return buffers;
+  try {
+    const concurrency = Math.min(HLS_SEGMENT_FETCH_CONCURRENCY, Math.max(total, 1));
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+    return buffers;
+  } finally {
+    signal.removeEventListener("abort", relayAbort);
+  }
 }
 
 function concat(buffers: Uint8Array[]): Uint8Array {
@@ -129,17 +205,48 @@ export async function downloadDash(
     throw err;
   }
 
-  if (manifest.drm.protected) throw new DrmProtectedError(manifest.drm.scheme);
   if (manifest.type === "dynamic") throw new LiveStreamError();
-  if (manifest.unsupportedShape === "byterange") throw new ByteRangeError();
-  if (manifest.video.length === 0) throw new EmptyManifestError();
+  if (manifest.unsupportedShape === "multiple-periods") {
+    throw new UnsupportedMediaShapeError("a multi-period DASH presentation");
+  }
+  if (manifest.unsupportedShape === "representation-limit") {
+    throw new UnsupportedMediaShapeError("too many DASH representations");
+  }
 
-  const videoRep = opts.videoRepresentationId
-    ? manifest.video.find((r) => r.id === opts.videoRepresentationId) ??
-      pickHighestBandwidth(manifest.video)
-    : pickHighestBandwidth(manifest.video);
-  if (!videoRep) throw new EmptyManifestError();
-  const audioRep = manifest.audio[0];
+  let videoRep: DashRepresentation | undefined;
+  if (opts.videoRepresentationId) {
+    videoRep = manifest.video.find((r) => r.id === opts.videoRepresentationId);
+    if (!videoRep) throw new VariantStaleError();
+  } else {
+    videoRep = pickHighestBandwidth(
+      manifest.video.filter((rep) => !rep.unsupportedShape && !rep.drm.protected),
+    );
+    if (!videoRep) {
+      const protectedRep = manifest.video.find((rep) => rep.drm.protected);
+      if (protectedRep) throw new DrmProtectedError(protectedRep.drm.scheme);
+      const unsupportedRep = manifest.video.find((rep) => rep.unsupportedShape);
+      if (unsupportedRep) assertRepresentationSupported(unsupportedRep);
+      if (manifest.other.some((rep) => rep.unsupportedShape === "ambiguous-media-type")) {
+        throw new UnsupportedMediaShapeError(
+          "a DASH representation with no reliable audio/video type",
+        );
+      }
+      throw new EmptyManifestError();
+    }
+  }
+  assertRepresentationSupported(videoRep);
+
+  // Preserve manifest order until the language/default-aware TrackChoice
+  // contract lands; skip only representations the current path cannot use.
+  const audioRep = manifest.audio.find(
+    (rep) => !rep.unsupportedShape && !rep.drm.protected,
+  );
+  if (manifest.audio.length > 0 && !audioRep) {
+    const protectedRep = manifest.audio.find((rep) => rep.drm.protected);
+    if (protectedRep) throw new DrmProtectedError(protectedRep.drm.scheme);
+    const unsupportedRep = manifest.audio.find((rep) => rep.unsupportedShape);
+    if (unsupportedRep) assertRepresentationSupported(unsupportedRep);
+  }
 
   const videoBitrate = videoRep.bandwidth || FALLBACK_BITRATE_BPS;
   const audioBitrate = audioRep?.bandwidth ?? 0;
@@ -175,13 +282,27 @@ export async function downloadDash(
     emitProgress();
   }
 
-  const videoBuffers: Uint8Array[] = [];
+  // Fetch and validate every selected init before requesting any media
+  // segment. This turns CENC/multi-track/type mismatches into a clean preflight
+  // refusal instead of a late mux failure after most of the stream downloads.
+  let videoInit: Uint8Array | undefined;
   if (videoRep.initSegmentUrl) {
-    const init = await fetchBytes(videoRep.initSegmentUrl, signal, fetchImpl);
-    runningBytes += init.length;
+    videoInit = await fetchBytes(videoRep.initSegmentUrl, signal, fetchImpl);
+    runningBytes += videoInit.length;
     if (runningBytes > sizeCapBytes) throw new SizeCapError(sizeCapBytes);
-    videoBuffers.push(init);
+    validateInit(videoInit, "video");
   }
+  let audioInit: Uint8Array | undefined;
+  if (audioRep) {
+    if (audioRep.initSegmentUrl) {
+      audioInit = await fetchBytes(audioRep.initSegmentUrl, signal, fetchImpl);
+      runningBytes += audioInit.length;
+      if (runningBytes > sizeCapBytes) throw new SizeCapError(sizeCapBytes);
+      validateInit(audioInit, "audio");
+    }
+  }
+
+  const videoBuffers: Uint8Array[] = videoInit ? [videoInit] : [];
   const videoMedia = await fetchSegmentsConcurrent(
     videoRep.mediaSegmentUrls,
     signal,
@@ -192,13 +313,7 @@ export async function downloadDash(
 
   let audioBuffers: Uint8Array[] | undefined;
   if (audioRep) {
-    audioBuffers = [];
-    if (audioRep.initSegmentUrl) {
-      const init = await fetchBytes(audioRep.initSegmentUrl, signal, fetchImpl);
-      runningBytes += init.length;
-      if (runningBytes > sizeCapBytes) throw new SizeCapError(sizeCapBytes);
-      audioBuffers.push(init);
-    }
+    audioBuffers = audioInit ? [audioInit] : [];
     const audioMedia = await fetchSegmentsConcurrent(
       audioRep.mediaSegmentUrls,
       signal,

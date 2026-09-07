@@ -1,5 +1,10 @@
 node_modules
 dist
+coverage
+release-artifacts
+*.tsbuildinfo
+*.cpuprofile
+.wrangler
 .DS_Store
 .env
 *.zip

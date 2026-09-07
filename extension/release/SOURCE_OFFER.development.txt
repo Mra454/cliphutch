@@ -1,0 +1,31 @@
+ClipHutch development-build source notice
+
+NOT FOR DISTRIBUTION OR CHROME WEB STORE UPLOAD
+
+Development version:
+
+{{VERSION}}
+
+No verified release source reference was supplied for this development build.
+The release packaging command will refuse to archive it.
+
+ClipHutch includes @ffmpeg/core 0.12.10, which is licensed under
+GPL-2.0-or-later and is bundled as ffmpeg-core/ffmpeg-core.js and
+ffmpeg-core/ffmpeg-core.wasm.
+
+The upstream source for @ffmpeg/core is available at:
+
+https://github.com/ffmpegwasm/ffmpeg.wasm
+
+Bundled @ffmpeg/core package:
+
+@ffmpeg/core 0.12.10
+npm package: https://www.npmjs.com/package/@ffmpeg/core/v/0.12.10
+upstream repository: https://github.com/ffmpegwasm/ffmpeg.wasm
+
+ClipHutch does not patch @ffmpeg/core. The bundled files are copied from the
+installed npm package at node_modules/@ffmpeg/core/dist/esm/ffmpeg-core.js and
+node_modules/@ffmpeg/core/dist/esm/ffmpeg-core.wasm.
+
+If you received this development build, do not redistribute it. Contact
+licenses@cliphutch.com with questions about corresponding source.

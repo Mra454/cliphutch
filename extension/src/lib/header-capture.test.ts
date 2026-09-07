@@ -5,6 +5,7 @@ import {
   buildUrlFilter,
   extractCapturedHeaders,
   hasReplayableHeaders,
+  hasDirectCredentialHeaders,
 } from "./header-capture";
 
 const h = (name: string, value: string) => ({ name, value });
@@ -117,6 +118,8 @@ describe("buildSessionRule", () => {
     expect(rule.id).toBe(42);
     expect(rule.condition.urlFilter).toBe("||cdn.example.com/v/abc/");
     expect(rule.condition.initiatorDomains).toEqual(["ABCDEF"]);
+    expect(rule.condition.resourceTypes).toEqual(["xmlhttprequest", "other"]);
+    expect(rule.condition.resourceTypes).not.toContain("media");
     expect(rule.action.type).toBe("modifyHeaders");
     expect(rule.action.requestHeaders).toHaveLength(1);
   });
@@ -142,5 +145,15 @@ describe("hasReplayableHeaders", () => {
   it("returns true for any named or custom header", () => {
     expect(hasReplayableHeaders({ referer: "x" })).toBe(true);
     expect(hasReplayableHeaders({ custom: { "x-a": "b" } })).toBe(true);
+  });
+});
+
+describe("hasDirectCredentialHeaders", () => {
+  it("distinguishes browser context from credentials native Downloads cannot replay", () => {
+    expect(hasDirectCredentialHeaders({ userAgent: "Chrome", referer: "https://page.test/" }))
+      .toBe(false);
+    expect(hasDirectCredentialHeaders({ origin: "https://page.test" })).toBe(false);
+    expect(hasDirectCredentialHeaders({ authorization: "Bearer secret" })).toBe(true);
+    expect(hasDirectCredentialHeaders({ custom: { "x-media-token": "secret" } })).toBe(true);
   });
 });

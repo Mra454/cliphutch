@@ -71,6 +71,16 @@ export function extractCapturedHeaders(
 // https://cdn.example.com/v/abc/playlist.m3u8, returns "||cdn.example.com/v/abc/"
 // so the segments in the same directory are also matched. For a direct file,
 // returns the URL itself, so the rule applies only to that one fetch.
+//
+// Audio-rendition assumption: separate-audio HLS variants reference audio
+// playlists that are almost always co-located with the master (same dir or
+// deeper subdir on the same host). The prefix filter ||host/path/ matches
+// any URL starting with host/path/ — including deeper subdirs — so audio
+// segments at host/path/audio/foo.m4s ARE covered. If a deployment ever
+// places audio at a parallel path like host/audio/ when the master lives at
+// host/video/, this filter would not match and the audio fetch would skip
+// header replay. Install a second DNR rule for the audio rendition URL in
+// that case.
 export function buildUrlFilter(url: string, kind: "hls" | "dash" | "direct"): string {
   if (kind === "direct") return url;
   try {
@@ -116,7 +126,11 @@ export type RuleInputs = {
 
 // Build a single DNR session rule. urlFilter scopes the rule to the
 // download's URL space; initiatorDomains scopes it to extension-initiated
-// requests, so the page's own player traffic is never modified.
+// requests, so the page's own player traffic is never modified. Deliberately
+// exclude `media`: popup/side-panel previews use <video>/<img> and must never
+// inherit Authorization or X-* values from an active download rule. All
+// background/offscreen downloader traffic uses fetch/XHR (`xmlhttprequest`)
+// or an extension worker request (`other`).
 export function buildSessionRule(input: RuleInputs): chrome.declarativeNetRequest.Rule {
   return {
     id: input.ruleId,
@@ -130,7 +144,6 @@ export function buildSessionRule(input: RuleInputs): chrome.declarativeNetReques
       initiatorDomains: [input.extensionId],
       resourceTypes: [
         "xmlhttprequest" as chrome.declarativeNetRequest.ResourceType,
-        "media" as chrome.declarativeNetRequest.ResourceType,
         "other" as chrome.declarativeNetRequest.ResourceType,
       ],
     },
@@ -142,4 +155,17 @@ export function hasReplayableHeaders(captured: CapturedHeaders): boolean {
     return true;
   }
   return Boolean(captured.custom && Object.keys(captured.custom).length > 0);
+}
+
+/**
+ * Headers Chrome's native Downloads API cannot recreate from normal browser
+ * context. User-Agent is supplied by Chrome and Referer/Origin may be inferred
+ * by the server, but bearer/custom credentials require the extension fetch
+ * path and must never be advertised as native-download ready.
+ */
+export function hasDirectCredentialHeaders(captured: CapturedHeaders): boolean {
+  return Boolean(
+    captured.authorization ||
+    (captured.custom && Object.keys(captured.custom).length > 0),
+  );
 }

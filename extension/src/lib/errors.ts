@@ -9,21 +9,32 @@ export class HlsDownloadError extends Error {
   }
 }
 
-export class SeparateAudioError extends HlsDownloadError {
+export class UnsupportedTsCodecError extends HlsDownloadError {
   constructor() {
     super(
-      "SEPARATE_AUDIO",
-      "This HLS stream uses separate audio renditions. v1 supports only streams with embedded audio.",
+      "UNSUPPORTED_TS_CODEC",
+      "This HLS stream uses MPEG-TS codecs ClipHutch cannot repackage as MP4. ClipHutch currently supports H.264 video with AAC audio in MPEG-TS.",
     );
-    this.name = "SeparateAudioError";
+    this.name = "UnsupportedTsCodecError";
+  }
+}
+
+export class RawAacAudioError extends HlsDownloadError {
+  constructor() {
+    super(
+      "RAW_AAC_AUDIO",
+      "This stream serves its audio as raw AAC (ADTS) rather than MPEG-TS. ClipHutch does not yet repackage raw AAC audio.",
+    );
+    this.name = "RawAacAudioError";
   }
 }
 
 export class EncryptedStreamError extends HlsDownloadError {
-  constructor() {
+  constructor(detail?: string) {
+    const message = "This stream uses an encryption method ClipHutch does not support";
     super(
       "ENCRYPTED",
-      "This HLS stream is encrypted (AES-128 transport encryption). v1 does not fetch and apply encryption keys.",
+      detail ? `${message} (${detail}).` : `${message}.`,
     );
     this.name = "EncryptedStreamError";
   }
@@ -42,23 +53,56 @@ export class DrmProtectedError extends HlsDownloadError {
   }
 }
 
-export class FmpfourError extends HlsDownloadError {
-  constructor() {
+export class UnsupportedMediaShapeError extends HlsDownloadError {
+  constructor(detail: string) {
     super(
-      "FMP4",
-      "This HLS stream uses fMP4 segments (CMAF). v1 supports MPEG-TS only.",
+      "UNSUPPORTED_MEDIA_SHAPE",
+      `This stream uses a media layout ClipHutch does not support yet: ${detail}.`,
     );
-    this.name = "FmpfourError";
+    this.name = "UnsupportedMediaShapeError";
   }
 }
 
+export class VariantStaleError extends HlsDownloadError {
+  constructor() {
+    super(
+      "VARIANT_STALE",
+      "The selected quality is no longer available. Refresh the video list and choose again.",
+    );
+    this.name = "VariantStaleError";
+  }
+}
+
+// Preemptive refusal — the manifest declares a byte-range shape ClipHutch
+// doesn't yet handle (e.g. DASH SegmentBase+indexRange). Distinct from the
+// runtime errors below which fire after a Range request is actually sent.
 export class ByteRangeError extends HlsDownloadError {
   constructor() {
     super(
       "BYTERANGE",
-      "This stream uses byte-range segments. v1 does not support byte-range fetching.",
+      "This stream uses a byte-range layout ClipHutch doesn't yet support.",
     );
     this.name = "ByteRangeError";
+  }
+}
+
+export class ByteRangeUnsupportedError extends HlsDownloadError {
+  constructor() {
+    super(
+      "BYTERANGE_UNSUPPORTED",
+      "A server returned a full response to a byte-range request. The stream cannot be downloaded one segment at a time from this origin.",
+    );
+    this.name = "ByteRangeUnsupportedError";
+  }
+}
+
+export class ByteRangeOutOfBoundsError extends HlsDownloadError {
+  constructor() {
+    super(
+      "BYTERANGE_OUT_OF_BOUNDS",
+      "A byte-range request fell outside the file's size. The manifest may be stale or the source file changed.",
+    );
+    this.name = "ByteRangeOutOfBoundsError";
   }
 }
 
@@ -66,7 +110,7 @@ export class EmptyManifestError extends HlsDownloadError {
   constructor() {
     super(
       "EMPTY",
-      "The manifest contained no usable video representations.",
+      "The manifest contained no usable downloadable media.",
     );
     this.name = "EmptyManifestError";
   }
@@ -76,7 +120,7 @@ export class LiveStreamError extends HlsDownloadError {
   constructor() {
     super(
       "LIVE",
-      "This is a live stream. v1 supports VOD streams only.",
+      "This is a live stream. ClipHutch downloads on-demand (VOD) streams only.",
     );
     this.name = "LiveStreamError";
   }
@@ -109,7 +153,7 @@ export class NetworkError extends HlsDownloadError {
 
 export class ParseError extends HlsDownloadError {
   constructor() {
-    super("PARSE", "Could not parse the HLS playlist.");
+    super("PARSE", "Could not parse the stream manifest.");
     this.name = "ParseError";
   }
 }

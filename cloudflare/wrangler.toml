@@ -1,18 +1,141 @@
-name = "cliphutch-api"
+# Safe default for local tooling and generated types. Production is reachable
+# only through the explicit, guarded `production` environment below.
+name = "cliphutch-api-local"
 main = "src/index.ts"
-compatibility_date = "2026-04-01"
+compatibility_date = "2026-08-18"
 compatibility_flags = ["nodejs_compat_v2"]
 
-# D1 database. The database_id is set by `wrangler d1 create cliphutch-licenses`.
-# Replace REPLACE_AFTER_WRANGLER_D1_CREATE with the UUID it prints.
+# Keep production request logs and traces disabled. ClipHutch's privacy promise
+# permits only explicitly approved, metadata-minimized operational events.
+[observability]
+enabled = false
+
+[observability.logs]
+enabled = false
+invocation_logs = false
+persist = false
+
+[observability.traces]
+enabled = false
+persist = false
+
+[version_metadata]
+binding = "WORKER_VERSION"
+
+[secrets]
+required = [
+  "STRIPE_SECRET_KEY",
+  "STRIPE_WEBHOOK_SECRET",
+  "RESEND_API_KEY",
+  "RESEND_FROM_EMAIL",
+]
+
+# The safe default points at staging so a bare Wrangler command cannot bind a
+# newly created Worker to production D1. Normal development still uses
+# `wrangler dev --env staging`.
 [[d1_databases]]
 binding = "DB"
-database_name = "cliphutch-licenses"
-database_id = "dc85e41b-4f1b-487d-b46e-5789e6fd0ca1"
+database_name = "cliphutch-licenses-staging"
+database_id = "8a3ccbca-205a-4e92-bd25-8203fa07000a"
 
 # Public env vars (non-secret). Secrets are set via `wrangler secret put`:
+#   STRIPE_SECRET_KEY
 #   STRIPE_WEBHOOK_SECRET
 #   RESEND_API_KEY
 #   RESEND_FROM_EMAIL
 [vars]
+ENVIRONMENT = "local"
 MAX_DEVICES_PER_LICENSE = "5"
+COMPUTEDKIT_MAX_DEVICES_PER_LICENSE = "3"
+OUTBOUND_TIMEOUT_MS = "10000"
+MUTATION_JOURNAL_RETENTION_DAYS = "90"
+REFUND_EVENT_RETENTION_DAYS = "365"
+CLIPHUTCH_ALLOWED_ORIGINS = "chrome-extension://pdpcameeghhppjbhecolnhdepceeldhl"
+# ComputedKit does not yet have a verified stable packed/CWS origin. Keep this
+# empty until that exact origin passes staging tests; host permissions continue
+# to authorize its Worker requests independently of response CORS.
+COMPUTEDKIT_ALLOWED_ORIGINS = ""
+CHECKOUT_ALLOWED_ORIGINS = ""
+# Must be set to the exact live ClipHutch Payment Link ID before the Worker
+# release gate. Empty is intentionally fail-closed for new ClipHutch issuance.
+CLIPHUTCH_STRIPE_PAYMENT_LINK_ID = ""
+COMPUTEDKIT_STRIPE_PRICE_ID = ""
+COMPUTEDKIT_SUCCESS_URL = ""
+COMPUTEDKIT_CANCEL_URL = ""
+
+# Named environments are required for every remote command. Staging uses a
+# separate Worker name and D1 database; its Stripe/Resend secrets must be test
+# credentials set with `wrangler secret put --env staging` before deployment.
+[env.staging]
+name = "cliphutch-api-staging"
+
+[env.staging.triggers]
+crons = ["17 3 * * *"]
+
+[env.staging.version_metadata]
+binding = "WORKER_VERSION"
+
+[env.staging.secrets]
+required = [
+  "STRIPE_SECRET_KEY",
+  "STRIPE_WEBHOOK_SECRET",
+  "RESEND_API_KEY",
+  "RESEND_FROM_EMAIL",
+]
+
+[[env.staging.d1_databases]]
+binding = "DB"
+database_name = "cliphutch-licenses-staging"
+database_id = "8a3ccbca-205a-4e92-bd25-8203fa07000a"
+
+[env.staging.vars]
+ENVIRONMENT = "staging"
+MAX_DEVICES_PER_LICENSE = "5"
+COMPUTEDKIT_MAX_DEVICES_PER_LICENSE = "3"
+OUTBOUND_TIMEOUT_MS = "10000"
+MUTATION_JOURNAL_RETENTION_DAYS = "90"
+REFUND_EVENT_RETENTION_DAYS = "365"
+CLIPHUTCH_ALLOWED_ORIGINS = "chrome-extension://pdpcameeghhppjbhecolnhdepceeldhl"
+COMPUTEDKIT_ALLOWED_ORIGINS = ""
+CHECKOUT_ALLOWED_ORIGINS = ""
+CLIPHUTCH_STRIPE_PAYMENT_LINK_ID = ""
+COMPUTEDKIT_STRIPE_PRICE_ID = ""
+COMPUTEDKIT_SUCCESS_URL = ""
+COMPUTEDKIT_CANCEL_URL = ""
+
+[env.production]
+name = "cliphutch-api"
+
+[env.production.triggers]
+crons = ["17 3 * * *"]
+
+[env.production.version_metadata]
+binding = "WORKER_VERSION"
+
+[env.production.secrets]
+required = [
+  "STRIPE_SECRET_KEY",
+  "STRIPE_WEBHOOK_SECRET",
+  "RESEND_API_KEY",
+  "RESEND_FROM_EMAIL",
+]
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "cliphutch-licenses"
+database_id = "dc85e41b-4f1b-487d-b46e-5789e6fd0ca1"
+
+[env.production.vars]
+ENVIRONMENT = "production"
+MAX_DEVICES_PER_LICENSE = "5"
+COMPUTEDKIT_MAX_DEVICES_PER_LICENSE = "3"
+OUTBOUND_TIMEOUT_MS = "10000"
+MUTATION_JOURNAL_RETENTION_DAYS = "90"
+REFUND_EVENT_RETENTION_DAYS = "365"
+CLIPHUTCH_ALLOWED_ORIGINS = "chrome-extension://pdpcameeghhppjbhecolnhdepceeldhl"
+COMPUTEDKIT_ALLOWED_ORIGINS = ""
+CHECKOUT_ALLOWED_ORIGINS = "https://cliphutch.com"
+CLIPHUTCH_STRIPE_PAYMENT_LINK_ID = ""
+COMPUTEDKIT_STRIPE_PRICE_ID = "price_1TuHE6GQjeGFY4e5VButw8L0"
+COMPUTEDKIT_SUCCESS_URL = "https://cliphutch.com/computedkit/thanks/"
+COMPUTEDKIT_CANCEL_URL = "https://cliphutch.com/computedkit/#pro"

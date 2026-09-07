@@ -1,19 +1,33 @@
 import { Parser } from "m3u8-parser";
 import {
   AccessDeniedError,
-  ByteRangeError,
+  ByteRangeOutOfBoundsError,
+  ByteRangeUnsupportedError,
   CancelledError,
   DrmProtectedError,
-  EncryptedStreamError,
-  FmpfourError,
+  EmptyManifestError,
+  HlsDownloadError,
   LiveStreamError,
   NetworkError,
   ParseError,
-  SeparateAudioError,
   SizeCapError,
+  UnsupportedMediaShapeError,
+  VariantStaleError,
 } from "../lib/errors";
 import { classifyHlsManifestForDrm } from "../lib/drm";
 import { HLS_SEGMENT_FETCH_CONCURRENCY } from "../lib/constants";
+import { inspectFmp4Init, muxFmp4 } from "./dash-mux";
+import { transmuxTsAudioToFmp4, transmuxTsToMp4, transmuxTsVideoToFmp4 } from "./ts-audio-to-fmp4";
+import {
+  buildHlsCryptoPlan,
+  createKeyCache,
+  decryptAes128Cbc,
+  ivForMap,
+  ivForSegment,
+  type HlsCryptoPlan,
+  type HlsKeyContext,
+  type HlsSegmentCrypto,
+} from "./hls-crypto-plan";
 
 export type HlsProgress = {
   done: number;
@@ -26,17 +40,26 @@ export type DownloadHlsOptions = {
   signal: AbortSignal;
   sizeCapBytes: number;
   fetchImpl?: typeof fetch;
-  // When set, skip pickEmbeddedVariant and use this resolved variant URL.
+  // When set, skip pickVariant and use this resolved variant URL.
   // Takes precedence over the highest-bandwidth auto-pick.
   variantUrl?: string;
+  // Resolved URI of a separate audio rendition to download in parallel and
+  // mux into the output MP4. Required for separate-audio variants.
+  audioUrl?: string;
+  /** Require the fresh master to name this exact video/default-audio tuple. */
+  exactVariantSelection?: boolean;
 };
+
+type ByteRange = { length: number; offset: number };
 
 type ParsedSegment = {
   uri: string;
   duration?: number;
   key?: { method?: string; uri?: string };
-  map?: { uri?: string };
-  byterange?: { length: number; offset: number };
+  map?: { uri?: string; byterange?: ByteRange; key?: { method?: string } };
+  byterange?: ByteRange;
+  discontinuity?: boolean;
+  timeline?: number;
 };
 
 type ParsedVariant = {
@@ -52,6 +75,7 @@ type ParsedVariant = {
 type ParsedManifest = {
   endList?: boolean;
   segments?: ParsedSegment[];
+  discontinuityStarts?: number[];
   playlists?: ParsedVariant[];
   mediaGroups?: {
     AUDIO?: Record<string, Record<string, { uri?: string; default?: boolean; autoselect?: boolean; language?: string }>>;
@@ -89,50 +113,173 @@ async function fetchBytes(
   signal: AbortSignal,
   fetchImpl: typeof fetch,
 ): Promise<Uint8Array> {
-  let res: Response;
   try {
-    res = await fetchImpl(url, { credentials: "include", signal });
+    const res = await fetchImpl(url, { credentials: "include", signal });
+    if (res.status === 401 || res.status === 403) throw new AccessDeniedError();
+    if (!res.ok) throw new NetworkError(`Status ${res.status}`);
+    return new Uint8Array(await res.arrayBuffer());
   } catch (err) {
-    if (err instanceof Error && err.name === "AbortError") throw new CancelledError();
+    if (err instanceof HlsDownloadError) throw err;
+    if (signal.aborted || (err instanceof Error && err.name === "AbortError")) {
+      throw new CancelledError();
+    }
     throw new NetworkError(err instanceof Error ? err.message : undefined);
   }
-  if (res.status === 401 || res.status === 403) throw new AccessDeniedError();
-  if (!res.ok) throw new NetworkError(`Status ${res.status}`);
-  return new Uint8Array(await res.arrayBuffer());
 }
 
-function variantHasSeparateAudio(
-  v: ParsedVariant,
+async function fetchByteRange(
+  url: string,
+  offset: number,
+  length: number,
+  signal: AbortSignal,
+  fetchImpl: typeof fetch,
+): Promise<Uint8Array> {
+  const end = offset + length - 1;
+  try {
+    const res = await fetchImpl(url, {
+      credentials: "include",
+      signal,
+      headers: { Range: `bytes=${offset}-${end}` },
+    });
+    if (res.status === 401 || res.status === 403) throw new AccessDeniedError();
+    if (res.status === 416) throw new ByteRangeOutOfBoundsError();
+    // 200 means the server ignored the Range header and sent the full resource.
+    // Using the full body would silently produce huge / wrong segments, so
+    // surface this rather than fall through.
+    if (res.status === 200) throw new ByteRangeUnsupportedError();
+    if (res.status !== 206 && !res.ok) throw new NetworkError(`Status ${res.status}`);
+    const bytes = new Uint8Array(await res.arrayBuffer());
+    // Some servers honor 206 but return the full body anyway. Trim defensively
+    // so callers get exactly the requested range length.
+    if (bytes.length > length) return bytes.slice(0, length);
+    return bytes;
+  } catch (err) {
+    if (err instanceof HlsDownloadError) throw err;
+    if (signal.aborted || (err instanceof Error && err.name === "AbortError")) {
+      throw new CancelledError();
+    }
+    throw new NetworkError(err instanceof Error ? err.message : undefined);
+  }
+}
+
+async function fetchSegmentBytes(
+  seg: ParsedSegment,
+  crypto: HlsSegmentCrypto,
+  keyCache: ReturnType<typeof createKeyCache>,
+  baseUrl: string,
+  signal: AbortSignal,
+  fetchImpl: typeof fetch,
+): Promise<Uint8Array> {
+  const url = resolveUrl(seg.uri, baseUrl);
+  const mediaPromise = seg.byterange
+    ? fetchByteRange(url, seg.byterange.offset, seg.byterange.length, signal, fetchImpl)
+    : fetchBytes(url, signal, fetchImpl);
+  if (crypto.key.method === "NONE") return mediaPromise;
+  const keyPromise = keyCache.getKey(crypto.key.keyUri);
+  const [bytes, key] = await Promise.all([mediaPromise, keyPromise]);
+  return decryptAes128Cbc(key, ivForSegment(crypto), bytes);
+}
+
+function resolveDefaultAudioRenditionUri(
+  audioGroupId: string | undefined,
   groups: ParsedManifest["mediaGroups"],
-): boolean {
-  const audioGroupId = v.attributes.AUDIO;
-  if (!audioGroupId) return false;
+): string | undefined {
+  if (!audioGroupId) return undefined;
   const group = groups?.AUDIO?.[audioGroupId];
-  if (!group) return false;
-  return Object.values(group).some((rendition) => Boolean(rendition.uri));
+  if (!group) return undefined;
+  const withUri = Object.values(group).filter((r) => Boolean(r.uri));
+  if (withUri.length === 0) return undefined;
+  const def = withUri.find((r) => r.default === true);
+  return (def ?? withUri[0]).uri;
 }
 
-function pickEmbeddedVariant(
+function pickVariant(
   parsed: ParsedManifest,
-): { variant: ParsedVariant; bandwidth: number } {
+): { variant: ParsedVariant; bandwidth: number; audioRenditionUri?: string } {
   const variants = parsed.playlists ?? [];
-  const candidates = variants
-    .filter((v) => !variantHasSeparateAudio(v, parsed.mediaGroups))
-    .sort((a, b) => (b.attributes.BANDWIDTH ?? 0) - (a.attributes.BANDWIDTH ?? 0));
-  if (candidates.length === 0) throw new SeparateAudioError();
-  const v = candidates[0];
-  return { variant: v, bandwidth: v.attributes.BANDWIDTH ?? 0 };
+  if (variants.length === 0) throw new EmptyManifestError();
+  const sorted = [...variants].sort(
+    (a, b) => (b.attributes.BANDWIDTH ?? 0) - (a.attributes.BANDWIDTH ?? 0),
+  );
+  const v = sorted[0];
+  return {
+    variant: v,
+    bandwidth: v.attributes.BANDWIDTH ?? 0,
+    audioRenditionUri: resolveDefaultAudioRenditionUri(v.attributes.AUDIO, parsed.mediaGroups),
+  };
 }
 
-function validateVariant(parsed: ParsedManifest): void {
+function cryptoContextSignature(key: HlsKeyContext | undefined): string {
+  if (key === undefined) return "none";
+  if (key.method === "NONE") return "NONE";
+  const iv = key.iv === undefined
+    ? ""
+    : Array.from(key.iv, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `AES-128|${key.keyUri}|${iv}`;
+}
+
+function validateVariant(parsed: ParsedManifest, cryptoPlan: HlsCryptoPlan): void {
   if (!parsed.endList) throw new LiveStreamError();
   const segments = parsed.segments ?? [];
-  for (const seg of segments) {
-    if (seg.map) throw new FmpfourError();
-    if (seg.byterange) throw new ByteRangeError();
-    if (seg.key && seg.key.method && seg.key.method.toUpperCase() !== "NONE") {
-      throw new EncryptedStreamError();
-    }
+  if (segments.length === 0) throw new EmptyManifestError();
+
+  if ((parsed.discontinuityStarts?.length ?? 0) > 0 || segments.some((seg) => seg.discontinuity)) {
+    throw new UnsupportedMediaShapeError("an HLS discontinuity");
+  }
+
+  const mapSignature = (seg: ParsedSegment, index: number): string => {
+    if (!seg.map?.uri) return "none";
+    const range = seg.map.byterange;
+    const mapKey = cryptoPlan.segments[index]?.mapKey;
+    return `${seg.map.uri}|${range?.offset ?? ""}|${range?.length ?? ""}|${cryptoContextSignature(mapKey)}`;
+  };
+  const firstMap = mapSignature(segments[0], 0);
+  if (segments.some((seg, index) => mapSignature(seg, index) !== firstMap)) {
+    throw new UnsupportedMediaShapeError("an HLS initialization-map change");
+  }
+}
+
+// First segment's EXT-X-MAP info, if present. Carries the optional byterange
+// (Apple-style single-file CMAF uses BYTERANGE on EXT-X-MAP to delimit the
+// init box at the head of main.mp4). Assumes uniform map across the variant
+// (true for VOD without mid-stream discontinuities — the common case).
+type Fmp4Init = {
+  uri: string;
+  byterange?: ByteRange;
+  mapCrypto: HlsSegmentCrypto;
+};
+
+function detectFmp4Init(
+  segments: ParsedSegment[],
+  cryptoPlan: HlsCryptoPlan,
+): Fmp4Init | undefined {
+  const map = segments[0]?.map;
+  if (!map?.uri) return undefined;
+  return {
+    uri: map.uri,
+    byterange: map.byterange,
+    mapCrypto: cryptoPlan.segments[0],
+  };
+}
+
+function validateFmp4Init(bytes: Uint8Array, expectedType: "video" | "audio"): void {
+  let inspection: ReturnType<typeof inspectFmp4Init>;
+  try {
+    inspection = inspectFmp4Init(bytes);
+  } catch {
+    throw new UnsupportedMediaShapeError("an unreadable fMP4 initialization segment");
+  }
+  if (inspection.encrypted) throw new DrmProtectedError("unknown");
+  if (inspection.trackCount !== 1) {
+    throw new UnsupportedMediaShapeError(
+      `an embedded fMP4 initialization segment containing ${inspection.trackCount} tracks`,
+    );
+  }
+  const actualType = inspection.trackTypes[0];
+  if (actualType !== expectedType) {
+    throw new UnsupportedMediaShapeError(
+      `an HLS ${expectedType} rendition whose init declares a ${actualType} track`,
+    );
   }
 }
 
@@ -147,39 +294,70 @@ function resolveUrl(uri: string, base: string): string {
   return new URL(uri, base).href;
 }
 
+// Caller owns size-cap + progress accounting via onSegmentDone, so multiple
+// concurrent streams (video + audio) can share a single running-bytes
+// counter without re-implementing the worker pool per call.
 async function fetchSegmentsConcurrent(
   segments: ParsedSegment[],
+  cryptoSegments: HlsSegmentCrypto[],
+  keyCache: ReturnType<typeof createKeyCache>,
   baseUrl: string,
-  sizeCapBytes: number,
-  onProgress: (p: HlsProgress) => void,
   signal: AbortSignal,
   fetchImpl: typeof fetch,
+  onSegmentDone: (idx: number, bytes: number) => void,
 ): Promise<Uint8Array[]> {
   const total = segments.length;
   const buffers: Uint8Array[] = new Array(total);
-  let runningBytes = 0;
-  let done = 0;
   let nextIndex = 0;
+
+  // Abort every worker the instant one fails, so a mid-stream error stops the
+  // whole fetch instead of downloading every remaining segment into memory.
+  const pool = new AbortController();
+  const relayAbort = () => pool.abort();
+  if (signal.aborted) pool.abort();
+  else signal.addEventListener("abort", relayAbort, { once: true });
 
   async function worker(): Promise<void> {
     while (true) {
-      if (signal.aborted) throw new CancelledError();
+      if (pool.signal.aborted) throw new CancelledError();
       const idx = nextIndex++;
       if (idx >= total) return;
-      const seg = segments[idx];
-      const url = resolveUrl(seg.uri, baseUrl);
-      const bytes = await fetchBytes(url, signal, fetchImpl);
-      runningBytes += bytes.length;
-      if (runningBytes > sizeCapBytes) throw new SizeCapError(sizeCapBytes);
-      buffers[idx] = bytes;
-      done += 1;
-      onProgress({ done, total, bytes: runningBytes });
+      try {
+        const bytes = await fetchSegmentBytes(
+          segments[idx],
+          cryptoSegments[idx],
+          keyCache,
+          baseUrl,
+          pool.signal,
+          fetchImpl,
+        );
+        buffers[idx] = bytes;
+        onSegmentDone(idx, bytes.length);
+      } catch (err) {
+        pool.abort();
+        throw err;
+      }
     }
   }
 
-  const concurrency = Math.min(HLS_SEGMENT_FETCH_CONCURRENCY, Math.max(total, 1));
-  await Promise.all(Array.from({ length: concurrency }, () => worker()));
-  return buffers;
+  try {
+    const concurrency = Math.min(HLS_SEGMENT_FETCH_CONCURRENCY, Math.max(total, 1));
+    await Promise.all(Array.from({ length: concurrency }, () => worker()));
+    return buffers;
+  } finally {
+    signal.removeEventListener("abort", relayAbort);
+  }
+}
+
+function concatBuffers(parts: Uint8Array[]): Uint8Array {
+  const total = parts.reduce((s, b) => s + b.length, 0);
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const p of parts) {
+    out.set(p, offset);
+    offset += p.length;
+  }
+  return out;
 }
 
 export async function downloadHls(
@@ -190,56 +368,269 @@ export async function downloadHls(
   const { signal, sizeCapBytes, onProgress } = opts;
 
   if (signal.aborted) throw new CancelledError();
+  if (opts.exactVariantSelection && !opts.variantUrl) {
+    throw new VariantStaleError();
+  }
+
+  // === Step 1: resolve video variant + (optionally) audio rendition ===
 
   const playlistText = await fetchText(playlistUrl, signal, fetchImpl);
   const masterDrm = classifyHlsManifestForDrm(playlistText);
   if (masterDrm.protected) throw new DrmProtectedError(masterDrm.scheme);
   let parsed = parseManifest(playlistText);
+  let videoPlaylistText = playlistText;
 
   let bandwidthBps = 0;
   let variantUrl = playlistUrl;
+  let audioRenditionUrl: string | undefined = opts.audioUrl;
 
   if (parsed.playlists && parsed.playlists.length > 0) {
     if (opts.variantUrl) {
-      // Caller picked a specific variant — skip pickEmbeddedVariant and use it.
-      variantUrl = opts.variantUrl;
+      // A persistent Capture Pack selection binds both the video and its
+      // reviewed default-audio rendition. Legacy callers retain the old
+      // video-only lookup and default-audio discovery behavior.
       const matched = parsed.playlists.find(
-        (p) => resolveUrl(p.uri, playlistUrl) === opts.variantUrl,
+        (candidate) => {
+          if (resolveUrl(candidate.uri, playlistUrl) !== opts.variantUrl) {
+            return false;
+          }
+          if (!opts.exactVariantSelection) return true;
+          const renditionUri = resolveDefaultAudioRenditionUri(
+            candidate.attributes.AUDIO,
+            parsed.mediaGroups,
+          );
+          const candidateAudioUrl = renditionUri === undefined
+            ? undefined
+            : resolveUrl(renditionUri, playlistUrl);
+          return candidateAudioUrl === opts.audioUrl;
+        },
       );
-      bandwidthBps = matched?.attributes.BANDWIDTH ?? 0;
+      // A child URL is executable only when the fresh master names it. This
+      // rejects stale signed URLs and prevents an arbitrary caller URL from
+      // crossing the trusted manifest boundary.
+      if (!matched) throw new VariantStaleError();
+      variantUrl = resolveUrl(matched.uri, playlistUrl);
+      bandwidthBps = matched.attributes.BANDWIDTH ?? 0;
+      if (opts.exactVariantSelection) {
+        audioRenditionUrl = opts.audioUrl;
+      } else if (!audioRenditionUrl) {
+        const renditionUri = resolveDefaultAudioRenditionUri(
+          matched.attributes.AUDIO,
+          parsed.mediaGroups,
+        );
+        if (renditionUri) audioRenditionUrl = resolveUrl(renditionUri, playlistUrl);
+      }
     } else {
-      const { variant, bandwidth } = pickEmbeddedVariant(parsed);
+      const { variant, bandwidth, audioRenditionUri } = pickVariant(parsed);
       bandwidthBps = bandwidth;
       variantUrl = resolveUrl(variant.uri, playlistUrl);
+      if (!audioRenditionUrl && audioRenditionUri) {
+        audioRenditionUrl = resolveUrl(audioRenditionUri, playlistUrl);
+      }
     }
     const variantText = await fetchText(variantUrl, signal, fetchImpl);
     const variantDrm = classifyHlsManifestForDrm(variantText);
     if (variantDrm.protected) throw new DrmProtectedError(variantDrm.scheme);
     parsed = parseManifest(variantText);
+    videoPlaylistText = variantText;
+  } else if (opts.exactVariantSelection) {
+    const rootUrl = resolveUrl(playlistUrl, playlistUrl);
+    const selectedUrl = opts.variantUrl === undefined
+      ? undefined
+      : resolveUrl(opts.variantUrl, playlistUrl);
+    // If execution revalidation selected a master child, a subsequent root
+    // fetch drifting to an implicit media playlist must fail stale instead of
+    // silently downloading the root. A genuine implicit selection binds the
+    // root itself and cannot carry a separate default-audio rendition.
+    if (selectedUrl !== rootUrl || opts.audioUrl !== undefined) {
+      throw new VariantStaleError();
+    }
   }
 
-  validateVariant(parsed);
+  const videoPlan = buildHlsCryptoPlan(videoPlaylistText, variantUrl);
+  if (videoPlan.segments.length !== (parsed.segments ?? []).length) {
+    throw new UnsupportedMediaShapeError("a playlist ClipHutch could not align");
+  }
+  if (videoPlan.iFramesOnly) {
+    throw new UnsupportedMediaShapeError("an I-frame-only playlist");
+  }
+  validateVariant(parsed, videoPlan);
+
+  const videoSegments = parsed.segments ?? [];
+  const videoInit = detectFmp4Init(videoSegments, videoPlan);
+
+  // === Step 2: parse + validate audio rendition (if any) ===
+
+  let audioSegments: ParsedSegment[] = [];
+  let audioPlan: HlsCryptoPlan = { segments: [], iFramesOnly: false };
+  let audioInit: Fmp4Init | undefined;
+  let audioBaseUrl = "";
+
+  if (audioRenditionUrl) {
+    const audioText = await fetchText(audioRenditionUrl, signal, fetchImpl);
+    const audioDrm = classifyHlsManifestForDrm(audioText);
+    if (audioDrm.protected) throw new DrmProtectedError(audioDrm.scheme);
+    const audioParsed = parseManifest(audioText);
+    audioPlan = buildHlsCryptoPlan(audioText, audioRenditionUrl);
+    if (audioPlan.segments.length !== (audioParsed.segments ?? []).length) {
+      throw new UnsupportedMediaShapeError("a playlist ClipHutch could not align");
+    }
+    if (audioPlan.iFramesOnly) {
+      throw new UnsupportedMediaShapeError("an I-frame-only playlist");
+    }
+    validateVariant(audioParsed, audioPlan);
+    audioSegments = audioParsed.segments ?? [];
+    audioInit = detectFmp4Init(audioSegments, audioPlan);
+    audioBaseUrl = audioRenditionUrl;
+
+  }
+
+  // === Step 3: size cap estimate ===
 
   const estimatedBytes = estimateSize(parsed, bandwidthBps);
   if (estimatedBytes > sizeCapBytes) throw new SizeCapError(sizeCapBytes);
 
-  const segments = parsed.segments ?? [];
-  const buffers = await fetchSegmentsConcurrent(
-    segments,
-    variantUrl,
-    sizeCapBytes,
-    onProgress,
-    signal,
-    fetchImpl,
-  );
+  // === Step 4: fetch init segments (video + optional audio) ===
 
-  const totalLength = buffers.reduce((sum, b) => sum + b.length, 0);
-  const concat = new Uint8Array(totalLength);
-  let offset = 0;
-  for (const b of buffers) {
-    concat.set(b, offset);
-    offset += b.length;
+  let runningBytes = 0;
+  const checkCap = () => {
+    if (runningBytes > sizeCapBytes) throw new SizeCapError(sizeCapBytes);
+  };
+  const run = new AbortController();
+  const relayRunAbort = () => run.abort();
+  if (signal.aborted) run.abort();
+  else signal.addEventListener("abort", relayRunAbort, { once: true });
+  const keyCache = createKeyCache(fetchImpl, run.signal);
+
+  const fetchInit = async (
+    init: Fmp4Init,
+    baseUrl: string,
+  ): Promise<Uint8Array> => {
+    const url = resolveUrl(init.uri, baseUrl);
+    const mapKey = init.mapCrypto.mapKey;
+    const mediaPromise = init.byterange
+      ? fetchByteRange(url, init.byterange.offset, init.byterange.length, run.signal, fetchImpl)
+      : fetchBytes(url, run.signal, fetchImpl);
+    if (mapKey?.method !== "AES-128") return mediaPromise;
+    const keyPromise = keyCache.getKey(mapKey.keyUri);
+    const [bytes, key] = await Promise.all([mediaPromise, keyPromise]);
+    return decryptAes128Cbc(key, ivForMap(init.mapCrypto), bytes);
+  };
+
+  try {
+    let videoInitBytes: Uint8Array | undefined;
+    let audioInitBytes: Uint8Array | undefined;
+
+    try {
+      if (videoInit) {
+        videoInitBytes = await fetchInit(videoInit, variantUrl);
+        runningBytes += videoInitBytes.length;
+        checkCap();
+        validateFmp4Init(videoInitBytes, "video");
+      }
+      if (audioInit && audioRenditionUrl) {
+        audioInitBytes = await fetchInit(audioInit, audioBaseUrl);
+        runningBytes += audioInitBytes.length;
+        checkCap();
+        validateFmp4Init(audioInitBytes, "audio");
+      }
+    } catch (error) {
+      run.abort();
+      throw error;
+    }
+
+    // === Step 5: fetch media segments — parallel video + audio when both present ===
+
+    const videoTotal = videoSegments.length;
+    const audioTotal = audioSegments.length;
+    let videoDone = 0;
+    let audioDone = 0;
+    const emitProgress = () => {
+      onProgress({
+        done: videoDone + audioDone,
+        total: videoTotal + audioTotal,
+        bytes: runningBytes,
+      });
+    };
+
+    const videoFetch = fetchSegmentsConcurrent(
+      videoSegments,
+      videoPlan.segments,
+      keyCache,
+      variantUrl,
+      run.signal,
+      fetchImpl,
+      (_idx, bytes) => {
+        runningBytes += bytes;
+        checkCap();
+        videoDone += 1;
+        emitProgress();
+      },
+    );
+
+    const audioFetch = audioRenditionUrl
+      ? fetchSegmentsConcurrent(
+          audioSegments,
+          audioPlan.segments,
+          keyCache,
+          audioBaseUrl,
+          run.signal,
+          fetchImpl,
+          (_idx, bytes) => {
+            runningBytes += bytes;
+            checkCap();
+            audioDone += 1;
+            emitProgress();
+          },
+        )
+      : Promise.resolve([] as Uint8Array[]);
+
+    let videoBuffers: Uint8Array[];
+    let audioBuffers: Uint8Array[];
+    try {
+      [videoBuffers, audioBuffers] = await Promise.all([videoFetch, audioFetch]);
+    } catch (error) {
+      run.abort();
+      throw error;
+    }
+
+    // === Step 6: assemble output blob ===
+
+    // Branch A: separate-audio fMP4 video + fMP4 or MPEG-TS AAC audio — mux
+    // into a single MP4.
+    if (audioRenditionUrl && videoInitBytes) {
+      const videoBytes = concatBuffers([videoInitBytes, ...videoBuffers]);
+      const audioBytes = audioInitBytes
+        ? concatBuffers([audioInitBytes, ...audioBuffers])
+        : transmuxTsAudioToFmp4(audioBuffers);
+      const muxed = await muxFmp4(videoBytes, audioBytes);
+      return new Blob([muxed as BlobPart], { type: "video/mp4" });
+    }
+
+    // Branch A2: separate-audio MPEG-TS video + fMP4 or MPEG-TS AAC audio —
+    // transmux any TS side to fMP4, then mux into a single MP4.
+    if (audioRenditionUrl && !videoInit) {
+      const videoBytes = transmuxTsVideoToFmp4(videoBuffers);
+      const audioBytes = audioInitBytes
+        ? concatBuffers([audioInitBytes, ...audioBuffers])
+        : transmuxTsAudioToFmp4(audioBuffers);
+      const muxed = await muxFmp4(videoBytes, audioBytes);
+      return new Blob([muxed as BlobPart], { type: "video/mp4" });
+    }
+
+    // Branch B: embedded-audio fMP4 (Cloudflare-shape) — pass single concatenated
+    // stream through muxFmp4 to produce a non-fragmented MP4.
+    if (videoInit && videoInitBytes) {
+      const combined = concatBuffers([videoInitBytes, ...videoBuffers]);
+      const muxed = await muxFmp4(combined);
+      return new Blob([muxed as BlobPart], { type: "video/mp4" });
+    }
+
+    // Branch C: MPEG-TS embedded — transmux to MP4 so users do not need a
+    // transport-stream-specific player.
+    const muxed = transmuxTsToMp4(videoBuffers);
+    return new Blob([muxed as BlobPart], { type: "video/mp4" });
+  } finally {
+    signal.removeEventListener("abort", relayRunAbort);
   }
-
-  return new Blob([concat], { type: "video/mp2t" });
 }

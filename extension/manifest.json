@@ -1,23 +1,38 @@
 {
   "manifest_version": 3,
   "name": "ClipHutch: Web Media Capture",
-  "version": "0.1.0",
-  "description": "Your browser's media shelf. Detect and capture videos web pages load as you browse.",
+  "version": "0.1.4",
+  "description": "Your browser's media shelf. Detect and capture videos and still images web pages load as you browse.",
   "minimum_chrome_version": "116",
   "permissions": [
     "webRequest",
+    "alarms",
     "storage",
     "downloads",
     "offscreen",
-    "declarativeNetRequestWithHostAccess"
+    "declarativeNetRequestWithHostAccess",
+    "sidePanel"
   ],
   "host_permissions": ["http://*/*", "https://*/*"],
   "background": {
     "service_worker": "background.js",
     "type": "module"
   },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["content-script.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; worker-src 'self'; media-src http: https: blob:; img-src http: https: blob: data:;"
+  },
   "action": {
     "default_popup": "popup.html"
+  },
+  "side_panel": {
+    "default_path": "sidepanel.html"
   },
   "options_ui": {
     "page": "options.html",

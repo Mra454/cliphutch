@@ -4,8 +4,7 @@
 // which uses KEYFORMAT="identity" or omits KEYFORMAT entirely. DRM-keyformat
 // streams are never downloadable from a browser context (the segments are
 // encrypted with keys exchanged via EME and decrypted in a CDM/TEE we cannot
-// reach). Plain AES-128 falls through to EncryptedStreamError so v2 can
-// potentially decrypt it.
+// reach). Plain AES-128 falls through so the HLS downloader can decrypt it.
 
 export type DrmScheme = "widevine" | "playready" | "fairplay" | "clearkey" | "unknown";
 

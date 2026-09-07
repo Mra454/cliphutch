@@ -93,29 +93,86 @@
       <h2>5. HLS — master with separate audio rendition</h2>
       <p>
         Master uses <code>EXT-X-MEDIA TYPE=AUDIO URI=...</code> referenced by
-        the variant's <code>AUDIO</code> attribute. Detection must succeed;
-        download must reject with <code>SeparateAudioError</code> in Session 5.
+        the variant's <code>AUDIO</code> attribute. This fixture's audio
+        rendition serves raw-ADTS <code>.aac</code> segments; MPEG-TS and fMP4
+        separate-audio fixtures download in the sections below.
       </p>
       <button data-fetch="hls-master-separate-audio/master.m3u8">Fetch master.m3u8</button>
       <span class="status"></span>
       <p class="expect">
-        <strong>Expect:</strong> popup detects HLS; download fails with the
-        separate-audio message.
+        <strong>Expect:</strong> popup detects HLS; download fails with the raw
+        AAC audio message.
       </p>
     </section>
 
     <section>
       <h2>6. HLS — encrypted (AES-128)</h2>
       <p>
-        Playlist carries <code>EXT-X-KEY METHOD=AES-128</code> with a fake key
-        URI. Detection succeeds; Session 5 must reject with
-        <code>EncryptedStreamError</code>.
+        Playlist carries <code>EXT-X-KEY METHOD=AES-128</code> without an IV.
+        Its real encrypted segments use sequence-derived IVs 0 and 1.
       </p>
       <button data-fetch="hls-encrypted/playlist.m3u8">Fetch playlist.m3u8</button>
       <span class="status"></span>
       <p class="expect">
-        <strong>Expect:</strong> popup detects HLS; download fails with the
-        encrypted message.
+        <strong>Expect:</strong> popup detects HLS; download completes and the
+        resulting MP4 plays.
+      </p>
+    </section>
+
+    <section>
+      <h2>7. HLS — encrypted (AES-128, explicit IV)</h2>
+      <p>
+        Playlist carries an explicit IV and
+        <code>EXT-X-MEDIA-SEQUENCE:5</code>. Both real encrypted segments use
+        the declared IV rather than sequence-derived IVs.
+      </p>
+      <button data-fetch="hls-encrypted-iv/playlist.m3u8">Fetch playlist.m3u8</button>
+      <span class="status"></span>
+      <p class="expect">
+        <strong>Expect:</strong> popup detects HLS; download completes and the
+        resulting MP4 plays.
+      </p>
+    </section>
+
+    <section>
+      <h2>8. HLS — MPEG-TS video with separate MPEG-TS audio</h2>
+      <p>
+        Master uses a default <code>EXT-X-MEDIA TYPE=AUDIO</code> rendition.
+        Both video and audio playlists contain real MPEG-TS segments.
+      </p>
+      <button data-fetch="hls-master-separate-audio-ts/master.m3u8">Fetch master.m3u8</button>
+      <span class="status"></span>
+      <p class="expect">
+        <strong>Expect:</strong> download completes and the MP4 plays with
+        sound.
+      </p>
+    </section>
+
+    <section>
+      <h2>9. HLS — MPEG-TS separate audio with timeline offset</h2>
+      <p>
+        Master uses a default audio rendition. The audio timeline begins after
+        the video timeline.
+      </p>
+      <button data-fetch="hls-master-separate-audio-ts-offset/master.m3u8">Fetch master.m3u8</button>
+      <span class="status"></span>
+      <p class="expect">
+        <strong>Expect:</strong> download completes; audio stays in sync (audio
+        begins about half a second after the first frame).
+      </p>
+    </section>
+
+    <section>
+      <h2>10. HLS — AES-128 MPEG-TS video with separate MPEG-TS audio</h2>
+      <p>
+        Master uses a default audio rendition. The video and audio playlists
+        are encrypted with separate AES-128 keys and sequence-derived IVs.
+      </p>
+      <button data-fetch="hls-master-separate-audio-ts-aes/master.m3u8">Fetch master.m3u8</button>
+      <span class="status"></span>
+      <p class="expect">
+        <strong>Expect:</strong> download completes and the MP4 plays with
+        sound.
       </p>
     </section>
 

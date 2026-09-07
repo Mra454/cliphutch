@@ -17,6 +17,12 @@ describe("classifyUrl — extension matching", () => {
     ["https://a.example/segment.m4s", "segment"],
     ["https://a.example/segment.cmfv", "segment"],
     ["https://a.example/segment.cmfa", "segment"],
+    ["https://a.example/photo.jpg", "image"],
+    ["https://a.example/photo.jpeg", "image"],
+    ["https://a.example/photo.png", "image"],
+    ["https://a.example/photo.webp", "image"],
+    ["https://a.example/photo.avif", "image"],
+    ["https://a.example/photo.gif", "image"],
   ])("%s → %s", (url, expected) => {
     expect(classifyUrl(url).kind).toBe(expected);
   });
@@ -66,6 +72,14 @@ describe("classifyUrl — content-type fallback", () => {
     expect(classifyUrl("https://a.example/page", "text/html").kind).toBe("unknown");
   });
 
+  it("no extension + image/jpeg → image", () => {
+    expect(classifyUrl("https://a.example/photo", "image/jpeg").kind).toBe("image");
+  });
+
+  it("image contentType with parameters is parsed", () => {
+    expect(classifyUrl("https://a.example/photo", "image/webp; charset=binary").kind).toBe("image");
+  });
+
   it("contentType with parameters is parsed", () => {
     expect(classifyUrl("https://a.example/x", "video/mp4; codecs=avc1.4d401f").kind).toBe("direct");
   });
@@ -81,11 +95,38 @@ describe("classifyUrl — content-type fallback", () => {
   it("URL .ts + contentType video/mp2t stays segment", () => {
     expect(classifyUrl("https://a.example/seg.ts", "video/mp2t").kind).toBe("segment");
   });
+
+  it("known extension wins over generic binary MIME", () => {
+    expect(classifyUrl("https://a.example/v.mp4?sig=abc", "application/octet-stream").kind).toBe(
+      "direct",
+    );
+    expect(classifyUrl("https://a.example/p.m3u8?sig=abc", "binary/octet-stream").kind).toBe(
+      "hls",
+    );
+  });
+
+  it("text/plain is accepted only for a known manifest extension", () => {
+    expect(classifyUrl("https://a.example/p.m3u8", "text/plain").kind).toBe("hls");
+    expect(classifyUrl("https://a.example/manifest.mpd", "text/plain").kind).toBe("dash");
+    expect(classifyUrl("https://a.example/v.mp4", "text/plain").kind).toBe("unknown");
+  });
+
+  it.each(["video/mp2t", "audio/mp2t", "video/iso.segment", "audio/iso.segment"])(
+    "extensionless segment MIME %s → segment",
+    (mime) => {
+      expect(classifyUrl("https://a.example/chunk?token=signed", mime).kind).toBe("segment");
+    },
+  );
+
+  it("HTML remains authoritative over a signed media-looking URL", () => {
+    expect(classifyUrl("https://a.example/v.mp4?token=expired", "text/html").kind).toBe(
+      "unknown",
+    );
+  });
 });
 
 describe("classifyUrl — non-video and edge cases", () => {
   it.each([
-    "https://a.example/image.png",
     "https://a.example/script.js",
     "https://a.example/page.html",
     "https://a.example/data.json",
