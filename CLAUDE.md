@@ -63,7 +63,7 @@ ClipHutch uses **honest-user client-side licensing**. `isLicensed()` in `extensi
 
 ## CWS submission status
 
-Item ID: `pdpcameeghhppjbhecolnhdepceeldhl`. Version 0.1.3 is customer-live. The 0.1.4 candidate **merged to master on 2026-09-06 (PR #1, merge commit `f46e95c`)** and is not uploaded, approved, or deployed. Its development gate is green on master (88 test files, 1,269 tests, 6 TypeScript projects, distribution audit PASS). Remaining release gates: clean-tag packaging, the Chrome 116/current-stable manual matrix, MV3 lifecycle cases, accessibility passes, and the product-value task.
+Item ID: `pdpcameeghhppjbhecolnhdepceeldhl`. Version 0.1.3 is customer-live. The 0.1.4 candidate merged to master on 2026-09-06 (PR #1, merge commit `f46e95c`), was packaged from tag `cliphutch-v0.1.4-candidate-2026-09-06` (verify:source, package, verify:package all passed; archive SHA-256 `a21843ecd7103a6fcb10df8989c3ace3be4749596c2f002796183e7bdaacfe5e`), and **was submitted for Chrome Web Store review on 2026-09-07 with manual publish**. Do not publish until the production Worker carries the v2 license routes (see the backend section below); 0.1.4 calls `/v2/activate`, `/v2/status` and `/v2/deactivate`, which the live Worker (version `dd889c50…`, 2026-07-30) does not serve. Waived by the founder for this release: the synthetic-row staging acceptance run, the refund-safe hotfix, the Chrome 116/current-stable manual matrix, accessibility passes, and the product-value task; a live $35 purchase-and-refund canary after publication replaces the Stripe test-mode rehearsal.
 
 Pre-submission codex audit (2026-04-28) — resolved blockers:
 - B1 host-permissions claim, B2 server-contact claim, B3 active-tab claim: copy fixed across all three docs.
