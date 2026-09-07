@@ -90,3 +90,14 @@ license-validation failures, or unexpected entitlement transitions. Stop or
 reroute Stripe webhook delivery before reverting to a refund-unsafe version.
 Database rollback requires a separately approved D1 recovery decision; Worker
 version rollback does not undo mutations.
+
+## Refund disposition, read from Stripe on 2026-09-07
+
+Both production refunded rows are full reversals of the $35 ClipHutch License purchase, made within minutes of the live Payment Link's creation on 2026-04-27, and refunded within eleven minutes. That pattern is consistent with the founder's own end-to-end test purchases. Disposition: mark both licenses refunded and revoke any activations, through the journaled repair path, after rehearsal on staging.
+
+| Payment intent | Amount | Method | Created | Refunded | Stripe status |
+| --- | --- | --- | --- | --- | --- |
+| `pi_3TQgi5GQjeGFY4e529g3KPQy` | $35.00 USD | Amazon Pay | 2026-04-27 04:23 | 2026-04-27 04:34 | Reversed (full) |
+| `pi_3TRDorGQjeGFY4e534VIWiBg` | $35.00 USD | card ending 9615 | 2026-04-28 15:45 | 2026-04-28 15:46 | Reversed (full) |
+
+Related facts read the same day: the live ClipHutch Payment Link is `plink_1TQgVeGQjeGFY4e5OMj57lO0` (now set in `wrangler.toml` for production). Stripe test mode has no ClipHutch payment link and no ClipHutch webhook endpoint; the only test-mode objects belong to Recoup Radar. The live webhook endpoint for ClipHutch is `https://cliphutch-api.mra454.workers.dev/stripe-webhook`. Customer identifiers are intentionally not recorded here.
