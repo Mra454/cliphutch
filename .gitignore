@@ -8,3 +8,6 @@ release-artifacts
 .DS_Store
 .env
 *.zip
+
+# local smoke evidence (recorded in the runbook, not committed)
+cloudflare/smoke-evidence-*.json
