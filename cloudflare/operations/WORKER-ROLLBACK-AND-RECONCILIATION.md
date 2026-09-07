@@ -107,3 +107,11 @@ Related facts read the same day: the live ClipHutch Payment Link ID is now set i
 ## Staging Worker deployed 2026-09-07
 
 `cliphutch-api-staging` created from master `436ce0f` with placeholder secrets (staging never contacts Stripe or Resend; the founder chose a live purchase-and-refund canary after the production deploy instead of a test-mode link). Version `69151a1c-2b44-47ff-981e-6baa5d8d3fa7`; `npm run smoke:version` verified it and wrote `smoke-evidence-staging.json` (kept out of git). Staging D1 reports no pending migrations. `/v2/activate`, `/v2/status`, `/v2/deactivate` return `400 BAD_REQUEST` JSON for malformed input with the extension origin allowed; preflight returns 204; a foreign origin receives no allow header. Staging acceptance items 1, 2, 7, 8 and 9 (Checkout and refund webhooks) cannot run here without test-mode Stripe secrets and remain covered by the Worker unit tests plus the live canary; items 3 to 6, 10 and 11 still need a synthetic-row run against staging.
+
+## Production Worker promoted 2026-09-07 (ticket CH-0.1.4-worker-2026-09-07)
+
+- Pre-migration D1 Time Travel bookmark: `0000001d-00000000-000050df-47fc502e6ca6073930317f21a25e4ad4`.
+- Migrations `0003_add_mutation_journal.sql` and `0004_add_refund_event_expiry.sql` applied to `cliphutch-licenses`; none pending.
+- Candidate `3fc0e789-9e45-4339-ad49-a9a8c8b6f2c2` uploaded from master `26a0f02`, staged at 0% beside `dd889c50-c33d-485e-ae3f-87223457a250`, verified through the version-override smoke (the first attempt ran within a second of staging and did not match; the retry passed), then promoted to 100%. `dd889c50` remains at 0% as the rollback target and is refund-unsafe: pause Stripe webhook delivery before any rollback to it.
+- Post-promotion probes without the override header: health reports the new version and `environment: production`; `/v2/activate`, `/v2/status`, `/v2/deactivate` and the legacy `/validate` return `400 BAD_REQUEST` JSON for malformed input; an unsigned `/stripe-webhook` POST returns 401. The 404s seen on two v2 routes in the first seconds after promotion were propagation and cleared within three seconds.
+- Waived by the founder for this release: the synthetic-row staging acceptance run and the refund-safe hotfix. Replacement control: one live $35 purchase-and-refund canary after the 0.1.4 extension is published.
